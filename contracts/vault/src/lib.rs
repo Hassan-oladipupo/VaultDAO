@@ -1497,6 +1497,23 @@ impl VaultDAO {
         storage::get_insurance_pool(&env, &token_addr)
     }
 
+    /// Get the current vault configuration.
+    ///
+    /// Returns the full [`Config`] struct so that frontends and SDKs can read
+    /// all vault parameters (signers, thresholds, limits, etc.) in a single
+    /// contract call without relying on internal storage assumptions.
+    ///
+    /// This is a read-only view function — it performs no state mutations and
+    /// requires no authorization.
+    ///
+    /// # Errors
+    /// Returns [`VaultError::NotInitialized`] if the vault has not been
+    /// initialized yet.
+    pub fn get_config(env: Env) -> Result<Config, VaultError> {
+        storage::extend_instance_ttl(&env);
+        storage::get_config(&env)
+    }
+
     /// Get role for an address
     pub fn get_role(env: Env, addr: Address) -> Role {
         storage::get_role(&env, &addr)

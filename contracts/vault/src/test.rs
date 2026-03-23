@@ -7361,3 +7361,93 @@ fn test_conviction_voting_strategy() {
 }
 
 
+
+// ============================================================================
+// get_config tests (feature/public-vault-config-getter)
+// ============================================================================
+
+/// get_config returns NotInitialized when the vault has not been set up yet.
+#[test]
+fn test_get_config_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let result = client.try_get_config();
+    assert_eq!(result, Err(Ok(VaultError::NotInitialized)));
+}
+
+/// get_config returns the correct config after initialization.
+#[test]
+fn test_get_config_after_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+
+    let mut signers = soroban_sdk::Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+    signers.push_back(signer2.clone());
+
+    let init_cfg = default_init_config(&env, signers.clone(), 2);
+    client.initialize(&admin, &init_cfg);
+
+    let config = client.get_config();
+
+    // Verify all fields match what was passed at initialization
+    assert_eq!(config.threshold, 2);
+    assert_eq!(config.signers.len(), 3);
+    assert!(config.signers.contains(&admin));
+    assert!(config.signers.contains(&signer1));
+    assert!(config.signers.contains(&signer2));
+    assert_eq!(config.spending_limit, init_cfg.spending_limit);
+    assert_eq!(config.daily_limit, init_cfg.daily_limit);
+    assert_eq!(config.weekly_limit, init_cfg.weekly_limit);
+    assert_eq!(config.timelock_threshold, init_cfg.timelock_threshold);
+    assert_eq!(config.timelock_delay, init_cfg.timelock_delay);
+    assert_eq!(config.quorum, 0);
+}
+
+/// get_config reflects updates made via update_threshold.
+#[test]
+fn test_get_config_reflects_updates() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+
+    let mut signers = soroban_sdk::Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+    signers.push_back(signer2.clone());
+
+    let init_cfg = default_init_config(&env, signers.clone(), 1);
+    client.initialize(&admin, &init_cfg);
+
+    // Confirm initial threshold
+    let config_before = client.get_config();
+    assert_eq!(config_before.threshold, 1);
+
+    // Update threshold via the public admin function
+    client.update_threshold(&admin, &2);
+
+    // get_config should now reflect the new threshold
+    let config_after = client.get_config();
+    assert_eq!(config_after.threshold, 2);
+    // Other fields remain unchanged
+    assert_eq!(config_after.spending_limit, config_before.spending_limit);
+    assert_eq!(config_after.daily_limit, config_before.daily_limit);
+}
