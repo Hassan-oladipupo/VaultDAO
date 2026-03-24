@@ -82,7 +82,7 @@ pub struct InitConfig {
     pub retry_config: RetryConfig,
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
-    // pub staking_config: StakingConfig, // Feature incomplete
+    pub staking_config: StakingConfig,
 }
 
 /// Vault configuration
@@ -123,7 +123,7 @@ pub struct Config {
     pub retry_config: RetryConfig,
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
-    // pub staking_config: StakingConfig, // Feature incomplete
+    pub staking_config: StakingConfig,
 }
 
 /// Audit record for a cancelled proposal
@@ -213,6 +213,14 @@ pub enum Role {
     Treasurer = 1,
     /// Full operational control: manages roles, signers, and configuration.
     Admin = 2,
+}
+
+/// Address-role pair returned by role enumeration queries.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoleAssignment {
+    pub addr: Address,
+    pub role: Role,
 }
 
 /// Granular permissions for fine-grained access control

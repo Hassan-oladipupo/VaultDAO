@@ -26,8 +26,8 @@ use crate::types::{
     DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot, FeeStructure, FundingRound,
     FundingRoundConfig, GasConfig, InsuranceConfig, ListMode, NotificationPreferences,
     PermissionGrant, Proposal, ProposalAmendment, ProposalTemplate, RecoveryProposal, Reputation,
-    RetryState, Role, StakeRecord, StakingConfig, SwapProposal, SwapResult, TimeWeightedConfig,
-    TokenLock, VaultMetrics, VelocityConfig, VotingStrategy,
+    RetryState, Role, RoleAssignment, StakeRecord, StakingConfig, SwapProposal, SwapResult,
+    TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy,
 };
 
 /// Core storage key definitions (kept minimal to avoid size limits)
@@ -40,6 +40,8 @@ pub enum DataKey {
     Config,
     /// Role assignment for address -> Role
     Role(Address),
+    /// Index of addresses with explicitly tracked roles -> Vec<Address>
+    RoleIndex,
     /// Proposal by ID -> Proposal
     Proposal(u64),
     /// Next proposal ID counter -> u64
@@ -284,6 +286,38 @@ pub fn set_role(env: &Env, addr: &Address, role: Role) {
     env.storage()
         .persistent()
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    add_role_index_address(env, addr);
+}
+
+pub fn get_role_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&DataKey::RoleIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn add_role_index_address(env: &Env, addr: &Address) {
+    let mut index = get_role_index(env);
+    if !index.contains(addr) {
+        index.push_back(addr.clone());
+        env.storage().instance().set(&DataKey::RoleIndex, &index);
+    }
+}
+
+pub fn get_role_assignments(env: &Env) -> Vec<RoleAssignment> {
+    let index = get_role_index(env);
+    let mut assignments = Vec::new(env);
+
+    for i in 0..index.len() {
+        if let Some(addr) = index.get(i) {
+            assignments.push_back(RoleAssignment {
+                role: get_role(env, &addr),
+                addr,
+            });
+        }
+    }
+
+    assignments
 }
 
 // ============================================================================

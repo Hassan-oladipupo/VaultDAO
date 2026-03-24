@@ -2432,9 +2432,143 @@ fn test_percentage_threshold_strategy() {
 }
 
 #[test]
-#[ignore]
 fn test_amount_based_threshold_strategy() {
-    // TODO: Debug amount-based threshold calculation
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+    let signer3 = Address::generate(&env);
+    let user = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&contract_id, &10_000);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+    signers.push_back(signer2.clone());
+    signers.push_back(signer3.clone());
+
+    // Intentionally unsorted tiers to verify selection is based on the highest
+    // matching amount boundary, not tier insertion order.
+    let mut tiers = Vec::new(&env);
+    tiers.push_back(types::AmountTier {
+        amount: 500,
+        approvals: 3,
+    });
+    tiers.push_back(types::AmountTier {
+        amount: 100,
+        approvals: 2,
+    });
+    tiers.push_back(types::AmountTier {
+        amount: 1000,
+        approvals: 4,
+    });
+
+    let config = InitConfig {
+        signers,
+        threshold: 1,
+        quorum: 0,
+        default_voting_deadline: 0,
+        spending_limit: 5000,
+        daily_limit: 50_000,
+        weekly_limit: 100_000,
+        timelock_threshold: 10_000,
+        timelock_delay: 100,
+        velocity_limit: VelocityConfig {
+            limit: 100,
+            window: 3600,
+        },
+        threshold_strategy: ThresholdStrategy::AmountBased(tiers),
+        veto_addresses: Vec::new(&env),
+        retry_config: RetryConfig {
+            enabled: false,
+            max_retries: 0,
+            initial_backoff_ledgers: 0,
+        },
+        recovery_config: crate::types::RecoveryConfig::default(&env),
+        staking_config: types::StakingConfig::default(),
+    };
+    client.initialize(&admin, &config);
+    client.set_role(&admin, &signer1, &Role::Treasurer);
+    client.set_role(&admin, &signer2, &Role::Treasurer);
+    client.set_role(&admin, &signer3, &Role::Treasurer);
+
+    // Amount below lowest tier -> falls back to base threshold (1).
+    let p1 = client.propose_transfer(
+        &signer1,
+        &user,
+        &token,
+        &99,
+        &Symbol::new(&env, "low"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&signer1, &p1);
+    assert_eq!(client.get_proposal(&p1).status, ProposalStatus::Approved);
+
+    // Exactly on 100 tier boundary -> requires 2 approvals.
+    let p2 = client.propose_transfer(
+        &signer1,
+        &user,
+        &token,
+        &100,
+        &Symbol::new(&env, "t100"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&signer1, &p2);
+    assert_eq!(client.get_proposal(&p2).status, ProposalStatus::Pending);
+    client.approve_proposal(&signer2, &p2);
+    assert_eq!(client.get_proposal(&p2).status, ProposalStatus::Approved);
+
+    // Exactly on 500 tier boundary -> requires 3 approvals.
+    let p3 = client.propose_transfer(
+        &signer1,
+        &user,
+        &token,
+        &500,
+        &Symbol::new(&env, "t500"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&signer1, &p3);
+    client.approve_proposal(&signer2, &p3);
+    assert_eq!(client.get_proposal(&p3).status, ProposalStatus::Pending);
+    client.approve_proposal(&signer3, &p3);
+    assert_eq!(client.get_proposal(&p3).status, ProposalStatus::Approved);
+
+    // Exactly on 1000 tier boundary -> requires all 4 approvals.
+    let p4 = client.propose_transfer(
+        &signer1,
+        &user,
+        &token,
+        &1000,
+        &Symbol::new(&env, "t1000"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&signer1, &p4);
+    client.approve_proposal(&signer2, &p4);
+    client.approve_proposal(&signer3, &p4);
+    assert_eq!(client.get_proposal(&p4).status, ProposalStatus::Pending);
+    client.approve_proposal(&admin, &p4);
+    assert_eq!(client.get_proposal(&p4).status, ProposalStatus::Approved);
 }
 
 #[test]
@@ -7048,19 +7182,56 @@ fn test_fees_collected_tracking() {
     // and verify fees are collected
 }
 
+#[test]
+fn test_veto_blocks_execution() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+    let vetoer = Address::generate(&env);
+    let user = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&contract_id, &1000);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+    signers.push_back(signer2.clone());
+
     let mut veto_addresses = Vec::new(&env);
     veto_addresses.push_back(vetoer.clone());
 
     let config = InitConfig {
         signers,
         threshold: 2,
+        quorum: 0,
+        default_voting_deadline: 0,
         spending_limit: 1000,
         daily_limit: 5000,
         weekly_limit: 10000,
         timelock_threshold: 5000,
         timelock_delay: 100,
+        velocity_limit: VelocityConfig {
+            limit: 100,
+            window: 3600,
+        },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses,
+        retry_config: RetryConfig {
+            enabled: false,
+            max_retries: 0,
+            initial_backoff_ledgers: 0,
+        },
+        recovery_config: crate::types::RecoveryConfig::default(&env),
+        staking_config: types::StakingConfig::default(),
     };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -7075,20 +7246,19 @@ fn test_fees_collected_tracking() {
         &Priority::Critical,
         &Vec::new(&env),
         &ConditionLogic::And,
+        &0i128,
     );
 
     client.approve_proposal(&signer1, &proposal_id);
     client.approve_proposal(&signer2, &proposal_id);
-    assert_eq!(
-        client.get_proposal(&proposal_id).status,
-        ProposalStatus::Approved
-    );
+    assert_eq!(client.get_proposal(&proposal_id).status, ProposalStatus::Approved);
 
     client.veto_proposal(&vetoer, &proposal_id);
     assert_eq!(client.get_proposal(&proposal_id).status, ProposalStatus::Vetoed);
 
     let res = client.try_execute_proposal(&admin, &proposal_id);
     assert_eq!(res.err(), Some(Ok(VaultError::ProposalNotApproved)));
+}
 
 #[test]
 fn test_execution_rollback_restores_proposal_status_on_transfer_failure() {
@@ -7540,6 +7710,37 @@ fn test_set_role_overwrite() {
     // Downgrade back to Member
     client.set_role(&admin, &user, &Role::Member);
     assert_eq!(client.get_role(&user), Role::Member);
+}
+
+#[test]
+fn test_get_role_assignments_includes_signers_and_updates() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let mut signers = soroban_sdk::Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+
+    let initial = client.get_role_assignments();
+    assert_eq!(initial.len(), 2);
+    assert_eq!(initial.get(0).unwrap().addr, admin);
+    assert_eq!(initial.get(0).unwrap().role, Role::Admin);
+    assert_eq!(initial.get(1).unwrap().addr, signer1);
+    assert_eq!(initial.get(1).unwrap().role, Role::Member);
+
+    client.set_role(&admin, &user, &Role::Treasurer);
+    let updated = client.get_role_assignments();
+    assert_eq!(updated.len(), 3);
+    assert_eq!(updated.get(2).unwrap().addr, user);
+    assert_eq!(updated.get(2).unwrap().role, Role::Treasurer);
 }
 
 /// set_role fails before the vault is initialized.
