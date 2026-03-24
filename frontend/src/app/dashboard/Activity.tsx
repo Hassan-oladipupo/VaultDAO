@@ -30,7 +30,11 @@ const Activity: React.FC = () => {
     updatePresence('online', 'Activity');
 
     const unsubscribe = subscribe('activity_new', (data: VaultActivity) => {
-      setLoadedTransactions((prev) => [data, ...prev]);
+      setLoadedTransactions((prev) => {
+        const merged = [data, ...prev];
+        const deduped = Array.from(new Map(merged.map((item) => [item.id, item])).values());
+        return deduped.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      });
     });
 
     return () => {
