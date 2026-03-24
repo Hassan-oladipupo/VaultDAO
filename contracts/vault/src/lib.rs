@@ -27,10 +27,10 @@ use types::{
     FundingRoundConfig, FundingRoundStatus, GasConfig, InitConfig, InsuranceConfig, ListMode,
     Milestone, NotificationPreferences, OptionalVaultOracleConfig, Priority, Proposal,
     ProposalAmendment, ProposalStatus, ProposalTemplate, RecoveryConfig, RecoveryProposal,
-    RecoveryStatus, RecurringPayment, Reputation, RetryConfig, RetryState, Role, StreamStatus,
-    StreamingPayment, Subscription, SubscriptionPayment, SubscriptionStatus, SubscriptionTier,
-    SwapProposal, SwapResult, TemplateOverrides, ThresholdStrategy, TransferDetails, VaultMetrics,
-    VaultOracleConfig, VaultPriceData, VotingStrategy,
+    RecoveryStatus, RecurringPayment, Reputation, RetryConfig, RetryState, Role, RoleAssignment,
+    StreamStatus, StreamingPayment, Subscription, SubscriptionPayment, SubscriptionStatus,
+    SubscriptionTier, SwapProposal, SwapResult, TemplateOverrides, ThresholdStrategy,
+    TransferDetails, VaultMetrics, VaultOracleConfig, VaultPriceData, VotingStrategy,
 };
 
 /// The main contract structure for VaultDAO.
@@ -76,6 +76,11 @@ fn calculate_expiration_ledger(config: &Config, priority: &Priority, current_led
     let configured = config.default_voting_deadline.max(PROPOSAL_EXPIRY_LEDGERS);
     current_ledger + configured.saturating_mul(multiplier)
 }
+
+#[cfg(test)]
+mod test_hooks;
+#[cfg(test)]
+mod test_regressions;
 
 #[contractimpl]
 #[allow(clippy::too_many_arguments)]
@@ -138,12 +143,16 @@ impl VaultDAO {
             veto_addresses: config.veto_addresses,
             retry_config: config.retry_config,
             recovery_config: config.recovery_config.clone(),
+            staking_config: config.staking_config,
         };
 
         // Store state
         storage::set_config(&env, &config_storage);
         storage::set_voting_strategy(&env, &VotingStrategy::Simple);
         storage::set_role(&env, &admin, Role::Admin);
+        for signer in config_storage.signers.iter() {
+            storage::add_role_index_address(&env, &signer);
+        }
         storage::set_initialized(&env);
         storage::extend_instance_ttl(&env);
 
@@ -1664,6 +1673,11 @@ impl VaultDAO {
         storage::get_role(&env, &addr)
     }
 
+    /// Return all known role assignments for dashboard/admin views.
+    pub fn get_role_assignments(env: Env) -> Vec<RoleAssignment> {
+        storage::get_role_assignments(&env)
+    }
+
     /// Get daily spending for a given day
     pub fn get_daily_spent(env: Env, day: u64) -> i128 {
         storage::get_daily_spent(&env, day)
@@ -2994,11 +3008,13 @@ impl VaultDAO {
                 (signers * (u64::from(*pct))).div_ceil(100).max(1) as u32
             }
             ThresholdStrategy::AmountBased(tiers) => {
-                // Find the highest tier whose amount is <= proposal amount
+                // Use the best matching tier regardless of input order.
                 let mut threshold = config.threshold;
+                let mut best_amount = i128::MIN;
                 for i in 0..tiers.len() {
                     if let Some(tier) = tiers.get(i) {
-                        if *amount >= tier.amount {
+                        if *amount >= tier.amount && tier.amount >= best_amount {
+                            best_amount = tier.amount;
                             threshold = tier.approvals;
                         }
                     }
@@ -3618,6 +3634,16 @@ impl VaultDAO {
         storage::extend_instance_ttl(&env);
         events::emit_hook_removed(&env, &hook, false);
         Ok(())
+    }
+
+    /// Return currently registered pre-execution hooks.
+    pub fn get_pre_hooks(env: Env) -> Result<Vec<Address>, VaultError> {
+        Ok(storage::get_config(&env)?.pre_execution_hooks)
+    }
+
+    /// Return currently registered post-execution hooks.
+    pub fn get_post_hooks(env: Env) -> Result<Vec<Address>, VaultError> {
+        Ok(storage::get_config(&env)?.post_execution_hooks)
     }
 
     fn call_hook(env: &Env, hook: &Address, proposal_id: u64, is_pre: bool) {

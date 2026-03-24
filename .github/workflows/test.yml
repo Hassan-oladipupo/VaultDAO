@@ -26,7 +26,7 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          working-directory: contracts/vault
+          workspaces: contracts/vault
 
       - name: Run fmt check
         run: cargo fmt --all -- --check
