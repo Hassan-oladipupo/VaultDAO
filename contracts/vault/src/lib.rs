@@ -980,12 +980,22 @@ impl VaultDAO {
             }
         }
 
+        // Execute pre-hooks
+        for hook in config.pre_execution_hooks.iter() {
+            Self::call_hook(&env, &hook, proposal_id, true);
+        }
+
         // Attempt execution — retryable failures are handled below
         let exec_result =
             Self::try_execute_transfer(&env, &executor, &mut proposal, current_ledger);
 
         match exec_result {
             Ok(()) => {
+                // Execute post-hooks
+                for hook in config.post_execution_hooks.iter() {
+                    Self::call_hook(&env, &hook, proposal_id, false);
+                }
+
                 // Update proposal status
                 proposal.status = ProposalStatus::Executed;
                 storage::set_proposal(&env, &proposal);
