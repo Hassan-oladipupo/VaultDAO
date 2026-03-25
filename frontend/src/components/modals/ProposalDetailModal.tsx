@@ -3,6 +3,7 @@ import { X, Copy, CheckCircle2, Clock, PlayCircle, Ban, UserCheck, MessageSquare
 
 import SignatureStatus, { type Signer } from '../SignatureStatus';
 import SignatureFlow, { type FlowStep } from '../SignatureFlow';
+import QRSignature from '../QRSignature';
 import { useVaultContract } from '../../hooks/useVaultContract';
 import { useWallet } from '../../hooks/useWallet';
 
@@ -30,7 +31,7 @@ interface ProposalDetailModalProps {
 
 const ProposalDetailModal: React.FC<ProposalDetailModalProps> = ({ isOpen, onClose, proposal }) => {
     const [activeTab, setActiveTab] = useState<'details' | 'comments'>('details');
-    const { getProposalSignatures, approveProposal, rejectProposal } = useVaultContract();
+    const { getProposalSignatures, approveProposal, rejectProposal, exportSignatures } = useVaultContract();
     const { address } = useWallet();
     const [signers, setSigners] = useState<Signer[]>([]);
 const [actionLoading, setActionLoading] = useState<'approve' | 'reject' | null>(null);
@@ -89,15 +90,14 @@ const loadSignatures = useCallback(async () => {
     };
 
     const handleExport = () => {
-const handleExport = () => {
-    void exportSignatures(parseInt(proposal.id));
-};
+        void exportSignatures(parseInt(proposal.id));
+    };
 
-const handleRefreshSignatures = async () => {
-    if (!proposal) return;
-    const updated = await getProposalSignatures(parseInt(proposal.id)) ?? [];
-    setSigners(updated);
-};
+    const handleRefreshSignatures = async () => {
+        if (!proposal) return;
+        const updated = await getProposalSignatures(parseInt(proposal.id)) ?? [];
+        setSigners(updated);
+    };
 
     };
 
