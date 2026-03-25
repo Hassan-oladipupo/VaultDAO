@@ -2,16 +2,7 @@ import express, { Request, Response, NextFunction } from "express";
 import type { BackendEnv } from "./config/env.js";
 import type { BackendRuntime } from "./server.js";
 import { createHealthRouter } from "./modules/health/health.routes.js";
-import { generateRequestId, REQUEST_ID_HEADER } from "../shared/http/requestId.js";
-
-declare global {
-  namespace Express {
-    interface Request {
-      requestId: string;
-    }
-  }
-}
-
+import { error } from "../shared/http/response.js";
 
 export function createApp(env: BackendEnv, runtime: BackendRuntime) {
   const app = express();
@@ -31,12 +22,8 @@ export function createApp(env: BackendEnv, runtime: BackendRuntime) {
   app.use(express.json());
   app.use(createHealthRouter(env, runtime));
 
-  app.use((req: Request, res: Response) => {
-    res.status(404).json({ 
-      ok: false, 
-      error: "Not Found",
-      requestId: req.requestId 
-    });
+  app.use((_request, response) => {
+    error(response, { message: "Not Found", status: 404 });
   });
 
   return app;
