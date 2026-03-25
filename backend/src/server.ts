@@ -1,7 +1,7 @@
 import type { BackendEnv } from "./config/env.js";
 import { loadEnv } from "./config/env.js";
 import { createApp } from "./app.js";
-import { EventPollingService } from "./modules/events/index.js";
+import { EventPollingService, FileCursorAdapter } from "./modules/events/index.js";
 
 export interface BackendRuntime {
   readonly startedAt: string;
@@ -11,7 +11,10 @@ export interface BackendRuntime {
 export function startServer(env: BackendEnv = loadEnv()) {
   const runtime: BackendRuntime = {
     startedAt: new Date().toISOString(),
-    eventPollingService: new EventPollingService(env),
+    eventPollingService: new EventPollingService(
+      env,
+      new FileCursorAdapter(),
+    ),
   };
   
   // Start background services

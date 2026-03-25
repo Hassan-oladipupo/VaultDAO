@@ -1,11 +1,12 @@
 import type { BackendEnv } from "../../config/env.js";
 import type { ContractEvent, PollingState } from "./events.types.js";
+import type { CursorStorage } from "./cursor/index.js";
 
 /**
  * EventPollingService
  * 
  * A background service that polls the Soroban RPC for contract events.
- * This is a scaffold for future event-driven indexing work.
+ * Now supports cursor persistence to resume safely across restarts.
  */
 export class EventPollingService {
   private isRunning: boolean = false;
@@ -13,7 +14,10 @@ export class EventPollingService {
   private lastLedgerPolled: number = 0;
   private consecutiveErrors: number = 0;
 
-  constructor(private readonly env: BackendEnv) {}
+  constructor(
+    private readonly env: BackendEnv,
+    private readonly storage: CursorStorage,
+  ) {}
 
   /**
    * Starts the polling loop if enabled in config.
@@ -25,14 +29,23 @@ export class EventPollingService {
       return;
     }
 
+    // Load last cursor from storage
+    const lastCursor = await this.storage.getCursor();
+    if (lastCursor) {
+      this.lastLedgerPolled = lastCursor.lastLedger;
+      console.log(`[events-service] resuming from cursor: ledger ${this.lastLedgerPolled}`);
+    } else {
+      // Default to 0 or a safe starter ledger from env
+      this.lastLedgerPolled = 0;
+      console.log("[events-service] no cursor found, starting from default ledger 0");
+    }
+
     this.isRunning = true;
     console.log("[events-service] starting event polling loop");
     console.log(`- rpc: ${this.env.sorobanRpcUrl}`);
     console.log(`- contract: ${this.env.contractId}`);
     console.log(`- interval: ${this.env.eventPollingIntervalMs}ms`);
 
-    // In a real implementation, we might want to load the last polled ledger from a database/cache here.
-    
     this.scheduleNextPoll();
   }
 
@@ -95,6 +108,12 @@ export class EventPollingService {
     // Advance the "last polled" pointer (simulation)
     // Normally this would be updated based on the last event's ledger or the RPC's newest ledger.
     this.lastLedgerPolled += 1;
+
+    // Persist new cursor
+    await this.storage.saveCursor({
+      lastLedger: this.lastLedgerPolled,
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   /**
