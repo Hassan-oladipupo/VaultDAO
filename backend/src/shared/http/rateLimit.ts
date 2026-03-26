@@ -92,7 +92,7 @@ export class RateLimiter {
    */
   private startCleanup(): void {
     const cleanupInterval = Math.min(60000, this.config.windowMs); // At least every minute
-    setInterval(() => {
+    const handle = setInterval(() => {
       const now = Date.now();
       for (const [clientId, state] of this.clients.entries()) {
         if (now >= state.resetTime) {
@@ -100,6 +100,7 @@ export class RateLimiter {
         }
       }
     }, cleanupInterval);
+    handle.unref();
   }
 
   /**

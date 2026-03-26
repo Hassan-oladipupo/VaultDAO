@@ -12,7 +12,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/**/*.test.js",
+    "test": "npm run build && find dist -name '*.test.js' -type f -print0 | xargs -0 node --test",
     "lint": "npm run typecheck",
     "start": "node dist/index.js",
     "replay": "tsx src/modules/events/replay/replay-cli.ts"

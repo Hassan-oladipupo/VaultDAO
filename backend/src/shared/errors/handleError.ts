@@ -49,7 +49,7 @@ export function handleError(
 
 // Type guard/middleware factory
 export function createErrorMiddleware(env: BackendEnv) {
-  return (error: unknown, req: Request, res: Response, next: NextFunction) => {
+  return (error: unknown, req: Request, res: Response, _next: NextFunction) => {
     handleError(error, req, res, env);
   };
 }
