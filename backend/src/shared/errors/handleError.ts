@@ -1,6 +1,6 @@
-import type { Request, Response, NextFunction } from 'express';
-import type { BackendEnv } from '../../config/env.js';
-import { AppError, InternalServerError } from './AppError.js';
+import type { Request, Response, NextFunction } from "express";
+import type { BackendEnv } from "../../config/env.js";
+import { AppError, InternalServerError } from "./AppError.js";
 
 interface ErrorResponse {
   message: string;
@@ -13,7 +13,7 @@ export function handleError(
   error: unknown,
   _request: Request,
   response: Response,
-  env: BackendEnv
+  env: BackendEnv,
 ): void {
   let appError: AppError;
 
@@ -21,12 +21,12 @@ export function handleError(
     appError = error;
   } else {
     // Unexpected error
-    console.error('[app-error] Unexpected error:', {
+    console.error("[app-error] Unexpected error:", {
       at: new Date().toISOString(),
       error: error,
       stack: error instanceof Error ? error.stack : undefined,
     });
-    appError = new InternalServerError('An unexpected error occurred');
+    appError = new InternalServerError("An unexpected error occurred");
   }
 
   const responseBody = {
@@ -36,7 +36,7 @@ export function handleError(
     } as ErrorResponse,
   };
 
-  if (env.nodeEnv === 'development') {
+  if (env.nodeEnv === "development") {
     (responseBody.error as ErrorResponse).statusCode = appError.statusCode;
     (responseBody.error as ErrorResponse).name = appError.name;
     if (!appError.isOperational) {
@@ -49,8 +49,7 @@ export function handleError(
 
 // Type guard/middleware factory
 export function createErrorMiddleware(env: BackendEnv) {
-  return (error: unknown, req: Request, res: Response, next: NextFunction) => {
+  return (error: unknown, req: Request, res: Response, _next: NextFunction) => {
     handleError(error, req, res, env);
   };
 }
-
