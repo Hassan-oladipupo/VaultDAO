@@ -42,7 +42,20 @@ test("builds a status payload", () => {
 
   assert.equal(payload.service, "vaultdao-backend");
   assert.equal(payload.environment, "test");
+  assert.equal(payload.contractId, "CDTEST");
   assert.match(payload.rpcUrl, /soroban-testnet/);
+});
+
+test("health and status mask contractId in production", () => {
+  const longId =
+    "CDO4B7X6FUM2YUH2BNVQKSHSM5M7XED3SFEHVYJ4V47PVML2P5FCHQ4";
+  const prodEnv = { ...mockEnv, nodeEnv: "production", contractId: longId };
+
+  const health = buildHealthPayload(prodEnv, mockRuntime as any);
+  const status = buildStatusPayload(prodEnv, mockRuntime as any);
+
+  assert.equal(health.contractId, `${longId.slice(0, 6)}...${longId.slice(-6)}`);
+  assert.equal(status.contractId, health.contractId);
 });
 
 test("builds a readiness payload with dependency checks", () => {

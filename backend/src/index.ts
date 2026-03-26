@@ -2,16 +2,12 @@ import type { BackendEnv } from "./config/env.js";
 import { loadEnv } from "./config/env.js";
 import { startServer } from "./server.js";
 import { createLogger } from "./shared/logging/logger.js";
+import { maskContractId } from "./shared/utils/mask.js";
 import { LifecycleManager } from "./app/lifecycle/lifecycle-manager.js";
 import { RealtimeServer, createRealtimeTopic } from "./modules/realtime/index.js";
 import { InMemoryNotificationQueue } from "./modules/notifications/index.js";
 import { ScheduledJobRunner } from "./modules/jobs/index.js";
 import { randomUUID } from "node:crypto";
-
-function maskContractId(contractId: string): string {
-  if (contractId.length <= 10) return contractId;
-  return `${contractId.slice(0, 6)}...${contractId.slice(-6)}`;
-}
 
 function logStartupConfig(env: BackendEnv) {
   const logger = createLogger("vaultdao-backend");
