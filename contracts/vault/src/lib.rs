@@ -5699,71 +5699,105 @@ impl VaultDAO {
     // Advanced Permissions (Issue: feature/advanced-permissions)
     // ========================================================================
 
-    /// Grant a specific permission to an address
+    /// Maximum depth of a delegation chain to prevent unbounded traversal.
+    const MAX_DELEGATION_DEPTH: u32 = 3;
+
+    /// Grant a specific permission to an address.
+    ///
+    /// Only an Admin may call this. If the permission already exists it is
+    /// replaced (allowing expiry updates). An optional expiry ledger can be
+    /// supplied; once that ledger is passed the grant is treated as
+    /// non-existent at check time.
     pub fn grant_permission(
         env: Env,
-        granter: Address,
+        admin: Address,
         target: Address,
         permission: types::Permission,
         expires_at: Option<u64>,
     ) -> Result<(), VaultError> {
-        granter.require_auth();
-
-        let mut permissions = storage::get_permissions(&env, &target);
-
-        // Check if permission already exists
-        for p in permissions.iter() {
-            if p.permission == permission {
-                return Err(VaultError::AlreadyApproved);
-            }
+        admin.require_auth();
+        if !storage::is_initialized(&env) {
+            return Err(VaultError::NotInitialized);
+        }
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
         }
 
-        let grant = types::PermissionGrant {
-            permission,
-            granted_by: granter,
-            granted_at: env.ledger().sequence() as u64,
-            expires_at,
-        };
-
-        permissions.push_back(grant);
-        storage::set_permissions(&env, &target, permissions);
+        let mut grants = storage::get_permissions(&env, &target);
+        let mut replaced = false;
+        for i in 0..grants.len() {
+            if grants.get(i).unwrap().permission == permission {
+                grants.set(
+                    i,
+                    types::PermissionGrant {
+                        permission,
+                        granted_by: admin.clone(),
+                        granted_at: env.ledger().sequence() as u64,
+                        expires_at,
+                    },
+                );
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            grants.push_back(types::PermissionGrant {
+                permission,
+                granted_by: admin.clone(),
+                granted_at: env.ledger().sequence() as u64,
+                expires_at,
+            });
+        }
+        storage::set_permissions(&env, &target, grants);
         storage::extend_instance_ttl(&env);
 
+        events::emit_permission_granted(&env, &admin, &target, permission as u32);
         Ok(())
     }
 
-    /// Revoke a specific permission from an address
+    /// Revoke a specific permission from an address.
+    ///
+    /// Only an Admin may call this. Returns [`VaultError::Unauthorized`]
+    /// if the address does not hold the specified permission.
     pub fn revoke_permission(
         env: Env,
-        revoker: Address,
+        admin: Address,
         target: Address,
         permission: types::Permission,
     ) -> Result<(), VaultError> {
-        revoker.require_auth();
+        admin.require_auth();
+        if !storage::is_initialized(&env) {
+            return Err(VaultError::NotInitialized);
+        }
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
 
-        let permissions = storage::get_permissions(&env, &target);
+        let grants = storage::get_permissions(&env, &target);
+        let mut updated = Vec::new(&env);
         let mut found = false;
-        let mut new_permissions = Vec::new(&env);
-
-        for p in permissions.iter() {
+        for p in grants.iter() {
             if p.permission != permission {
-                new_permissions.push_back(p);
+                updated.push_back(p);
             } else {
                 found = true;
             }
         }
-
         if !found {
-            return Err(VaultError::ProposalNotFound);
+            return Err(VaultError::Unauthorized);
         }
-
-        storage::set_permissions(&env, &target, new_permissions);
+        storage::set_permissions(&env, &target, updated);
         storage::extend_instance_ttl(&env);
 
+        events::emit_permission_revoked(&env, &admin, &target, permission as u32);
         Ok(())
     }
 
-    /// Delegate a permission to another address temporarily
+    /// Delegate a specific permission to another address temporarily.
+    ///
+    /// The delegator must hold the permission themselves (directly or via
+    /// role inheritance) and the delegation chain must not exceed
+    /// `MAX_DELEGATION_DEPTH`. The delegation expires at `expires_at`.
     pub fn delegate_permission(
         env: Env,
         delegator: Address,
@@ -5772,6 +5806,20 @@ impl VaultDAO {
         expires_at: u64,
     ) -> Result<(), VaultError> {
         delegator.require_auth();
+        if !storage::is_initialized(&env) {
+            return Err(VaultError::NotInitialized);
+        }
+
+        // Delegator must hold the permission.
+        if !Self::check_permission(&env, &delegator, &permission) {
+            return Err(VaultError::Unauthorized);
+        }
+
+        // Guard against unbounded delegation chains.
+        let depth = Self::delegation_depth(&env, &delegator, &permission, 0);
+        if depth >= Self::MAX_DELEGATION_DEPTH {
+            return Err(VaultError::InsufficientRole);
+        }
 
         let delegation = types::DelegatedPermission {
             permission,
@@ -5780,28 +5828,56 @@ impl VaultDAO {
             granted_at: env.ledger().sequence() as u64,
             expires_at,
         };
-
         storage::set_delegated_permission(&env, &delegation);
         storage::extend_instance_ttl(&env);
 
+        events::emit_permission_delegated(&env, &delegator, &delegatee, permission as u32);
         Ok(())
     }
-    /// Check if an address has a specific permission
+
+    /// Check if an address has a specific permission (returns bool for convenience).
     pub fn has_permission(env: Env, addr: Address, permission: types::Permission) -> bool {
         Self::check_permission(&env, &addr, &permission)
     }
 
-    /// Internal permission check helper
+    /// Entry-point version of the permission check that returns a Result.
+    ///
+    /// Returns `Ok(())` if the address holds a valid, non-expired permission
+    /// (directly or via delegation). Returns an error otherwise.
+    pub fn check_permission_entry(
+        env: Env,
+        addr: Address,
+        permission: types::Permission,
+    ) -> Result<(), VaultError> {
+        if !storage::is_initialized(&env) {
+            return Err(VaultError::NotInitialized);
+        }
+        if Self::check_permission(&env, &addr, &permission) {
+            Ok(())
+        } else {
+            // Distinguish expired from simply absent.
+            let now = env.ledger().sequence() as u64;
+            let grants = storage::get_permissions(&env, &addr);
+            for g in grants.iter() {
+                if g.permission == permission && g.expires_at.is_some_and(|exp| now > exp) {
+                    return Err(VaultError::ProposalExpired);
+                }
+            }
+            Err(VaultError::Unauthorized)
+        }
+    }
+
+    /// Internal permission check helper (bool, used by other contract functions).
     fn check_permission(env: &Env, addr: &Address, permission: &types::Permission) -> bool {
         let current_ledger = env.ledger().sequence() as u64;
 
-        // Check role-based permissions (inheritance)
+        // Role-based inheritance.
         let role = storage::get_role(env, addr);
         if Self::role_has_permission(&role, permission) {
             return true;
         }
 
-        // Check direct permission grants
+        // Direct permission grants (expiry enforced).
         let permissions = storage::get_permissions(env, addr);
         for p in permissions.iter() {
             if p.permission == *permission {
@@ -5814,7 +5890,7 @@ impl VaultDAO {
             }
         }
 
-        // Check delegated permissions
+        // Delegated permissions (expiry enforced).
         if let Ok(config) = storage::get_config(env) {
             for signer in config.signers.iter() {
                 if let Some(delegation) =
@@ -5830,11 +5906,38 @@ impl VaultDAO {
         false
     }
 
-    /// Map role to inherited permissions
+    /// Recursively count delegation hops above `addr` for a given permission.
+    fn delegation_depth(
+        env: &Env,
+        addr: &Address,
+        permission: &types::Permission,
+        depth: u32,
+    ) -> u32 {
+        if depth >= Self::MAX_DELEGATION_DEPTH {
+            return depth;
+        }
+        let config = match storage::get_config(env) {
+            Ok(c) => c,
+            Err(_) => return depth,
+        };
+        let now = env.ledger().sequence() as u64;
+        for signer in config.signers.iter() {
+            if let Some(dp) =
+                storage::get_delegated_permission(env, addr, &signer, *permission as u32)
+            {
+                if now <= dp.expires_at {
+                    return Self::delegation_depth(env, &signer, permission, depth + 1);
+                }
+            }
+        }
+        depth
+    }
+
+    /// Map role to inherited permissions.
     fn role_has_permission(role: &Role, permission: &types::Permission) -> bool {
         use types::Permission::*;
         match role {
-            Role::Admin => true, // Admin has all permissions
+            Role::Admin => true,
             Role::Treasurer => matches!(
                 permission,
                 CreateProposal
@@ -5849,7 +5952,7 @@ impl VaultDAO {
         }
     }
 
-    /// Get all permissions for an address
+    /// Get all permissions for an address.
     pub fn get_permissions(env: Env, addr: Address) -> Vec<types::PermissionGrant> {
         storage::get_permissions(&env, &addr)
     }
