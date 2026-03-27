@@ -6758,6 +6758,51 @@ fn test_recovery_cancellation() {
 }
 
 #[test]
+fn test_non_guardian_cannot_approve_recovery() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let signer = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    let non_guardian = Address::generate(&env);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(signer.clone());
+
+    let mut guardians = Vec::new(&env);
+    guardians.push_back(guardian.clone());
+
+    let mut config = default_init_config(&env, signers, 1);
+    config.recovery_config = crate::RecoveryConfig {
+        guardians,
+        threshold: 1,
+        delay: 0,
+    };
+    client.initialize(&admin, &config);
+
+    let mut new_signers = Vec::new(&env);
+    new_signers.push_back(Address::generate(&env));
+    let recovery_id = client.initiate_recovery(&Address::generate(&env), &new_signers, &1);
+
+    // Non-guardian (a regular signer) must be rejected.
+    let res = client.try_approve_recovery(&non_guardian, &recovery_id);
+    assert_eq!(res.err(), Some(Ok(VaultError::Unauthorized)));
+
+    // Signer is also not a guardian — must be rejected.
+    let res = client.try_approve_recovery(&signer, &recovery_id);
+    assert_eq!(res.err(), Some(Ok(VaultError::Unauthorized)));
+
+    // The actual guardian can approve.
+    client.approve_recovery(&guardian, &recovery_id);
+    let proposal = client.get_recovery_proposal(&recovery_id);
+    assert_eq!(proposal.status, RecoveryStatus::Approved);
+}
+
+#[test]
 fn test_insurance_posting_and_refund() {
     let env = Env::default();
     env.mock_all_auths();
