@@ -1869,3 +1869,54 @@ pub fn get_cross_vault_proposal(
         .persistent()
         .get(&FeatureKey::CrossVaultProposal(proposal_id))
 }
+
+// ============================================================================
+// Dispute Resolution
+// ============================================================================
+
+fn get_next_dispute_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::NextDisputeId)
+        .unwrap_or(1)
+}
+
+pub fn increment_dispute_id(env: &Env) -> u64 {
+    let id = get_next_dispute_id(env);
+    env.storage()
+        .instance()
+        .set(&FeatureKey::NextDisputeId, &(id + 1));
+    id
+}
+
+pub fn set_dispute(env: &Env, dispute: &crate::types::Dispute) {
+    let key = FeatureKey::Dispute(dispute.id);
+    env.storage().persistent().set(&key, dispute);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_dispute(env: &Env, id: u64) -> Result<crate::types::Dispute, VaultError> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::Dispute(id))
+        .ok_or(VaultError::ProposalNotFound)
+}
+
+pub fn get_proposal_disputes(env: &Env, proposal_id: u64) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::ProposalDisputes(proposal_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn add_proposal_dispute(env: &Env, proposal_id: u64, dispute_id: u64) {
+    let key = FeatureKey::ProposalDisputes(proposal_id);
+    let mut ids = get_proposal_disputes(env, proposal_id);
+    ids.push_back(dispute_id);
+    env.storage().persistent().set(&key, &ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}

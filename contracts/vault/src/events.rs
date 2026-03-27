@@ -1031,3 +1031,17 @@ pub fn emit_cross_vault_config_set(env: &Env, admin: &Address) {
     env.events()
         .publish((Symbol::new(env, "cv_config_set"),), admin.clone());
 }
+
+pub fn emit_dispute_raised(env: &Env, dispute_id: u64, proposal_id: u64, disputer: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "dispute_raised"), dispute_id),
+        (proposal_id, disputer.clone()),
+    );
+}
+
+pub fn emit_dispute_resolved(env: &Env, dispute_id: u64, arbitrator: &Address, resolution: u32) {
+    env.events().publish(
+        (Symbol::new(env, "dispute_resolved"), dispute_id),
+        (arbitrator.clone(), resolution),
+    );
+}

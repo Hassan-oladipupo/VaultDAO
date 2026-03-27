@@ -7,6 +7,27 @@ import type { ProposalActivityConsumer } from "../proposals/consumer.js";
 /** Maximum backoff delay: 5 minutes */
 const MAX_BACKOFF_MS = 5 * 60 * 1000;
 
+/** Contract topics that should be forwarded to the proposal consumer. */
+const PROPOSAL_TOPICS = new Set([
+  "proposal_created",
+  "proposal_approved",
+  "proposal_abstained",
+  "proposal_ready",
+  "proposal_scheduled",
+  "proposal_executed",
+  "proposal_expired",
+  "proposal_cancelled",
+  "proposal_rejected",
+  "proposal_deadline_rejected",
+  "proposal_vetoed",
+  "proposal_amended",
+  "proposal_from_template",
+  "scheduled_proposal_cancelled",
+  "delegated_vote",
+  "voting_deadline_ext",
+  "quorum_reached",
+]);
+
 /**
  * EventPollingService
  *
@@ -152,71 +173,25 @@ export class EventPollingService {
   }
 
   /**
-   * Specialized event processor/router.
-   * Reference: contracts/vault/src/events.rs for event topic structure.
+   * Normalizes and routes a single contract event to the appropriate consumer.
+   * All event types from events.rs are handled; unknown topics are warned.
    */
   private async processEvent(event: ContractEvent): Promise<void> {
-    const mainTopic = event.topic[0];
-
-    console.log(
-      `[events-service] routing event: ${mainTopic} (id: ${event.id})`,
-    );
-
-    // Placeholder routing logic
-    switch (mainTopic) {
-      case "proposal_created":
-        await this.handleProposalCreated(event);
-        break;
-      case "proposal_executed":
-        await this.handleProposalExecuted(event);
-        break;
-      // Add more cases as needed based on events.rs
-      default:
-        console.debug(
-          `[events-service] ignoring unhandled event type: ${mainTopic}`,
-        );
-    }
-  }
-
-  // --- Specialized Event Handlers (Scaffold) ---
-
-  private async handleProposalCreated(event: ContractEvent): Promise<void> {
+    const topic = event.topic[0] ?? "";
     try {
       const normalized = EventNormalizer.normalize(event);
 
-      if (this.proposalConsumer) {
+      // Proposal events → proposalConsumer
+      if (this.proposalConsumer && PROPOSAL_TOPICS.has(topic)) {
         await this.proposalConsumer.process(normalized);
+        return;
       }
 
-      console.debug(
-        "[events-service] processed proposal_created event",
-        event.id,
-      );
+      // All other known topics are normalized and available for future consumers.
+      // Unknown topics are already warned inside EventNormalizer.normalize().
+      console.debug(`[events-service] processed event: ${topic} (id: ${event.id})`);
     } catch (error) {
-      console.error(
-        "[events-service] error processing proposal_created:",
-        error,
-      );
-    }
-  }
-
-  private async handleProposalExecuted(event: ContractEvent): Promise<void> {
-    try {
-      const normalized = EventNormalizer.normalize(event);
-
-      if (this.proposalConsumer) {
-        await this.proposalConsumer.process(normalized);
-      }
-
-      console.debug(
-        "[events-service] processed proposal_executed event",
-        event.id,
-      );
-    } catch (error) {
-      console.error(
-        "[events-service] error processing proposal_executed:",
-        error,
-      );
+      console.error(`[events-service] error processing event "${topic}":`, error);
     }
   }
 
