@@ -1,14 +1,14 @@
 use crate::types::{
     RetryConfig, SubscriptionStatus, SubscriptionTier, ThresholdStrategy, VelocityConfig,
 };
-use crate::{InitConfig, Role, VaultDAO, VaultDAOClient};
+use crate::{InitConfig, VaultDAO, VaultDAOClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
     Address, Env, Vec,
 };
 
-fn setup(env: &Env) -> (VaultDAOClient, Address, Address, Address) {
+fn setup(env: &Env) -> (VaultDAOClient<'_>, Address, Address, Address) {
     let contract_id = env.register(VaultDAO, ());
     let client = VaultDAOClient::new(env, &contract_id);
     let admin = Address::generate(env);
@@ -55,7 +55,7 @@ fn setup(env: &Env) -> (VaultDAOClient, Address, Address, Address) {
 
 fn fund_subscriber(
     env: &Env,
-    token_admin: &Address,
+    _token_admin: &Address,
     token: &Address,
     subscriber: &Address,
     amount: i128,
@@ -94,7 +94,7 @@ fn test_create_subscription_success() {
     assert_eq!(sub.total_payments, 1);
     assert_eq!(sub.tier, SubscriptionTier::Basic);
     assert_eq!(sub.amount_per_period, 100);
-    assert_eq!(sub.auto_renew, true);
+    assert!(sub.auto_renew);
 }
 
 #[test]
