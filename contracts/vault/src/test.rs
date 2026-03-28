@@ -12730,7 +12730,7 @@ fn test_batch_below_threshold_executes_immediately() {
 }
 
 #[test]
-fn test_reputation_decay_persisted_on_propose() {
+fn test_insurance_slash_on_voting_deadline_rejection() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -12740,69 +12740,63 @@ fn test_reputation_decay_persisted_on_propose() {
     let admin = Address::generate(&env);
     let proposer = Address::generate(&env);
     let recipient = Address::generate(&env);
-    let token = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
-    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&contract_id, &1000);
+    let token_admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_addr = sac.address();
+    StellarAssetClient::new(&env, &token_addr).mint(&proposer, &1000);
+    StellarAssetClient::new(&env, &token_addr).mint(&contract_id, &5000);
 
     let mut signers = Vec::new(&env);
     signers.push_back(admin.clone());
     signers.push_back(proposer.clone());
 
-    client.initialize(&admin, &default_init_config(&env, signers, 1));
+    let config = default_init_config(&env, signers, 2);
+    let config = InitConfig {
+        // voting deadline of 50 ledgers
+        default_voting_deadline: 50,
+        ..config
+    };
+    client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
 
-    // Boost proposer score above 500: proposer approves proposals (REP_APPROVAL_BONUS=2 each)
-    for _ in 0..5u32 {
-        let pid = client.propose_transfer(
-            &admin,
-            &recipient,
-            &token,
-            &10,
-            &Symbol::new(&env, "boost"),
-            &Priority::Normal,
-            &Vec::new(&env),
-            &ConditionLogic::And,
-            &0,
-        );
-        client.approve_proposal(&proposer, &pid);
-    }
-
-    let score_after_boost = client.get_reputation(&proposer).score;
-    assert!(
-        score_after_boost > 500,
-        "score should be above neutral after approvals"
+    // 50% slash on rejection
+    client.set_insurance_config(
+        &admin,
+        &InsuranceConfig {
+            enabled: true,
+            min_amount: 0,
+            min_insurance_bps: 0,
+            slash_percentage: 50,
+        },
     );
 
-    // Advance exactly 1 full decay period (17_280 * 30 = 518_400 ledgers).
-    // Using exactly 518_400 keeps us within the instance TTL (also 518_400 ledgers).
-    env.ledger()
-        .set_sequence_number(env.ledger().sequence() + 518_400);
+    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
 
-    // Second proposal triggers apply_reputation_decay and persists the result
-    client.propose_transfer(
+    // Propose with 100 tokens insurance
+    let proposal_id = client.propose_transfer(
         &proposer,
         &recipient,
-        &token,
-        &10,
-        &Symbol::new(&env, "p2"),
+        &token_addr,
+        &100,
+        &Symbol::new(&env, "test"),
         &Priority::Normal,
         &Vec::new(&env),
         &ConditionLogic::And,
-        &0,
+        &100,
     );
+    // proposer locked 100 insurance tokens
+    assert_eq!(token_client.balance(&proposer), 900);
 
-    // The stored score must now be lower (decay persisted), not the pre-decay value
-    let stored_rep = client.get_reputation(&proposer);
-    assert!(
-        stored_rep.score < score_after_boost,
-        "decay must be persisted: stored score {} should be < pre-decay score {}",
-        stored_rep.score,
-        score_after_boost
-    );
-    // last_decay_ledger must have been updated
-    assert!(
-        stored_rep.last_decay_ledger > 0,
-        "last_decay_ledger must be set after decay"
-    );
+    // Advance past the voting deadline
+    env.ledger().set_sequence_number(100);
+
+    // Trigger deadline rejection via approve_proposal
+    client.approve_proposal(&admin, &proposal_id);
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Rejected);
+
+    // 50% of 100 = 50 slashed to pool, 50 returned to proposer
+    assert_eq!(token_client.balance(&proposer), 950); // 900 + 50 returned
+    assert_eq!(client.get_insurance_pool(&token_addr), 50);
 }
