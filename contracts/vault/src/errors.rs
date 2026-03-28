@@ -60,8 +60,6 @@ pub enum VaultError {
     TooManyTags = 232,
     /// Metadata value is empty or exceeds the maximum allowed length
     MetadataValueInvalid = 233,
-    /// No execution snapshot exists for the given proposal
-    SnapshotNotFound = 240,
 }
 
 // Compatibility markers for CI source checks:

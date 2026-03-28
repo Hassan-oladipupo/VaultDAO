@@ -5381,7 +5381,7 @@ impl VaultDAO {
         }
 
         let snapshot = storage::get_execution_snapshot(&env, proposal_id)
-            .ok_or(VaultError::SnapshotNotFound)?;
+            .ok_or(VaultError::ProposalNotFound)?;
 
         let proposal = &snapshot.proposal;
 

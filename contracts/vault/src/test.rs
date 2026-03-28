@@ -8169,9 +8169,9 @@ fn test_rollback_execution_reverses_transfer_and_clears_snapshot() {
     let proposer_after = token_client.balance(&signer1);
     assert_eq!(proposer_after - proposer_before, 100);
 
-    // Snapshot must be cleared — second rollback should fail with SnapshotNotFound
+    // Snapshot must be cleared — second rollback should fail with ProposalNotFound
     let res = client.try_rollback_execution(&admin, &proposal_id);
-    assert_eq!(res, Err(Ok(VaultError::SnapshotNotFound)));
+    assert_eq!(res, Err(Ok(VaultError::ProposalNotFound)));
 }
 
 #[test]
@@ -8217,7 +8217,7 @@ fn test_rollback_execution_no_snapshot_returns_error() {
 
     // No snapshot stored for proposal_id 999
     let res = client.try_rollback_execution(&admin, &999);
-    assert_eq!(res, Err(Ok(VaultError::SnapshotNotFound)));
+    assert_eq!(res, Err(Ok(VaultError::ProposalNotFound)));
 }
 
 // ============================================================================
