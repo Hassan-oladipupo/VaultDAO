@@ -179,8 +179,19 @@ The backend is a **lightweight support layer** for VaultDAO, not a replacement f
 
 All public endpoints are rate-limited to 100 requests per minute per IP. Return code `429 Too Many Requests` when exceeded.
 
+## 🚀 Get Started
+
+See the [detailed roadmap](docs/ROADMAP.md) for prioritized tasks.
+
+```
+# Quickstart for new contributors
+pnpm install
+pnpm test
+# Pick a Foundation task from ROADMAP.md
+```
+
 ## Current Endpoints
 
 - `GET /health`
-- `GET /ready`
+- `GET /ready` 
 - `GET /api/v1/status`
