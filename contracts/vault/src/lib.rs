@@ -72,6 +72,10 @@ const MIN_ATTACHMENT_LEN: u32 = 46;
 const MAX_ATTACHMENT_LEN: u32 = 128;
 
 /// Reputation adjustments
+/// Minimum interval between recurring payments: 720 ledgers ≈ 1 hour at ~5 s/ledger.
+/// Prevents near-instant repeated draining of the vault.
+const MIN_RECURRING_INTERVAL: u64 = 720;
+
 const REP_EXEC_PROPOSER: u32 = 10;
 const REP_EXEC_APPROVER: u32 = 5;
 const REP_REJECTION_PENALTY: u32 = 20;
@@ -2218,7 +2222,7 @@ impl VaultDAO {
         Self::validate_recipient(&env, &recipient)?;
 
         // Minimum interval check (e.g. 1 hour = 720 ledgers)
-        if interval < 720 {
+        if interval < MIN_RECURRING_INTERVAL {
             return Err(VaultError::IntervalTooShort);
         }
 

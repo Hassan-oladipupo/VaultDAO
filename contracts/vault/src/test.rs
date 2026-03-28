@@ -8638,6 +8638,64 @@ fn test_list_proposal_ids_pagination() {
 }
 
 // ============================================================================
+// Recurring Payment Interval Validation Tests
+// ============================================================================
+
+#[test]
+fn test_schedule_payment_interval_zero_returns_interval_too_short() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+
+    let res = client.try_schedule_payment(
+        &admin,
+        &recipient,
+        &token,
+        &100,
+        &Symbol::new(&env, "pay"),
+        &0u64,
+    );
+    assert_eq!(res, Err(Ok(VaultError::IntervalTooShort)));
+}
+
+#[test]
+fn test_schedule_payment_valid_interval_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+
+    let res = client.try_schedule_payment(
+        &admin,
+        &recipient,
+        &token,
+        &100,
+        &Symbol::new(&env, "pay"),
+        &720u64,
+    );
+    assert!(res.is_ok());
+}
+
+// ============================================================================
 // Recurring Payment Listing Tests
 // ============================================================================
 
