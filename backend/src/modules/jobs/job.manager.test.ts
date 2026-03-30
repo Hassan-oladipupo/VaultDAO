@@ -119,3 +119,23 @@ test("JobManager.stopAll continues after timeout", async () => {
   // Normal job should still be stopped even though hanging job timed out
   assert.deepEqual(stopped, ["normal-job"]);
 });
+
+test("JobManager.registerJob throws on duplicate registration by default", () => {
+  const manager = new JobManager();
+  const job = createJob("my-job", () => {});
+  manager.registerJob(job);
+  assert.throws(
+    () => manager.registerJob(job),
+    /job already registered: "my-job"/,
+  );
+});
+
+test("JobManager.registerJob with replace:true silently replaces existing job", () => {
+  const manager = new JobManager();
+  const started: string[] = [];
+  manager.registerJob(createJob("my-job", () => { started.push("original"); }));
+  manager.registerJob(createJob("my-job", () => { started.push("replacement"); }), { replace: true });
+  assert.equal(manager.getAllJobs().length, 1);
+  manager.getAllJobs()[0].start();
+  assert.deepEqual(started, ["replacement"]);
+});

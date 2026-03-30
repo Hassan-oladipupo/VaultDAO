@@ -24,11 +24,18 @@ export class JobManager {
 
   /**
    * Register a job for management.
+   * @param job - The job to register.
+   * @param options.replace - If true, silently replace an existing job with the same name.
+   *   Defaults to false, which throws if a job with the same name is already registered.
+   *   BREAKING CHANGE from previous behaviour (warn + return).
    */
-  public registerJob(job: Job): void {
+  public registerJob(job: Job, options?: { replace?: boolean }): void {
     if (this.jobs.has(job.name)) {
-      this.logger.warn("job already registered", { job: job.name });
-      return;
+      if (options?.replace) {
+        this.jobs.set(job.name, job);
+        return;
+      }
+      throw new Error(`job already registered: "${job.name}"`);
     }
     this.jobs.set(job.name, job);
     this.logger.info("job registered", { job: job.name });

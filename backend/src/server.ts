@@ -107,21 +107,21 @@ export function startServer(
     start: () => proposalActivityConsumer.start(),
     stop: () => proposalActivityConsumer.stop(),
     isRunning: () => proposalActivityConsumer.getIsRunning(),
-  });
+  }, { replace: true });
 
   jobManager.registerJob({
     name: "event-polling",
     start: () => eventPollingService.start(),
     stop: () => eventPollingService.stop(),
     isRunning: () => eventPollingService.getStatus().isPolling,
-  });
+  }, { replace: true });
 
   jobManager.registerJob({
     name: "recurring-indexer",
     start: () => recurringIndexerService.start(),
     stop: () => recurringIndexerService.stop(),
     isRunning: () => recurringIndexerService.getStatus().isIndexing,
-  });
+  }, { replace: true });
 
   void jobManager.startAll();
 
