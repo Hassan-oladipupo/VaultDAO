@@ -1013,7 +1013,9 @@ function makeRpcStub(eventsByBatch: ContractEvent[][]): {
     get callCount() {
       return callCount;
     },
-    async getContractEvents(_params: GetEventsParams): Promise<ContractEvent[]> {
+    async getContractEvents(
+      _params: GetEventsParams,
+    ): Promise<ContractEvent[]> {
       const batch = eventsByBatch[callCount] ?? [];
       callCount++;
       return batch;
@@ -1081,8 +1083,18 @@ test("SnapshotService - rebuildFromRpc - clears existing snapshot before rebuild
   // Pre-populate a snapshot
   const initEvent: NormalizedEvent<SignerAddedData> = {
     type: EventType.INITIALIZED,
-    data: { address: ADMIN_ADDRESS, role: Role.ADMIN, ledger: 50, timestamp: "2026-03-25T12:00:00Z" },
-    metadata: { id: "pre-1", contractId: CONTRACT_ID, ledger: 50, ledgerClosedAt: "2026-03-25T12:00:00Z" },
+    data: {
+      address: ADMIN_ADDRESS,
+      role: Role.ADMIN,
+      ledger: 50,
+      timestamp: "2026-03-25T12:00:00Z",
+    },
+    metadata: {
+      id: "pre-1",
+      contractId: CONTRACT_ID,
+      ledger: 50,
+      ledgerClosedAt: "2026-03-25T12:00:00Z",
+    },
   };
   const service = new SnapshotService(adapter);
   await service.processEvent(initEvent);
@@ -1136,4 +1148,128 @@ test("SnapshotService - rebuildFromRpc - handles RPC error gracefully", async ()
   assert.equal(result.success, false);
   assert.ok(result.error);
   assert.match(result.error, /RPC connection refused/);
+});
+
+// ── Issue #629: processEvent coverage ────────────────────────────────────────
+
+test("SnapshotService - processEvent - ROLE_ASSIGNED creates new signer and role", async () => {
+  const adapter = new MemorySnapshotAdapter();
+  const service = new SnapshotService(adapter);
+
+  const event: NormalizedEvent<RoleAssignedData> = {
+    type: EventType.ROLE_ASSIGNED,
+    data: { address: TREASURER_ADDRESS, role: Role.TREASURER },
+    metadata: {
+      id: "evt-role-1",
+      contractId: CONTRACT_ID,
+      ledger: 100,
+      ledgerClosedAt: "2026-03-30T09:00:00Z",
+    },
+  };
+
+  const result = await service.processEvent(event);
+
+  assert.equal(result.success, true);
+  assert.equal(result.signersUpdated, 1);
+  assert.equal(result.rolesUpdated, 1);
+  assert.equal(result.eventsProcessed, 1);
+
+  const signer = await service.getSigner(CONTRACT_ID, TREASURER_ADDRESS);
+  assert.notEqual(signer, null);
+  assert.equal(signer!.role, Role.TREASURER);
+  assert.equal(signer!.isActive, true);
+
+  const role = await service.getRole(CONTRACT_ID, TREASURER_ADDRESS);
+  assert.notEqual(role, null);
+  assert.equal(role!.role, Role.TREASURER);
+});
+
+test("SnapshotService - processEvent - INITIALIZED creates admin signer and role", async () => {
+  const adapter = new MemorySnapshotAdapter();
+  const service = new SnapshotService(adapter);
+
+  const event: NormalizedEvent<SignerAddedData> = {
+    type: EventType.INITIALIZED,
+    data: {
+      address: ADMIN_ADDRESS,
+      role: Role.ADMIN,
+      ledger: 1,
+      timestamp: "2026-03-30T09:00:00Z",
+    },
+    metadata: {
+      id: "evt-init-1",
+      contractId: CONTRACT_ID,
+      ledger: 1,
+      ledgerClosedAt: "2026-03-30T09:00:00Z",
+    },
+  };
+
+  const result = await service.processEvent(event);
+
+  assert.equal(result.success, true);
+  assert.equal(result.signersUpdated, 1);
+  assert.equal(result.rolesUpdated, 1);
+
+  const signer = await service.getSigner(CONTRACT_ID, ADMIN_ADDRESS);
+  assert.notEqual(signer, null);
+  assert.equal(signer!.role, Role.ADMIN);
+  assert.equal(signer!.isActive, true);
+});
+
+test("SnapshotService - processEvent - non-snapshot event returns zero updates", async () => {
+  const adapter = new MemorySnapshotAdapter();
+  const service = new SnapshotService(adapter);
+
+  const event: NormalizedEvent = {
+    type: "PROPOSAL_CREATED" as EventType,
+    data: {},
+    metadata: {
+      id: "evt-other-1",
+      contractId: CONTRACT_ID,
+      ledger: 50,
+      ledgerClosedAt: "2026-03-30T09:00:00Z",
+    },
+  };
+
+  const result = await service.processEvent(event);
+
+  assert.equal(result.success, true);
+  assert.equal(result.signersUpdated, 0);
+  assert.equal(result.rolesUpdated, 0);
+  assert.equal(result.eventsProcessed, 0);
+});
+
+test("SnapshotService - processEvent - storage error returns success: false", async () => {
+  class ErrorAdapter extends MemorySnapshotAdapter {
+    async saveSnapshot(): Promise<void> {
+      throw new Error("disk full");
+    }
+  }
+
+  const adapter = new ErrorAdapter();
+  const service = new SnapshotService(adapter);
+
+  const event: NormalizedEvent<SignerAddedData> = {
+    type: EventType.INITIALIZED,
+    data: {
+      address: ADMIN_ADDRESS,
+      role: Role.ADMIN,
+      ledger: 1,
+      timestamp: "2026-03-30T09:00:00Z",
+    },
+    metadata: {
+      id: "evt-err-1",
+      contractId: CONTRACT_ID,
+      ledger: 1,
+      ledgerClosedAt: "2026-03-30T09:00:00Z",
+    },
+  };
+
+  const result = await service.processEvent(event);
+
+  assert.equal(result.success, false);
+  assert.equal(result.signersUpdated, 0);
+  assert.equal(result.rolesUpdated, 0);
+  assert.ok(result.error);
+  assert.match(result.error, /disk full/);
 });
