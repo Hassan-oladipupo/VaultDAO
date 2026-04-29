@@ -21,6 +21,7 @@ import { withRetry } from '../utils/retryUtils';
 import type { VaultActivity, GetVaultEventsResult, VaultEventType } from '../types/activity';
 import type { SimulationResult } from '../utils/simulation';
 import type { Comment, ListMode } from '../types';
+import { Priority, ConditionLogic } from '../types';
 import type { TokenBalance } from '../types';
 import type { TokenInfo } from '../constants/tokens';
 import {
@@ -573,7 +574,16 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         };
     }, [address, getUserRole, readContractValue]);
 
-    const proposeTransfer = async (recipient: string, token: string, amount: string, memo: string) => {
+    const proposeTransfer = async (
+        recipient: string,
+        token: string,
+        amount: string,
+        memo: string,
+        priority: Priority = Priority.Normal,
+        conditions: xdr.ScVal[] = [],
+        conditionLogic: ConditionLogic = ConditionLogic.And,
+        insuranceAmount: bigint = 0n,
+    ) => {
         const _addr = assertReady();
         setLoading(true);
         try {
@@ -592,6 +602,10 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
                                 new Address(token).toScVal(),
                                 nativeToScVal(BigInt(amount)),
                                 xdr.ScVal.scvSymbol(memo),
+                                nativeToScVal(priority, { type: "u32" }),
+                                xdr.ScVal.scvVec(conditions),
+                                nativeToScVal(conditionLogic, { type: "u32" }),
+                                nativeToScVal(insuranceAmount),
                             ],
                         })
                     ),
@@ -987,11 +1001,24 @@ interface GetEventsParams {
         }
     };
 
-    const simulateProposeTransfer = async (recipient: string, token: string, amount: string, memo: string): Promise<SimulationResult> => {
+    const simulateProposeTransfer = async (
+        recipient: string,
+        token: string,
+        amount: string,
+        memo: string,
+        priority: Priority = Priority.Normal,
+        conditions: xdr.ScVal[] = [],
+        conditionLogic: ConditionLogic = ConditionLogic.And,
+        insuranceAmount: bigint = 0n,
+    ): Promise<SimulationResult> => {
         if (!address) throw new Error("Wallet not connected");
         return simulateTransaction('propose_transfer', [
             new Address(address).toScVal(), new Address(recipient).toScVal(),
             new Address(token).toScVal(), nativeToScVal(BigInt(amount)), xdr.ScVal.scvSymbol(memo),
+            nativeToScVal(priority, { type: "u32" }),
+            xdr.ScVal.scvVec(conditions),
+            nativeToScVal(conditionLogic, { type: "u32" }),
+            nativeToScVal(insuranceAmount),
         ], { recipient, amount, memo });
     };
 
