@@ -19,6 +19,9 @@ import {
   Loader2,
   RefreshCw,
   Activity,
+  Plus,
+  X,
+  Check,
 } from 'lucide-react';
 import RecipientListManagement from '../../components/RecipientListManagement';
 import RoleManagement from '../../components/RoleManagement';
@@ -29,6 +32,8 @@ import SpendingLimitsPanel from '../../components/SpendingLimitsPanel';
 import { useVaultContract } from '../../hooks/useVaultContract';
 import { useWallet } from '../../hooks/useWallet';
 import { formatTokenAmount, truncateAddress } from '../../utils/formatters';
+import { isValidStellarAddress } from '../../constants/tokens';
+import ConfirmationModal from '../../components/modals/ConfirmationModal';
 import { useOnboarding } from '../../context/OnboardingProvider';
 import { Play } from 'lucide-react';
 import PerformanceDashboard from '../../components/PerformanceDashboard';
@@ -82,7 +87,7 @@ function reDownloadItem(item: ExportItemWithContent): void {
 }
 
 const Settings: React.FC = () => {
-  const { getVaultConfig } = useVaultContract();
+  const { getVaultConfig, addSigner, removeSigner, updateThreshold } = useVaultContract();
   const { address } = useWallet();
   const onboarding = useOnboarding();
   const { t } = useTranslation();
@@ -92,6 +97,20 @@ const Settings: React.FC = () => {
   const [vaultConfig, setVaultConfig] = useState<Awaited<ReturnType<typeof getVaultConfig>> | null>(null);
   const [configLoading, setConfigLoading] = useState(true);
   const [configError, setConfigError] = useState<string | null>(null);
+
+  // Add signer state
+  const [newSignerAddress, setNewSignerAddress] = useState('');
+  const [addSignerError, setAddSignerError] = useState<string | null>(null);
+  const [addSignerLoading, setAddSignerLoading] = useState(false);
+
+  // Remove signer state
+  const [removeConfirmAddress, setRemoveConfirmAddress] = useState<string | null>(null);
+  const [removeSignerLoading, setRemoveSignerLoading] = useState(false);
+
+  // Threshold state
+  const [newThreshold, setNewThreshold] = useState('');
+  const [thresholdError, setThresholdError] = useState<string | null>(null);
+  const [thresholdLoading, setThresholdLoading] = useState(false);
 
   const loadVaultConfig = useCallback(async () => {
     setConfigLoading(true);
@@ -109,6 +128,63 @@ const Settings: React.FC = () => {
   useEffect(() => {
     loadVaultConfig();
   }, [loadVaultConfig]);
+
+  const handleAddSigner = async () => {
+    const addr = newSignerAddress.trim();
+    if (!isValidStellarAddress(addr)) {
+      setAddSignerError('Invalid Stellar address format');
+      return;
+    }
+    setAddSignerError(null);
+    setAddSignerLoading(true);
+    try {
+      await addSigner(addr);
+      setNewSignerAddress('');
+      await loadVaultConfig();
+    } catch (err: unknown) {
+      setAddSignerError(err instanceof Error ? err.message : 'Failed to add signer');
+    } finally {
+      setAddSignerLoading(false);
+    }
+  };
+
+  const handleRemoveSigner = async () => {
+    if (!removeConfirmAddress) return;
+    setRemoveSignerLoading(true);
+    try {
+      await removeSigner(removeConfirmAddress);
+      setRemoveConfirmAddress(null);
+      await loadVaultConfig();
+    } catch (err: unknown) {
+      setConfigError(err instanceof Error ? err.message : 'Failed to remove signer');
+    } finally {
+      setRemoveSignerLoading(false);
+    }
+  };
+
+  const handleUpdateThreshold = async () => {
+    const val = parseInt(newThreshold, 10);
+    if (isNaN(val) || val < 1) {
+      setThresholdError('Threshold must be at least 1');
+      return;
+    }
+    const signerCount = vaultConfig?.signers.length ?? 0;
+    if (val > signerCount) {
+      setThresholdError(`Threshold cannot exceed signer count (${signerCount})`);
+      return;
+    }
+    setThresholdError(null);
+    setThresholdLoading(true);
+    try {
+      await updateThreshold(val);
+      setNewThreshold('');
+      await loadVaultConfig();
+    } catch (err: unknown) {
+      setThresholdError(err instanceof Error ? err.message : 'Failed to update threshold');
+    } finally {
+      setThresholdLoading(false);
+    }
+  };
 
   const handleClearHistory = () => {
     clearExportHistory();
@@ -214,6 +290,28 @@ const Settings: React.FC = () => {
                 {vaultConfig.threshold} of {Math.max(signerAddresses.length, vaultConfig.signers.length)} signatures required
               </p>
               <p className="text-xs text-gray-500 mt-2">{t('settings.approvalsNeeded')}</p>
+              {isAdmin && (
+                <div className="mt-3 space-y-2">
+                  <input
+                    type="number"
+                    min={1}
+                    max={signerAddresses.length}
+                    value={newThreshold}
+                    onChange={(e) => { setNewThreshold(e.target.value); setThresholdError(null); }}
+                    placeholder={`1–${signerAddresses.length}`}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:ring-2 focus:ring-purple-500 outline-none"
+                  />
+                  {thresholdError && <p className="text-xs text-red-400">{thresholdError}</p>}
+                  <button
+                    onClick={handleUpdateThreshold}
+                    disabled={thresholdLoading || !newThreshold}
+                    className="w-full flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium py-2 rounded-lg transition-colors"
+                  >
+                    {thresholdLoading ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                    Update Threshold
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="bg-gray-900/50 rounded-lg border border-gray-700 p-4">
@@ -231,10 +329,17 @@ const Settings: React.FC = () => {
             </div>
 
             <div className="bg-gray-900/50 rounded-lg border border-gray-700 p-4 md:col-span-2 xl:col-span-2">
-              <p className="text-xs uppercase tracking-wide text-gray-400 mb-2 flex items-center gap-2">
-                <Users size={14} />
-                {t('settings.signers')} ({signerAddresses.length})
-              </p>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs uppercase tracking-wide text-gray-400 flex items-center gap-2">
+                  <Users size={14} />
+                  {t('settings.signers')} ({signerAddresses.length})
+                </p>
+                {!isAdmin && (
+                  <span className="text-xs text-gray-500 italic flex items-center gap-1">
+                    <Shield size={12} /> Read-only
+                  </span>
+                )}
+              </div>
               {signerAddresses.length > 0 ? (
                 <ul className="space-y-2">
                   {signerAddresses.map((signer) => (
@@ -254,12 +359,46 @@ const Settings: React.FC = () => {
                           <p className="text-xs text-blue-300 mt-0.5">{t('settings.currentWallet')}</p>
                         ) : null}
                       </div>
-                      <CopyButton text={signer} />
+                      <div className="flex items-center gap-2 shrink-0">
+                        <CopyButton text={signer} />
+                        {isAdmin && (
+                          <button
+                            onClick={() => setRemoveConfirmAddress(signer)}
+                            className="p-1.5 rounded text-red-400 hover:bg-red-500/10 transition-colors"
+                            title="Remove signer"
+                          >
+                            <X size={14} />
+                          </button>
+                        )}
+                      </div>
                     </li>
                   ))}
                 </ul>
               ) : (
                 <p className="text-sm text-gray-400">{t('settings.signerListUnavailable')}</p>
+              )}
+              {isAdmin && (
+                <div className="mt-4 space-y-2 pt-4 border-t border-gray-700">
+                  <p className="text-xs text-gray-400 font-medium">Add Signer</p>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newSignerAddress}
+                      onChange={(e) => { setNewSignerAddress(e.target.value); setAddSignerError(null); }}
+                      placeholder="G... Stellar address"
+                      className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white font-mono focus:ring-2 focus:ring-purple-500 outline-none"
+                    />
+                    <button
+                      onClick={handleAddSigner}
+                      disabled={addSignerLoading || !newSignerAddress.trim()}
+                      className="flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium px-3 py-2 rounded-lg transition-colors"
+                    >
+                      {addSignerLoading ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+                      Add
+                    </button>
+                  </div>
+                  {addSignerError && <p className="text-xs text-red-400">{addSignerError}</p>}
+                </div>
               )}
             </div>
 
@@ -414,6 +553,16 @@ const Settings: React.FC = () => {
         </div>
         <PerformanceDashboard />
       </div>
+
+      <ConfirmationModal
+        isOpen={!!removeConfirmAddress}
+        title="Remove Signer"
+        message={`Remove ${removeConfirmAddress ? truncateAddress(removeConfirmAddress, 8, 6) : ''} from the vault signers? This cannot be undone without re-adding them.`}
+        confirmText={removeSignerLoading ? 'Removing…' : 'Remove'}
+        onConfirm={handleRemoveSigner}
+        onCancel={() => setRemoveConfirmAddress(null)}
+        isDestructive={true}
+      />
     </div>
   );
 };
