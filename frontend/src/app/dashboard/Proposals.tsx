@@ -62,7 +62,7 @@ export interface Proposal {
 
 const Proposals: React.FC = () => {
   const { notify } = useToast();
-  const { rejectProposal, approveProposal, getTokenBalances } = useVaultContract();
+  const { rejectProposal, approveProposal, executeProposal, getUserRole, getTokenBalances } = useVaultContract();
   const { address } = useWallet();
   const { isReady, checkReady } = useActionReadiness();
   const { subscribe, updatePresence, connectionStatus, trackEvent } = useRealtime();
@@ -76,6 +76,8 @@ const Proposals: React.FC = () => {
 
   const [localProposals, setLocalProposals] = useState<Proposal[]>([]);
   const [approvingIds, setApprovingIds] = useState<Set<string>>(new Set());
+  const [executingIds, setExecutingIds] = useState<Set<string>>(new Set());
+  const [userRole, setUserRole] = useState<number>(0);
   const [showNewProposalModal, setShowNewProposalModal] = useState(false);
   const [selectedProposal, setSelectedProposal] = useState<Proposal | null>(null);
   const [showRejectModal, setShowRejectModal] = useState(false);
@@ -146,6 +148,11 @@ const Proposals: React.FC = () => {
     };
     fetchBalances();
   }, [getTokenBalances]);
+
+  // Fetch current user's role for action gating
+  useEffect(() => {
+    getUserRole().then(setUserRole).catch(() => setUserRole(0));
+  }, [getUserRole]);
 
   // Sync real proposals into local state (local state handles optimistic updates)
   useEffect(() => {
@@ -320,6 +327,28 @@ const Proposals: React.FC = () => {
     }
   }, [selectedToken, tokenBalances]);
 
+  const isSigner = userRole >= 1;
+
+  const handleExecute = async (proposalId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const { ready, message } = checkReady();
+    if (!ready) {
+      notify('proposal_rejected', message ?? 'Not ready', 'error');
+      return;
+    }
+    setExecutingIds(prev => new Set(prev).add(proposalId));
+    try {
+      await executeProposal(Number(proposalId));
+      setLocalProposals(prev => prev.map(p => p.id === proposalId ? { ...p, status: 'Executed' } : p));
+      notify('proposal_executed', `Proposal #${proposalId} executed successfully`, 'success');
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to execute proposal';
+      notify('proposal_rejected', errorMessage, 'error');
+    } finally {
+      setExecutingIds(prev => { const s = new Set(prev); s.delete(proposalId); return s; });
+    }
+  };
+
   return (
     <div className="space-y-6 pb-10">
       <div className="max-w-7xl mx-auto">
@@ -382,6 +411,7 @@ const Proposals: React.FC = () => {
           ) : filteredProposals.length > 0 ? (
             filteredProposals.map((prop) => {
               const isApproving = approvingIds.has(prop.id);
+              const isExecuting = executingIds.has(prop.id);
               const hasUserApproved = address ? prop.approvedBy.includes(address) : false;
               const progressPercent = (prop.approvals / prop.threshold) * 100;
 
@@ -484,7 +514,7 @@ const Proposals: React.FC = () => {
                             )}
                           </div>
                           <div className="flex gap-2 w-full sm:w-auto">
-                            {address && !hasUserApproved && (
+                            {isSigner && address && !hasUserApproved && (
                               <button
                                 onClick={(e) => handleApprove(prop.id, e)}
                                 disabled={isApproving}
@@ -509,14 +539,31 @@ const Proposals: React.FC = () => {
                                 Approved
                               </div>
                             )}
+                            {isSigner && (
                             <button
                               onClick={(e) => { e.stopPropagation(); setRejectingId(prop.id); setShowRejectModal(true); }}
                               className="flex-1 sm:flex-initial bg-red-500/10 hover:bg-red-500 text-red-500 hover:text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
                             >
                               Reject
                             </button>
+                            )}
                           </div>
                         </div>
+                      </div>
+                    )}
+                    {prop.status === 'Approved' && isSigner && (
+                      <div className="flex justify-end pt-3 border-t border-gray-700/50">
+                        <button
+                          onClick={(e) => handleExecute(prop.id, e)}
+                          disabled={isExecuting}
+                          className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+                        >
+                          {isExecuting ? (
+                            <><Loader2 size={16} className="animate-spin" />Executing...</>
+                          ) : (
+                            <><Check size={16} />Execute</>
+                          )}
+                        </button>
                       </div>
                     )}
                     </div>
