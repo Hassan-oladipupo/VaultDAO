@@ -91,8 +91,13 @@ const Overview: React.FC = () => {
             setSavedLayout(layout);
         }
 
+        const refreshInterval = setInterval(() => {
+            if (isMounted) void fetchAll();
+        }, 30_000);
+
         return () => {
             isMounted = false;
+            clearInterval(refreshInterval);
         };
     }, [fetchAll]);
 
