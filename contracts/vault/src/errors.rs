@@ -109,6 +109,10 @@ pub enum VaultError {
     NotSubscriberOrAdmin = 243,
     /// Subscription is not in Active status (e.g. Cancelled / Suspended)
     SubscriptionNotActive = 244,
+    /// Circular dependency detected in proposal dependencies
+    CircularDependency = 300,
+    /// Dependency graph traversal exceeded max allowed depth
+    DependencyDepthExceeded = 301,
 }
 
 // Compatibility markers for CI source checks:

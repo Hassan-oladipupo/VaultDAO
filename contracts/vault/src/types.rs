@@ -422,6 +422,42 @@ pub struct Proposal {
     pub voting_deadline: u64,
 }
 
+/// Represents a grouped batch of proposals for atomic execution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchTransaction {
+    pub id: u64,
+    pub proposal_ids: Vec<u64>,
+    pub creator: Address,
+    pub status: BatchStatus,
+    pub created_at: u64,
+    pub executed_count: u32,
+    pub failed_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BatchStatus {
+    Pending = 0,
+    Executing = 1,
+    Completed = 2,
+    RolledBack = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchExecutionResult {
+    pub executed_count: u32,
+    pub failed_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum BatchOperation {
+    Transfer(u64), // proposal id
+}
+
 /// On-chain comment on a proposal
 #[contracttype]
 #[derive(Clone, Debug)]

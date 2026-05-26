@@ -368,6 +368,14 @@ pub fn emit_batch_executed(env: &Env, executor: &Address, executed_count: u32, f
     );
 }
 
+/// Emit when a batch execution partially failed and was rolled back
+pub fn emit_batch_rolled_back(env: &Env, executor: &Address, rolled_back_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "batch_rolled_back"),),
+        (executor.clone(), rolled_back_count),
+    );
+}
+
 // ============================================================================
 // Notification Events (feature/execution-notifications)
 // ============================================================================

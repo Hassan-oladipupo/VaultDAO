@@ -1158,6 +1158,66 @@ pub fn set_gas_config(env: &Env, config: &GasConfig) {
     env.storage().instance().set(&FeatureKey::GasConfig, config);
 }
 
+// ============================================================================
+// Batch Transaction Storage
+// ============================================================================
+
+pub fn get_batch(env: &Env, batch_id: u64) -> Result<crate::types::BatchTransaction, VaultError> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::Batch(batch_id))
+        .ok_or(VaultError::ProposalNotFound)
+}
+
+pub fn set_batch(env: &Env, batch: &crate::types::BatchTransaction) {
+    let key = FeatureKey::Batch(batch.id);
+    env.storage().persistent().set(&key, batch);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+}
+
+pub fn get_next_batch_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::BatchIdCounter)
+        .unwrap_or(1)
+}
+
+pub fn increment_batch_id(env: &Env) -> u64 {
+    let id = get_next_batch_id(env);
+    env.storage()
+        .instance()
+        .set(&FeatureKey::BatchIdCounter, &(id + 1));
+    id
+}
+
+pub fn set_batch_result(env: &Env, batch_id: u64, result: &crate::types::BatchExecutionResult) {
+    let key = FeatureKey::BatchResult(batch_id);
+    env.storage().persistent().set(&key, result);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+}
+
+pub fn get_batch_result(env: &Env, batch_id: u64) -> Option<crate::types::BatchExecutionResult> {
+    env.storage().persistent().get(&FeatureKey::BatchResult(batch_id))
+}
+
+pub fn set_batch_rollback(env: &Env, batch_id: u64, entries: &Vec<(Address, i128)>) {
+    let key = FeatureKey::BatchRollback(batch_id);
+    env.storage().persistent().set(&key, entries);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+}
+
+pub fn get_batch_rollback(env: &Env, batch_id: u64) -> Option<Vec<(Address, i128)>> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::BatchRollback(batch_id))
+}
+
 pub fn get_execution_fee_estimate(env: &Env, proposal_id: u64) -> Option<ExecutionFeeEstimate> {
     env.storage()
         .persistent()

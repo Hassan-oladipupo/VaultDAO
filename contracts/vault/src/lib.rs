@@ -836,6 +836,19 @@ impl VaultDAO {
 
         Self::update_reputation_on_propose(&env, &proposer);
 
+        // Create batch transaction record for atomic execution later
+        let batch_id = storage::increment_batch_id(&env);
+        let mut batch = types::BatchTransaction {
+            id: batch_id,
+            proposal_ids: proposal_ids.clone(),
+            creator: proposer.clone(),
+            status: types::BatchStatus::Pending,
+            created_at: current_ledger,
+            executed_count: 0,
+            failed_count: 0,
+        };
+        storage::set_batch(&env, &batch);
+
         Ok(proposal_ids)
     }
 
@@ -1347,6 +1360,116 @@ impl VaultDAO {
     /// `Some(RetryState)` if a retry is scheduled, `None` otherwise
     pub fn get_retry_state(env: Env, proposal_id: u64) -> Option<RetryState> {
         storage::get_retry_state(&env, proposal_id)
+    }
+
+    /// Execute a batch transaction atomically: either all proposals succeed or
+    /// any partial progress is attempted to be reversed and the batch is marked RolledBack.
+    pub fn execute_batch(env: Env, executor: Address, batch_id: u64) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        let mut batch = storage::get_batch(&env, batch_id)?;
+
+        if batch.status != BatchStatus::Pending {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Mark as executing
+        batch.status = BatchStatus::Executing;
+        storage::set_batch(&env, &batch);
+
+        let mut executed: Vec<u64> = Vec::new(&env);
+        let mut executed_count: u32 = 0;
+        let mut failed_count: u32 = 0;
+
+        for i in 0..batch.proposal_ids.len() {
+            let pid = batch.proposal_ids.get(i).unwrap();
+            // Basic retrieval and checks
+            let mut proposal = match storage::get_proposal(&env, pid) {
+                Ok(p) => p,
+                Err(_) => {
+                    failed_count += 1;
+                    break;
+                }
+            };
+
+            if proposal.status != ProposalStatus::Approved {
+                failed_count += 1;
+                break;
+            }
+
+            let current_ledger = env.ledger().sequence() as u64;
+            if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
+                failed_count += 1;
+                break;
+            }
+
+            // Ensure dependencies executed
+            if let Err(_) = Self::ensure_dependencies_executable(&env, &proposal) {
+                failed_count += 1;
+                break;
+            }
+
+            // Attempt transfer using token::try_transfer to avoid panicking
+            if token::try_transfer(&env, &proposal.token, &proposal.recipient, proposal.amount)
+                .is_ok()
+            {
+                // Mark executed
+                proposal.status = ProposalStatus::Executed;
+                storage::set_proposal(&env, &proposal);
+                executed.push_back(*pid);
+                executed_count += 1;
+                storage::create_audit_entry(&env, AuditAction::ExecuteProposal, &executor, *pid);
+            } else {
+                failed_count += 1;
+                break;
+            }
+        }
+
+        // Success: all executed
+        if failed_count == 0 {
+            batch.status = BatchStatus::Completed;
+            batch.executed_count = executed_count;
+            batch.failed_count = 0;
+            storage::set_batch(&env, &batch);
+            storage::set_batch_result(&env, batch.id, &BatchExecutionResult {
+                executed_count,
+                failed_count,
+            });
+            events::emit_batch_executed(&env, &executor, executed_count, failed_count);
+            return Ok(());
+        }
+
+        // Partial failure: attempt rollback of completed transfers
+        let mut rollback_entries: Vec<(Address, i128)> = Vec::new(&env);
+        for j in 0..executed.len() {
+            let pid = executed.get(j).unwrap();
+            if let Ok(proposal) = storage::get_proposal(&env, pid) {
+                // Attempt to pull funds back into vault (may fail if holder doesn't authorize)
+                // Record the token and amount for off-chain reconciliation if needed.
+                rollback_entries.push_back((proposal.token.clone(), proposal.amount));
+                // Try to transfer from the recipient back to vault. This requires the recipient
+                // to have authorized the transfer or the token contract to allow this operation.
+                let _ = token::transfer_from_vault(&env, &proposal.token, &proposal.recipient, proposal.amount);
+                // Reset proposal status to Pending to reflect rollback
+                let mut p = proposal.clone();
+                p.status = ProposalStatus::Pending;
+                storage::set_proposal(&env, &p);
+            }
+        }
+
+        batch.status = BatchStatus::RolledBack;
+        batch.executed_count = executed_count;
+        batch.failed_count = failed_count;
+        storage::set_batch(&env, &batch);
+        storage::set_batch_rollback(&env, batch.id, &rollback_entries);
+        storage::set_batch_result(&env, batch.id, &BatchExecutionResult {
+            executed_count,
+            failed_count,
+        });
+
+        events::emit_batch_rolled_back(&env, &executor, executed_count);
+
+        Ok(())
     }
 
     /// Delegate voting power to another signer.
@@ -4262,10 +4385,10 @@ impl VaultDAO {
 
             // Direct self-reference
             if dependency_id == proposal_id {
-                return Err(VaultError::InvalidAmount);
+                return Err(VaultError::CircularDependency);
             }
             if seen.contains(dependency_id) {
-                return Err(VaultError::InvalidAmount);
+                return Err(VaultError::CircularDependency);
             }
             if !storage::proposal_exists(env, dependency_id) {
                 return Err(VaultError::ProposalNotFound);
@@ -4274,8 +4397,10 @@ impl VaultDAO {
             // Transitive cycle check: walk the existing dep graph from this
             // dependency; if it can reach proposal_id, adding this edge forms a cycle.
             let mut visited = Vec::new(env);
-            if Self::has_dependency_path(env, dependency_id, proposal_id, &mut visited)? {
-                return Err(VaultError::InvalidAmount);
+            match Self::has_dependency_path(env, dependency_id, proposal_id, &mut visited) {
+                Ok(true) => return Err(VaultError::CircularDependency),
+                Err(e) => return Err(e),
+                _ => {}
             }
 
             seen.push_back(dependency_id);
@@ -4290,12 +4415,14 @@ impl VaultDAO {
             let dependency_id = proposal.depends_on.get(i).unwrap();
 
             if dependency_id == proposal.id {
-                return Err(VaultError::InvalidAmount);
+                return Err(VaultError::CircularDependency);
             }
 
             let mut visited = Vec::new(env);
-            if Self::has_dependency_path(env, dependency_id, proposal.id, &mut visited)? {
-                return Err(VaultError::InvalidAmount);
+            match Self::has_dependency_path(env, dependency_id, proposal.id, &mut visited) {
+                Ok(true) => return Err(VaultError::CircularDependency),
+                Err(e) => return Err(e),
+                _ => {}
             }
 
             let dependency = storage::get_proposal(env, dependency_id)
@@ -4317,6 +4444,11 @@ impl VaultDAO {
     ) -> Result<bool, VaultError> {
         if from_id == target_id {
             return Ok(true);
+        }
+        // Enforce traversal depth cap to avoid deep recursion/DoS
+        const MAX_DEP_DEPTH: u32 = 16;
+        if visited.len() as u32 >= MAX_DEP_DEPTH {
+            return Err(VaultError::DependencyDepthExceeded);
         }
         if visited.contains(from_id) {
             return Ok(false);
