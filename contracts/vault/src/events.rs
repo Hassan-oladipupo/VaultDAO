@@ -980,6 +980,47 @@ pub fn emit_dex_config_updated(env: &Env, admin: &Address) {
         .publish((Symbol::new(env, "dex_cfg_updated"),), admin.clone());
 }
 
+/// Emit event when a swap is executed
+pub fn emit_swap_executed(
+    env: &Env,
+    proposal_id: u64,
+    dex: &Address,
+    token_in: &Address,
+    token_out: &Address,
+    amount_in: i128,
+    amount_out: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "swap_executed"), proposal_id),
+        (dex.clone(), token_in.clone(), token_out.clone(), amount_in, amount_out),
+    );
+}
+
+/// Emit event when liquidity is added
+pub fn emit_liquidity_added(
+    env: &Env,
+    proposal_id: u64,
+    dex: &Address,
+    token_a: &Address,
+    token_b: &Address,
+    amount_a: i128,
+    amount_b: i128,
+    lp_tokens: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "liquidity_added"), proposal_id),
+        (dex.clone(), token_a.clone(), token_b.clone(), amount_a, amount_b, lp_tokens),
+    );
+}
+
+/// Emit event when LP tokens are unstaked
+pub fn emit_lp_unstaked(env: &Env, proposal_id: u64, farm: &Address, amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "lp_unstaked"), proposal_id),
+        (farm.clone(), amount),
+    );
+}
+
 pub fn emit_stream_created(
     env: &Env,
     stream_id: u64,

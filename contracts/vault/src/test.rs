@@ -3909,6 +3909,96 @@ fn test_execute_swap() {
 }
 
 #[test]
+fn test_execute_swap_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasurer = Address::generate(&env);
+    let executor = Address::generate(&env);
+    let dex = Address::generate(&env);
+    let token_in = Address::generate(&env);
+    let token_out = Address::generate(&env);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(treasurer.clone());
+    signers.push_back(executor.clone());
+
+    let config = InitConfig {
+        signers,
+        threshold: 2,
+        quorum: 0,
+        quorum_percentage: 0,
+        default_voting_deadline: 0,
+        spending_limit: 10000,
+        daily_limit: 50000,
+        weekly_limit: 100000,
+        timelock_threshold: 5000,
+        timelock_delay: 100,
+        velocity_limit: VelocityConfig {
+            limit: 100,
+            window: 3600,
+        },
+        threshold_strategy: ThresholdStrategy::Fixed,
+        retry_config: RetryConfig {
+            enabled: false,
+            max_retries: 0,
+            initial_backoff_ledgers: 0,
+        },
+        recovery_config: crate::types::RecoveryConfig::default(&env),
+        staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: soroban_sdk::Vec::new(&env),
+        post_execution_hooks: soroban_sdk::Vec::new(&env),
+        veto_addresses: soroban_sdk::Vec::new(&env),
+    };
+    client.initialize(&admin, &config);
+    client.set_role(&admin, &treasurer, &Role::Treasurer);
+
+    let mut enabled_dexs = Vec::new(&env);
+    enabled_dexs.push_back(dex.clone());
+    let dex_config = DexConfig {
+        enabled_dexs,
+        max_slippage_bps: 200, // 2%
+        max_price_impact_bps: 500, // 5%
+        min_liquidity: 1000,
+    };
+    client.set_dex_config(&admin, &dex_config);
+
+    // Propose swap
+    let swap_op = SwapProposal::Swap(dex.clone(), token_in.clone(), token_out.clone(), 1000, 950);
+    let proposal_id = client.propose_swap(
+        &treasurer,
+        &swap_op,
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    // Approve the proposal
+    client.approve_proposal(&treasurer, &proposal_id);
+    client.approve_proposal(&executor, &proposal_id);
+
+    // Execute the swap using new function
+    client.execute_swap_proposal(&executor, &proposal_id);
+
+    // Check that proposal is executed
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+
+    // Check that swap result is stored under FeatureKey::SwapResult(proposal_id)
+    let swap_result = client.get_swap_result(&proposal_id).unwrap();
+    assert_eq!(swap_result.amount_in, 1000);
+    assert_eq!(swap_result.amount_out, 990); // Mock: 1% slippage
+    assert!(swap_result.price_impact_bps <= 500); // Within max_price_impact_bps
+}
+}
+
+#[test]
 fn test_batch_propose_multi_token() {
     let env = Env::default();
     env.mock_all_auths();
