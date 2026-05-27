@@ -917,6 +917,7 @@ pub enum AuditAction {
     UpdateLimits = 8,
     UpdateThreshold = 9,
     AbstainProposal = 10,
+    AmendProposal = 11,
 }
 
 /// Audit trail entry with cryptographic verification

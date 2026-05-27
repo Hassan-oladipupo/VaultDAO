@@ -579,6 +579,194 @@ fn test_amend_proposal_enforces_spending_limit() {
 }
 
 #[test]
+fn test_amend_proposal_increase_amount_within_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&contract_id, &1000);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(proposer.clone());
+
+    let config = default_init_config(&env, signers, 1);
+    client.initialize(&admin, &config);
+    client.set_role(&admin, &proposer, &Role::Treasurer);
+
+    let proposal_id = client.propose_transfer(
+        &proposer,
+        &recipient,
+        &token,
+        &100_i128,
+        &Symbol::new(&env, "memo"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0_i128,
+    );
+
+    // Increase amount within limits should succeed
+    client.amend_proposal(
+        &proposer,
+        &proposal_id,
+        &recipient,
+        &200_i128,
+        &Symbol::new(&env, "edited"),
+    );
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.amount, 200_i128);
+}
+
+#[test]
+fn test_amend_proposal_increase_beyond_daily_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(proposer.clone());
+
+    let mut config = default_init_config(&env, signers, 1);
+    config.daily_limit = 150; // Set low daily limit
+    client.initialize(&admin, &config);
+    client.set_role(&admin, &proposer, &Role::Treasurer);
+
+    let proposal_id = client.propose_transfer(
+        &proposer,
+        &recipient,
+        &token,
+        &100_i128,
+        &Symbol::new(&env, "memo"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0_i128,
+    );
+
+    // Try to increase beyond daily limit
+    let res = client.try_amend_proposal(
+        &proposer,
+        &proposal_id,
+        &recipient,
+        &200_i128, // Would exceed daily limit of 150
+        &Symbol::new(&env, "edited"),
+    );
+    assert_eq!(res.err(), Some(Ok(VaultError::ExceedsDailyLimit)));
+}
+
+#[test]
+fn test_amend_proposal_decrease_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(proposer.clone());
+
+    let config = default_init_config(&env, signers, 1);
+    client.initialize(&admin, &config);
+    client.set_role(&admin, &proposer, &Role::Treasurer);
+
+    let proposal_id = client.propose_transfer(
+        &proposer,
+        &recipient,
+        &token,
+        &200_i128,
+        &Symbol::new(&env, "memo"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0_i128,
+    );
+
+    // Decrease amount should succeed and refund limits
+    client.amend_proposal(
+        &proposer,
+        &proposal_id,
+        &recipient,
+        &100_i128,
+        &Symbol::new(&env, "edited"),
+    );
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.amount, 100_i128);
+}
+
+#[test]
+fn test_amend_proposal_change_to_blacklisted_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let blacklisted_recipient = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(proposer.clone());
+
+    let config = default_init_config(&env, signers, 1);
+    client.initialize(&admin, &config);
+    client.set_role(&admin, &proposer, &Role::Treasurer);
+
+    // Set up blacklist mode and blacklist a recipient
+    client.set_list_mode(&admin, &ListMode::Blacklist);
+    client.add_to_blacklist(&admin, &blacklisted_recipient);
+
+    let proposal_id = client.propose_transfer(
+        &proposer,
+        &recipient,
+        &token,
+        &100_i128,
+        &Symbol::new(&env, "memo"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0_i128,
+    );
+
+    // Try to change to blacklisted recipient
+    let res = client.try_amend_proposal(
+        &proposer,
+        &proposal_id,
+        &blacklisted_recipient,
+        &100_i128,
+        &Symbol::new(&env, "edited"),
+    );
+    assert_eq!(res.err(), Some(Ok(VaultError::RecipientBlacklisted)));
+}
+
+#[test]
 fn test_priority_levels() {
     let env = Env::default();
     env.mock_all_auths();
