@@ -26,6 +26,20 @@ export function handleError(
   response: Response,
   _env: BackendEnv,
 ): void {
+  // body-parser sets type === 'entity.too.large' and status === 413
+  if (
+    err !== null &&
+    typeof err === "object" &&
+    (err as any).type === "entity.too.large"
+  ) {
+    errorResponse(response, {
+      message: "Payload Too Large",
+      status: 413,
+      code: ErrorCode.BAD_REQUEST,
+    });
+    return;
+  }
+
   let appError: AppError;
 
   if (err instanceof AppError) {
@@ -41,14 +55,22 @@ export function handleError(
 
   const code = appErrorToCode(appError);
   const details =
-    appError instanceof ValidationError ? appError.details : undefined;
+    appError instanceof ValidationError || appError.name === "ValidationError"
+      ? (appError as any).details
+      : undefined;
 
-  errorResponse(response, {
-    message: appError.safeMessage,
-    status: appError.statusCode,
-    code,
-    details,
-  });
+  errorResponse(
+    response,
+    {
+      message: appError.safeMessage,
+      status: appError.statusCode,
+      code,
+      details,
+    },
+    {
+      exposeDetails: true,
+    },
+  );
 }
 
 export function createErrorMiddleware(env: BackendEnv) {

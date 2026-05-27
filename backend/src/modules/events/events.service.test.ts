@@ -17,6 +17,8 @@ function createTestEnv(overrides: Partial<BackendEnv> = {}): BackendEnv {
     sorobanRpcUrl: "https://soroban-testnet.stellar.org",
     horizonUrl: "https://horizon-testnet.stellar.org",
     contractId: "CDTEST",
+    contractIds: [],
+    indexingParallelism: 4,
     websocketUrl: "ws://localhost:8080",
     eventPollingIntervalMs: 10,
     eventPollingEnabled: true,
@@ -223,14 +225,18 @@ test("poll failure increments consecutiveErrors then recovers on success", async
   const svc = createSvc(storage);
   await svc.start();
 
-  await delay(15);
+  for (let i = 0; i < 100 && svc.getStatus().errors !== 1; i++) {
+    await delay(10);
+  }
   assert.equal(
     svc.getStatus().errors,
     1,
     "first poll save should fail and increment errors",
   );
 
-  await delay(40);
+  for (let i = 0; i < 100 && svc.getStatus().errors !== 0; i++) {
+    await delay(10);
+  }
   assert.equal(
     svc.getStatus().errors,
     0,
@@ -251,7 +257,9 @@ test("getStatus exposes lastLedgerPolled after poll advances cursor", async () =
   const svc = createSvc(storage, {}, createNoOpRpcClient(50));
   await svc.start();
 
-  await delay(25);
+  for (let i = 0; i < 100 && svc.getStatus().lastLedgerPolled <= 10; i++) {
+    await delay(10);
+  }
   assert.ok(
     svc.getStatus().lastLedgerPolled > 10,
     "poll should advance lastLedgerPolled",
@@ -561,7 +569,9 @@ test("RPC Polling", async (t) => {
       await svc.start();
 
       // Let one poll fire
-      await delay(25);
+      for (let i = 0; i < 100 && !latestLedgerCalled; i++) {
+        await delay(10);
+      }
       svc.stop();
 
       assert.ok(
@@ -599,7 +609,9 @@ test("RPC Polling", async (t) => {
       const svc = createSvc(storage, {}, rpc);
       await svc.start();
 
-      await delay(25);
+      for (let i = 0; i < 100 && capturedStartLedgers.length < 1; i++) {
+        await delay(10);
+      }
       svc.stop();
 
       assert.equal(
@@ -620,7 +632,9 @@ test("RPC Polling", async (t) => {
       const svc = createSvc(storage, {}, rpc);
       await svc.start();
 
-      await delay(25);
+      for (let i = 0; i < 100 && svc.getStatus().lastLedgerPolled !== 250; i++) {
+        await delay(10);
+      }
       svc.stop();
 
       assert.equal(
@@ -648,11 +662,13 @@ test("RPC Polling", async (t) => {
       const svc = createSvc(storage, {}, rpc);
       await svc.start();
 
-      await delay(25);
+      const serviceAny = svc as any;
+      for (let i = 0; i < 100 && !serviceAny.processedEventIds.has("evt-abc"); i++) {
+        await delay(10);
+      }
       svc.stop();
 
       // The event should have been added to processedEventIds
-      const serviceAny = svc as any;
       assert.ok(
         serviceAny.processedEventIds.has("evt-abc"),
         "event id should be tracked after processing",
@@ -670,7 +686,9 @@ test("RPC Polling", async (t) => {
       const svc = createSvc(storage, {}, rpc);
       await svc.start();
 
-      await delay(25);
+      for (let i = 0; i < 100 && svc.getStatus().lastLedgerPolled !== 410; i++) {
+        await delay(10);
+      }
       svc.stop();
 
       assert.equal(svc.getStatus().errors, 0, "no errors on empty page");
@@ -710,7 +728,9 @@ test("RPC Polling", async (t) => {
     const svc = createSvc(storage, {}, rpc);
     await svc.start();
 
-    await delay(35);
+    for (let i = 0; i < 100 && callCount < 2; i++) {
+      await delay(10);
+    }
     svc.stop();
 
     assert.ok(
@@ -740,7 +760,9 @@ test("RPC Polling", async (t) => {
     await svc.start();
 
     // Let two polls fire
-    await delay(35);
+    for (let i = 0; i < 100 && pollCount < 2; i++) {
+      await delay(10);
+    }
     svc.stop();
 
     // processedEventIds should contain the event exactly once

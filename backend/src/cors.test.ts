@@ -51,7 +51,7 @@ test("CORS Production Behavior", async (t) => {
   };
 
   await t.test("Production: Reject disallowed origin with 403", async () => {
-    const app = createApp(prodEnv as any, mockRuntime as any);
+    const app = await createApp(prodEnv as any, mockRuntime as any);
     await new Promise<void>((resolve) => {
       const server = app.listen(0, "127.0.0.1", async () => {
         const address = server.address() as any;
@@ -82,7 +82,7 @@ test("CORS Production Behavior", async (t) => {
   });
 
   await t.test("Production: Allow allowed origin", async () => {
-    const app = createApp(prodEnv as any, mockRuntime as any);
+    const app = await createApp(prodEnv as any, mockRuntime as any);
     await new Promise<void>((resolve) => {
       const server = app.listen(0, "127.0.0.1", async () => {
         const address = server.address() as any;
@@ -113,7 +113,7 @@ test("CORS Production Behavior", async (t) => {
   await t.test(
     "Production: Allow no origin header (server-to-server)",
     async () => {
-      const app = createApp(prodEnv as any, mockRuntime as any);
+      const app = await createApp(prodEnv as any, mockRuntime as any);
       await new Promise<void>((resolve) => {
         const server = app.listen(0, "127.0.0.1", async () => {
           const address = server.address() as any;
@@ -154,7 +154,7 @@ test("CORS Development Behavior", async (t) => {
   await t.test(
     "Development: Allow disallowed origin (when * is allowed)",
     async () => {
-      const app = createApp(devEnv as any, mockRuntime as any);
+      const app = await createApp(devEnv as any, mockRuntime as any);
       await new Promise<void>((resolve) => {
         const server = app.listen(0, "127.0.0.1", async () => {
           const address = server.address() as any;
@@ -195,7 +195,7 @@ test("CORS Preflight Behavior", async (t) => {
   };
 
   await t.test("Preflight OPTIONS returns 204 with no body", async () => {
-    const app = createApp(prodEnv as any, mockRuntime as any);
+    const app = await createApp(prodEnv as any, mockRuntime as any);
     await new Promise<void>((resolve) => {
       const server = app.listen(0, "127.0.0.1", async () => {
         const address = server.address() as any;
@@ -220,7 +220,7 @@ test("CORS Preflight Behavior", async (t) => {
   });
 
   await t.test("Preflight: Access-Control-Allow-Methods is GET, POST, OPTIONS only", async () => {
-    const app = createApp(prodEnv as any, mockRuntime as any);
+    const app = await createApp(prodEnv as any, mockRuntime as any);
     await new Promise<void>((resolve) => {
       const server = app.listen(0, "127.0.0.1", async () => {
         const address = server.address() as any;
@@ -244,7 +244,7 @@ test("CORS Preflight Behavior", async (t) => {
   });
 
   await t.test("Preflight: Access-Control-Allow-Headers includes required values", async () => {
-    const app = createApp(prodEnv as any, mockRuntime as any);
+    const app = await createApp(prodEnv as any, mockRuntime as any);
     await new Promise<void>((resolve) => {
       const server = app.listen(0, "127.0.0.1", async () => {
         const address = server.address() as any;
@@ -281,7 +281,7 @@ test("CORS Credentials and Vary", async (t) => {
       requestBodyLimit: "1mb",
       apiKey: "test-api-key",
     };
-    const app = createApp(devEnv as any, mockRuntime as any);
+    const app = await createApp(devEnv as any, mockRuntime as any);
     await new Promise<void>((resolve) => {
       const server = app.listen(0, "127.0.0.1", async () => {
         const address = server.address() as any;
@@ -315,7 +315,7 @@ test("CORS Credentials and Vary", async (t) => {
       requestBodyLimit: "1mb",
       apiKey: "test-api-key",
     };
-    const app = createApp(prodEnv as any, mockRuntime as any);
+    const app = await createApp(prodEnv as any, mockRuntime as any);
     await new Promise<void>((resolve) => {
       const server = app.listen(0, "127.0.0.1", async () => {
         const address = server.address() as any;

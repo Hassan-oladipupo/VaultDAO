@@ -31,7 +31,7 @@ function waitForMessage(ws: WebSocket, predicate: (msg: any) => boolean): Promis
 }
 
 test("WebSocket Server", async (t) => {
-  const { server, runtime } = startServer(mockEnv as any);
+  const { server, runtime } = await startServer(mockEnv as any);
 
   if (!server.listening) {
     await new Promise((resolve) => server.once("listening", resolve));
@@ -220,7 +220,11 @@ test("WebSocket Server", async (t) => {
   });
 
   // Clean up server
+  runtime.wsServer?.stop();
   await runtime.jobManager.stopAll();
+  if (typeof (server as any).closeAllConnections === "function") {
+    (server as any).closeAllConnections();
+  }
   await new Promise<void>((resolve) => {
     server.close(() => resolve());
   });

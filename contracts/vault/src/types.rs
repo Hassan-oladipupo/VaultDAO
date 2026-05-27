@@ -555,6 +555,33 @@ pub struct VelocityConfig {
 // Reputation System (Issue: feature/reputation-system)
 // ============================================================================
 
+/// Admin-configurable parameters for reputation decay.
+///
+/// Decay formula (integer approximation):
+///   score = max(decay_min_score, score * 0.5 ^ (ledgers_since_last / half_life))
+///
+/// The exponent is computed as the number of complete half-life periods elapsed.
+/// Each period halves the distance between the current score and `decay_min_score`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReputationConfig {
+    /// Number of ledgers that constitute one half-life (~30 days default).
+    /// Must be > 0; a value of 0 disables decay entirely.
+    pub decay_half_life_ledgers: u64,
+    /// Floor score that decay can never push below (0–1000).
+    pub decay_min_score: u32,
+}
+
+impl Default for ReputationConfig {
+    fn default() -> Self {
+        ReputationConfig {
+            // ~30 days at 5 s/ledger
+            decay_half_life_ledgers: 17_280 * 30,
+            decay_min_score: 100,
+        }
+    }
+}
+
 /// Tracks proposer/approver behavior for incentive alignment
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -815,6 +842,64 @@ pub struct SwapResult {
 // ============================================================================
 // Cross-Chain Bridge (Issue: feature/cross-chain-bridge)
 // ============================================================================
+
+/// Identifies an external chain for bridge operations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainId {
+    /// Human-readable chain name (e.g. "ethereum", "polygon")
+    pub name: soroban_sdk::Symbol,
+    /// Numeric chain identifier (e.g. EVM chain ID)
+    pub chain_id: u64,
+}
+
+/// A single asset transfer leg in a cross-chain proposal.
+///
+/// # Fee accounting for multi-hop transfers
+/// Each hop may incur a bridge fee deducted from `amount`. The caller is
+/// responsible for supplying an `amount` that already accounts for all
+/// intermediate fees so that the final recipient receives the intended value.
+/// Fee documentation should be provided off-chain (e.g. in proposal metadata).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CrossChainAsset {
+    /// Token contract address on the source chain (Stellar SAC or custom)
+    pub token: soroban_sdk::Address,
+    /// Amount to bridge (in token's smallest unit)
+    pub amount: i128,
+    /// Destination chain identifier
+    pub destination_chain: ChainId,
+    /// Recipient address on the destination chain (encoded as a Symbol/String)
+    pub destination_address: soroban_sdk::String,
+}
+
+/// Configuration for the bridge module.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BridgeConfig {
+    /// Whether the bridge feature is enabled
+    pub enabled: bool,
+    /// Authorized bridge adapter contract addresses
+    pub bridge_adapters: soroban_sdk::Vec<soroban_sdk::Address>,
+    /// Maximum amount per single bridge action (in stroops)
+    pub max_action_amount: i128,
+    /// Maximum number of actions per bridge proposal
+    pub max_actions: u32,
+}
+
+/// A cross-chain bridge proposal stored alongside the base Proposal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CrossChainProposal {
+    /// Assets to bridge
+    pub assets: soroban_sdk::Vec<CrossChainAsset>,
+    /// Current execution status
+    pub status: CrossVaultStatus,
+    /// Per-asset execution results (true = success)
+    pub execution_results: soroban_sdk::Vec<bool>,
+    /// Ledger when executed (0 if not yet executed)
+    pub executed_at: u64,
+}
 
 /// Chain identifier for cross-chain operations
 #[contracttype]

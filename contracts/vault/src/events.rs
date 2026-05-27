@@ -1095,3 +1095,35 @@ pub fn emit_dispute_resolved(env: &Env, dispute_id: u64, admin: &Address, resolu
         (admin.clone(), resolution),
     );
 }
+
+// ============================================================================
+// Bridge Events (feature/cross-chain-bridge)
+// ============================================================================
+
+/// Emit when a bridge transfer proposal is created
+pub fn emit_bridge_proposed(env: &Env, proposal_id: u64, proposer: &Address, asset_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_proposed"), proposal_id),
+        (proposer.clone(), asset_count),
+    );
+}
+
+/// Emit when a bridge proposal is executed
+pub fn emit_bridge_executed(env: &Env, proposal_id: u64, executor: &Address, success_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_executed"), proposal_id),
+        (executor.clone(), success_count),
+    );
+}
+
+/// Emit when bridge configuration is updated
+pub fn emit_bridge_config_updated(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "bridge_cfg_updated"),), admin.clone());
+}
+
+/// Emit when reputation config is updated
+pub fn emit_reputation_config_updated(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "rep_config_updated"),), admin.clone());
+}

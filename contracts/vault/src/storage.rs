@@ -26,9 +26,9 @@ use crate::types::{
     Delegation, DelegationHistory, DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot,
     FeeStructure, FundingRound, FundingRoundConfig, GasConfig, InsuranceConfig, ListMode,
     NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalTemplate,
-    RecoveryProposal, Reputation, RetryState, Role, RoleAssignment, StakeRecord, StakingConfig,
-    Subscription, SwapProposal, SwapResult, TimeWeightedConfig, TokenLock, VaultMetrics,
-    VelocityConfig, VotingStrategy,
+    RecoveryProposal, Reputation, ReputationConfig, RetryState, Role, RoleAssignment, StakeRecord,
+    StakingConfig, Subscription, SwapProposal, SwapResult, TimeWeightedConfig, TokenLock,
+    VaultMetrics, VelocityConfig, VotingStrategy, BridgeConfig, CrossChainProposal,
 };
 
 /// Core storage key definitions (kept minimal to avoid size limits)
@@ -214,10 +214,14 @@ pub enum FeatureKey {
     NextSubscriptionId,
     /// Subscription IDs indexed by subscriber address -> Vec<u64>
     SubscriberIndex(Address),
-    /// Stored historical version of a template -> ProposalTemplate
-    TemplateVersion(u64, u32),
-    /// Count of stored versions per template -> u32
-    TemplateVersionCount(u64),
+    /// Reputation decay configuration -> ReputationConfig
+    ReputationConfig,
+    /// Bridge configuration -> BridgeConfig
+    BridgeConfig,
+    /// Cross-chain proposal -> CrossChainProposal
+    CrossChainProposal(u64),
+    /// Re-entrancy guard for bridge execution (proposal_id) -> bool
+    BridgeLock(u64),
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -988,33 +992,65 @@ pub fn set_reputation(env: &Env, addr: &Address, rep: &Reputation) {
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
 }
 
-/// Apply time-based decay to a reputation score.
-/// Every 30 days without activity, score drifts toward the neutral 500 by 5%.
+/// Apply time-based decay to a reputation score using the admin-configured
+/// `ReputationConfig`.
+///
+/// Decay formula (integer approximation of exponential half-life):
+///   For each complete half-life period elapsed:
+///     distance = score - decay_min_score
+///     score    = decay_min_score + (distance / 2)
+///
+/// This is equivalent to `score ≈ decay_min_score + (score - decay_min_score) * 0.5^periods`.
+///
+/// The function is deterministic: given the same `last_decay_ledger` and
+/// current ledger sequence it always produces the same result.
+/// `decay_min_score` is never breached.
 pub fn apply_reputation_decay(env: &Env, rep: &mut Reputation) {
     let current_ledger = env.ledger().sequence() as u64;
-    // ~30 days in ledgers
-    const DECAY_INTERVAL: u64 = 17_280 * 30;
+    let cfg = get_reputation_config(env);
+
+    // A half-life of 0 means decay is disabled.
+    if cfg.decay_half_life_ledgers == 0 {
+        rep.last_decay_ledger = current_ledger;
+        return;
+    }
+
     let elapsed = current_ledger.saturating_sub(rep.last_decay_ledger);
-    let periods = elapsed / DECAY_INTERVAL;
+    let periods = elapsed / cfg.decay_half_life_ledgers;
     if periods == 0 {
         rep.last_decay_ledger = current_ledger;
         return;
     }
-    // Move score toward neutral (500) by 5% per period
+
+    // Apply one halving per period, clamped to decay_min_score.
     for _ in 0..periods {
-        match rep.score.cmp(&500) {
-            core::cmp::Ordering::Greater => {
-                let diff = rep.score - 500;
-                rep.score = rep.score.saturating_sub(diff / 20 + 1);
-            }
-            core::cmp::Ordering::Less => {
-                let diff = 500 - rep.score;
-                rep.score = rep.score.saturating_add(diff / 20 + 1);
-            }
-            core::cmp::Ordering::Equal => {}
+        if rep.score <= cfg.decay_min_score {
+            rep.score = cfg.decay_min_score;
+            break;
         }
+        let distance = rep.score - cfg.decay_min_score;
+        // Integer halving: distance / 2 (rounds down, so score drifts toward floor)
+        rep.score = cfg.decay_min_score + (distance / 2);
     }
+
     rep.last_decay_ledger = current_ledger;
+}
+
+// ============================================================================
+// Reputation Config
+// ============================================================================
+
+pub fn get_reputation_config(env: &Env) -> ReputationConfig {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::ReputationConfig)
+        .unwrap_or_else(ReputationConfig::default)
+}
+
+pub fn set_reputation_config(env: &Env, config: &ReputationConfig) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::ReputationConfig, config);
 }
 
 // ============================================================================
@@ -2088,60 +2124,50 @@ pub fn add_to_subscriber_index(env: &Env, subscriber: &Address, subscription_id:
 }
 
 // ============================================================================
-// Template Version History
+// Bridge Storage
 // ============================================================================
 
-const MAX_TEMPLATE_VERSIONS: u32 = 10;
+pub fn get_bridge_config(env: &Env) -> Option<BridgeConfig> {
+    env.storage().instance().get(&FeatureKey::BridgeConfig)
+}
 
-/// Store a snapshot of a template version before overwriting.
-/// Prunes the oldest version if the cap (10) is exceeded.
-/// Returns the pruned version number if pruning occurred, otherwise None.
-pub fn store_template_version(env: &Env, template: &ProposalTemplate) -> Option<u32> {
-    let template_id = template.id;
-    let version = template.version;
+pub fn set_bridge_config(env: &Env, config: &BridgeConfig) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::BridgeConfig, config);
+}
 
-    // Save this version
-    let key = FeatureKey::TemplateVersion(template_id, version);
-    env.storage().persistent().set(&key, template);
+pub fn get_cross_chain_proposal(env: &Env, proposal_id: u64) -> Option<CrossChainProposal> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::CrossChainProposal(proposal_id))
+}
+
+pub fn set_cross_chain_proposal(env: &Env, proposal_id: u64, proposal: &CrossChainProposal) {
+    let key = FeatureKey::CrossChainProposal(proposal_id);
+    env.storage().persistent().set(&key, proposal);
     env.storage()
         .persistent()
         .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
-
-    // Update count and prune oldest if over cap
-    let count_key = FeatureKey::TemplateVersionCount(template_id);
-    let count: u32 = env
-        .storage()
-        .persistent()
-        .get(&count_key)
-        .unwrap_or(0);
-    let new_count = count + 1;
-
-    let pruned = if new_count > MAX_TEMPLATE_VERSIONS {
-        // Prune oldest: oldest version = new_count - MAX_TEMPLATE_VERSIONS
-        let oldest_version = new_count - MAX_TEMPLATE_VERSIONS;
-        let old_key = FeatureKey::TemplateVersion(template_id, oldest_version);
-        env.storage().persistent().remove(&old_key);
-        Some(oldest_version)
-    } else {
-        None
-    };
-
-    env.storage().persistent().set(&count_key, &new_count);
-    env.storage()
-        .persistent()
-        .extend_ttl(&count_key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
-
-    pruned
 }
 
-/// Retrieve a specific historical version of a template.
-pub fn get_template_version(
-    env: &Env,
-    template_id: u64,
-    version: u32,
-) -> Result<ProposalTemplate, VaultError> {
+/// Acquire the bridge re-entrancy lock for a proposal.
+/// Returns `true` if the lock was acquired (was not already held), `false` otherwise.
+pub fn acquire_bridge_lock(env: &Env, proposal_id: u64) -> bool {
+    let key = FeatureKey::BridgeLock(proposal_id);
+    if env.storage().temporary().get::<_, bool>(&key).unwrap_or(false) {
+        return false; // already locked
+    }
+    env.storage().temporary().set(&key, &true);
     env.storage()
-        .persistent()
-        .get(&FeatureKey::TemplateVersion(template_id, version))
-        .ok_or(VaultError::TemplateNotFound)
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
+    true
+}
+
+/// Release the bridge re-entrancy lock for a proposal.
+pub fn release_bridge_lock(env: &Env, proposal_id: u64) {
+    env.storage()
+        .temporary()
+        .remove(&FeatureKey::BridgeLock(proposal_id));
 }

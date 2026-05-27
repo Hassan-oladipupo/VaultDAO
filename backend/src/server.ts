@@ -54,10 +54,10 @@ export interface BackendServer {
   readonly runtime: BackendRuntime;
 }
 
-export function startServer(
+export async function startServer(
   env: BackendEnv = loadEnv(),
   notificationQueue?: NotificationQueue,
-): BackendServer {
+): Promise<BackendServer> {
   const metricsRegistry = new MetricsRegistry();
 
   // Register metrics
@@ -131,7 +131,7 @@ export function startServer(
     cacheManager,
   };
 
-  const app = createApp(env, runtime);
+  const app = await createApp(env, runtime);
 
   const server = app.listen(env.port, env.host, () => {
     const logger = createLogger("vaultdao-backend");
