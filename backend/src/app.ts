@@ -15,6 +15,7 @@ import { createTransactionsRouter } from "./modules/transactions/transactions.ro
 import { createAuditRouter } from "./modules/audit/audit.routes.js";
 import { createNotificationsRouter } from "./modules/notifications/notifications.routes.js";
 import { createCacheRouter } from "./shared/cache/cache.routes.js";
+import { createVaultRouter } from "./modules/vault/vault.routes.js";
 import { error } from "./shared/http/response.js";
 import { createRateLimitMiddleware } from "./shared/http/rateLimit.js";
 import { createAuthMiddleware, requireApiKey } from "./shared/http/auth.js";
@@ -198,6 +199,20 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
       createCacheRouter(runtime.cacheManager),
     );
   }
+
+  const networkPassphrases: Record<string, string> = {
+    testnet: "Test SDF Network ; September 2015",
+    mainnet: "Public Global Stellar Network ; October 2015",
+    futurenet: "Test SDF Future Network ; October 2022",
+    standalone: "Standalone Network ; Latitude 0",
+  };
+  const passphrase = networkPassphrases[env.stellarNetwork?.toLowerCase() ?? "testnet"] ?? networkPassphrases.testnet;
+
+  v1Router.use(
+    "/vault",
+    authMiddleware,
+    createVaultRouter(env.sorobanRpcUrl, passphrase, runtime.cacheManager),
+  );
 
   app.use("/api/v1", v1Router);
 
