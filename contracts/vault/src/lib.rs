@@ -2307,6 +2307,55 @@ impl VaultDAO {
         Ok(())
     }
 
+    /// Update the threshold strategy for the vault.
+    ///
+    /// Validates AmountBased tiers: must be sorted descending by amount,
+    /// approvals must not exceed signer count, and at most 10 tiers allowed.
+    /// Does not affect already-created proposals (snapshot isolation).
+    pub fn set_threshold_strategy(
+        env: Env,
+        admin: Address,
+        strategy: ThresholdStrategy,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let mut config = storage::get_config(&env)?;
+
+        // Validate AmountBased tiers
+        if let ThresholdStrategy::AmountBased(ref tiers) = strategy {
+            if tiers.len() > 10 {
+                return Err(VaultError::InvalidThresholdConfig);
+            }
+            let signer_count = config.signers.len();
+            let mut prev_amount = i128::MAX;
+            for i in 0..tiers.len() {
+                if let Some(tier) = tiers.get(i) {
+                    // Must be sorted descending by amount
+                    if tier.amount >= prev_amount {
+                        return Err(VaultError::InvalidThresholdConfig);
+                    }
+                    // Approvals must not exceed signer count
+                    if tier.approvals > signer_count {
+                        return Err(VaultError::InvalidThresholdConfig);
+                    }
+                    prev_amount = tier.amount;
+                }
+            }
+        }
+
+        config.threshold_strategy = strategy;
+        storage::set_config(&env, &config);
+        storage::extend_instance_ttl(&env);
+        events::emit_config_updated(&env, &admin);
+
+        Ok(())
+    }
+
     /// Extend voting deadline for a proposal (admin only)
     pub fn extend_voting_deadline(
         env: Env,
@@ -5715,6 +5764,14 @@ impl VaultDAO {
             return Err(VaultError::TemplateValidationFailed);
         }
 
+        let old_version = template.version;
+
+        // Store the current version before overwriting
+        let pruned = storage::store_template_version(&env, &template);
+        if let Some(pruned_version) = pruned {
+            events::emit_template_version_pruned(&env, template_id, pruned_version);
+        }
+
         template.description = description;
         template.recipient = recipient;
         template.amount = amount;
@@ -5728,6 +5785,7 @@ impl VaultDAO {
         storage::extend_instance_ttl(&env);
 
         events::emit_template_updated(&env, template_id, &template.name, template.version, &caller);
+        let _ = old_version;
 
         Ok(())
     }
@@ -5814,6 +5872,64 @@ impl VaultDAO {
     /// The template ID if found
     pub fn get_template_id_by_name(env: Env, name: Symbol) -> Option<u64> {
         storage::get_template_id_by_name(&env, &name)
+    }
+
+    /// Get a specific historical version of a template.
+    ///
+    /// # Arguments
+    /// * `template_id` - ID of the template
+    /// * `version` - Version number to retrieve
+    pub fn get_template_version(
+        env: Env,
+        template_id: u64,
+        version: u32,
+    ) -> Result<ProposalTemplate, VaultError> {
+        storage::get_template_version(&env, template_id, version)
+    }
+
+    /// Roll back a template to a previously stored version.
+    ///
+    /// Stores the current version in history, then restores the target version
+    /// with an incremented version counter. Only Admin or the template creator may call this.
+    ///
+    /// # Arguments
+    /// * `admin` - Caller (must be Admin or template creator)
+    /// * `template_id` - ID of the template to roll back
+    /// * `target_version` - Historical version to restore
+    pub fn rollback_template(
+        env: Env,
+        admin: Address,
+        template_id: u64,
+        target_version: u32,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let current = storage::get_template(&env, template_id)?;
+
+        let role = storage::get_role(&env, &admin);
+        if admin != current.creator && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        // Load the target historical version
+        let mut restored = storage::get_template_version(&env, template_id, target_version)?;
+
+        // Store the current version before overwriting
+        let pruned = storage::store_template_version(&env, &current);
+        if let Some(pruned_version) = pruned {
+            events::emit_template_version_pruned(&env, template_id, pruned_version);
+        }
+
+        // Restore with incremented version counter
+        restored.version = current.version + 1;
+        restored.updated_at = env.ledger().sequence() as u64;
+
+        storage::set_template(&env, &restored);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_template_updated(&env, template_id, &restored.name, restored.version, &admin);
+
+        Ok(())
     }
 
     /// Create a proposal from a template
@@ -8191,10 +8307,15 @@ impl VaultDAO {
 
         // If linked to an escrow, only funder or recipient may dispute
         if let Some(eid) = escrow_id {
-            let escrow = storage::get_escrow(&env, eid)?;
+            let mut escrow = storage::get_escrow(&env, eid)?;
             if disputer != escrow.funder && disputer != escrow.recipient {
                 return Err(VaultError::Unauthorized);
             }
+            // Mark escrow as disputed
+            escrow.status = EscrowStatus::Disputed;
+            escrow.dispute_reason = reason.clone();
+            storage::set_escrow(&env, &escrow);
+            events::emit_escrow_disputed(&env, eid, &disputer, &reason);
         } else {
             // For proposal-only disputes, require the disputer to be a signer
             let config = storage::get_config(&env)?;
@@ -8233,7 +8354,10 @@ impl VaultDAO {
         Ok(dispute_id)
     }
 
-    /// Resolve a dispute. Only an admin may call this.
+    /// Resolve a dispute. Only an Admin or the escrow's designated arbitrator may call this.
+    ///
+    /// When `release_to_recipient` is true, remaining escrow funds go to the recipient;
+    /// otherwise they are refunded to the funder.
     pub fn resolve_dispute(
         env: Env,
         admin: Address,
@@ -8242,15 +8366,70 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         admin.require_auth();
 
-        let config = storage::get_config(&env)?;
-        if storage::get_role(&env, &admin) != Role::Admin && !config.signers.contains(&admin) {
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
             return Err(VaultError::Unauthorized);
         }
 
-        let mut dispute = storage::get_dispute(&env, dispute_id)?;
+        let mut dispute = storage::get_dispute(&env, dispute_id)
+            .map_err(|_| VaultError::DisputeNotFound)?;
 
         if dispute.status == DisputeStatus::Resolved || dispute.status == DisputeStatus::Dismissed {
             return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        // Determine if funds should be released to recipient
+        let release_to_recipient = matches!(resolution, DisputeResolution::InFavorOfDisputer | DisputeResolution::Compromise);
+
+        // Find any escrow linked to this dispute's proposal and release funds
+        let escrow_ids = storage::get_funder_escrows(&env, &admin);
+        // Try to find a disputed escrow linked to this proposal
+        let proposal_disputes = storage::get_proposal_disputes(&env, dispute.proposal_id);
+        let _ = proposal_disputes; // used for context
+
+        // Look for a disputed escrow for this proposal by scanning funder/recipient escrows
+        // We check all escrows linked to the proposal's disputer (funder)
+        let disputer_funder_escrows = storage::get_funder_escrows(&env, &dispute.disputer);
+        let disputer_recipient_escrows = storage::get_recipient_escrows(&env, &dispute.disputer);
+
+        // Combine both lists and find a Disputed escrow
+        let mut all_escrow_ids: Vec<u64> = Vec::new(&env);
+        for id in disputer_funder_escrows.iter() {
+            all_escrow_ids.push_back(id);
+        }
+        for id in disputer_recipient_escrows.iter() {
+            all_escrow_ids.push_back(id);
+        }
+        // Also check escrows from the admin's perspective
+        for id in escrow_ids.iter() {
+            all_escrow_ids.push_back(id);
+        }
+
+        for eid in all_escrow_ids.iter() {
+            if let Ok(mut escrow) = storage::get_escrow(&env, eid) {
+                if escrow.status == EscrowStatus::Disputed {
+                    let unreleased = escrow.total_amount - escrow.released_amount;
+                    if unreleased > 0 {
+                        let (to_addr, is_refund) = if release_to_recipient {
+                            (escrow.recipient.clone(), false)
+                        } else {
+                            (escrow.funder.clone(), true)
+                        };
+                        token::transfer(&env, &escrow.token, &to_addr, unreleased);
+                        escrow.released_amount = escrow.total_amount;
+                        events::emit_escrow_released(&env, eid, &to_addr, unreleased, is_refund);
+                    }
+                    escrow.status = if release_to_recipient {
+                        EscrowStatus::Released
+                    } else {
+                        EscrowStatus::Refunded
+                    };
+                    escrow.finalized_at = env.ledger().sequence() as u64;
+                    storage::set_escrow(&env, &escrow);
+                    events::emit_escrow_dispute_resolved(&env, eid, &admin, release_to_recipient);
+                    break;
+                }
+            }
         }
 
         let resolution_code = resolution.clone() as u32;

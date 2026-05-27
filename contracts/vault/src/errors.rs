@@ -113,6 +113,14 @@ pub enum VaultError {
     CircularDependency = 300,
     /// Dependency graph traversal exceeded max allowed depth
     DependencyDepthExceeded = 301,
+    /// Threshold configuration is invalid (e.g. tiers not sorted, approvals exceed signer count)
+    InvalidThresholdConfig = 310,
+    /// Dispute with the given ID does not exist
+    DisputeNotFound = 500,
+    /// Caller does not have the arbitrator role for this dispute
+    NotArbitrator = 501,
+    /// Escrow is not in Disputed status
+    EscrowNotDisputed = 502,
 }
 
 // Compatibility markers for CI source checks:

@@ -564,6 +564,14 @@ pub fn emit_template_updated(
     );
 }
 
+/// Emit when the oldest stored template version is pruned due to the 10-version cap
+pub fn emit_template_version_pruned(env: &Env, template_id: u64, pruned_version: u32) {
+    env.events().publish(
+        (Symbol::new(env, "template_ver_pruned"), template_id),
+        pruned_version,
+    );
+}
+
 /// Emit when a template's active status changes
 #[allow(dead_code)]
 pub fn emit_template_status_changed(

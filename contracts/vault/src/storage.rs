@@ -214,6 +214,10 @@ pub enum FeatureKey {
     NextSubscriptionId,
     /// Subscription IDs indexed by subscriber address -> Vec<u64>
     SubscriberIndex(Address),
+    /// Stored historical version of a template -> ProposalTemplate
+    TemplateVersion(u64, u32),
+    /// Count of stored versions per template -> u32
+    TemplateVersionCount(u64),
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -2081,4 +2085,63 @@ pub fn add_to_subscriber_index(env: &Env, subscriber: &Address, subscription_id:
     env.storage()
         .persistent()
         .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+// ============================================================================
+// Template Version History
+// ============================================================================
+
+const MAX_TEMPLATE_VERSIONS: u32 = 10;
+
+/// Store a snapshot of a template version before overwriting.
+/// Prunes the oldest version if the cap (10) is exceeded.
+/// Returns the pruned version number if pruning occurred, otherwise None.
+pub fn store_template_version(env: &Env, template: &ProposalTemplate) -> Option<u32> {
+    let template_id = template.id;
+    let version = template.version;
+
+    // Save this version
+    let key = FeatureKey::TemplateVersion(template_id, version);
+    env.storage().persistent().set(&key, template);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+
+    // Update count and prune oldest if over cap
+    let count_key = FeatureKey::TemplateVersionCount(template_id);
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&count_key)
+        .unwrap_or(0);
+    let new_count = count + 1;
+
+    let pruned = if new_count > MAX_TEMPLATE_VERSIONS {
+        // Prune oldest: oldest version = new_count - MAX_TEMPLATE_VERSIONS
+        let oldest_version = new_count - MAX_TEMPLATE_VERSIONS;
+        let old_key = FeatureKey::TemplateVersion(template_id, oldest_version);
+        env.storage().persistent().remove(&old_key);
+        Some(oldest_version)
+    } else {
+        None
+    };
+
+    env.storage().persistent().set(&count_key, &new_count);
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+
+    pruned
+}
+
+/// Retrieve a specific historical version of a template.
+pub fn get_template_version(
+    env: &Env,
+    template_id: u64,
+    version: u32,
+) -> Result<ProposalTemplate, VaultError> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::TemplateVersion(template_id, version))
+        .ok_or(VaultError::TemplateNotFound)
 }
