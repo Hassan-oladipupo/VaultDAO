@@ -3821,7 +3821,7 @@ fn test_dex_not_enabled_error() {
 }
 
 #[test]
-fn test_execute_swap() {
+fn test_execute_swap_proposal() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -3896,7 +3896,7 @@ fn test_execute_swap() {
     client.approve_proposal(&executor, &proposal_id);
 
     // Execute the swap
-    client.execute_swap(&executor, &proposal_id);
+    client.execute_swap_proposal(&executor, &proposal_id);
 
     // Check that proposal is executed
     let proposal = client.get_proposal(&proposal_id);
