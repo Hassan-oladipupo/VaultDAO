@@ -30,7 +30,7 @@ fn setup_comments(env: &Env) -> (VaultDAOClient, Address, Address, Address, u64)
         weekly_limit: 10000,
         timelock_threshold: 5000,
         timelock_delay: 100,
-        velocity_limit: VelocityConfig { limit: 100, window: 3600 },
+        velocity_limit: VelocityConfig { limit: 100, window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         veto_addresses: Vec::new(env),

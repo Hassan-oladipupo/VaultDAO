@@ -39,8 +39,7 @@ fn deadline_init_config(env: &Env, signers: Vec<Address>, deadline_offset: u64) 
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         pre_execution_hooks: Vec::new(env),
         post_execution_hooks: Vec::new(env),
@@ -566,8 +565,7 @@ fn test_other_rejection_already_approved() {
         timelock_delay: 100,
         velocity_limit: crate::types::VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: crate::types::ThresholdStrategy::Fixed,
         pre_execution_hooks: Vec::new(&env),
         post_execution_hooks: Vec::new(&env),
@@ -888,8 +886,7 @@ fn test_time_based_threshold_before_reduction() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 3, // Requires 3 approvals initially
             reduced_threshold: 2, // Reduces to 2 after delay
@@ -977,8 +974,7 @@ fn test_time_based_threshold_after_reduction() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 3,
             reduced_threshold: 2,
@@ -1071,8 +1067,7 @@ fn test_time_based_threshold_respects_quorum() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 3,
             reduced_threshold: 2,
@@ -1159,8 +1154,7 @@ fn test_time_based_threshold_reduction_irreversible() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 2,
             reduced_threshold: 1,
@@ -1255,8 +1249,7 @@ fn test_time_based_threshold_config_validation() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 2,
             reduced_threshold: 3, // Invalid: greater than initial
@@ -1292,8 +1285,7 @@ fn test_time_based_threshold_config_validation() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 2,
             reduced_threshold: 0, // Invalid: less than 1
@@ -1329,8 +1321,7 @@ fn test_time_based_threshold_config_validation() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 2, // Invalid: less than global threshold
             reduced_threshold: 1,
@@ -1366,8 +1357,7 @@ fn test_time_based_threshold_config_validation() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 3, // Valid: >= global threshold
             reduced_threshold: 2, // Valid: <= initial_threshold and >= 1

@@ -37,8 +37,7 @@ fn test_audit_chain_integrity_after_5_entries() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -122,8 +121,7 @@ fn test_audit_chain_tamper_detection() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -202,8 +200,7 @@ fn test_audit_hash_deterministic() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -265,8 +262,7 @@ fn test_performance_100_entry_chain() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -335,8 +331,7 @@ fn test_audit_chain_edge_cases() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,

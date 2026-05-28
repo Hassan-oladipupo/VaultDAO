@@ -17,8 +17,9 @@ mod tests {
             interval: 1000,
             next_payment_ledger: 2000,
             payment_count: 0,
-            is_active: true,
-            max_missed_payments: 5, // New field
+            status: crate::types::RecurringStatus::Active,
+            max_missed_payments: 5,
+            paused_at_ledger: 0,
         };
         
         assert_eq!(payment.max_missed_payments, 5);

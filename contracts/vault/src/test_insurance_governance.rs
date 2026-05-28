@@ -34,7 +34,7 @@ fn setup_insurance(
         weekly_limit: 50000,
         timelock_threshold: 50000,
         timelock_delay: 100,
-        velocity_limit: VelocityConfig { limit: 100, window: 3600 },
+        velocity_limit: VelocityConfig { limit: 100, window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         veto_addresses: Vec::new(env),

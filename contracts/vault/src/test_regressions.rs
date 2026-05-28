@@ -28,8 +28,7 @@ fn init_config(
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: strategy,
         pre_execution_hooks: Vec::new(env),
         post_execution_hooks: Vec::new(env),
@@ -980,8 +979,7 @@ fn test_execute_before_timelock_expires_fails() {
         timelock_delay: 200,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         pre_execution_hooks: Vec::new(&env),
         post_execution_hooks: Vec::new(&env),
@@ -1346,4 +1344,184 @@ fn test_batch_status_transitions() {
     // Try to execute again - should fail
     let result = client.try_execute_batch(&admin, &batch_id);
     assert_eq!(result, Err(Ok(VaultError::InvalidAmount))); // Reusing existing error for invalid state
+}
+
+// ============================================================================
+// Issue #935: Proposal Status Transition Validation State Machine
+// ============================================================================
+
+#[test]
+fn test_valid_status_transitions() {
+    use crate::types::ProposalStatus;
+    use crate::VaultDAO;
+
+    // Pending → valid targets
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Approved).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Expired).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Cancelled).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Rejected).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Vetoed).is_ok());
+
+    // Approved → valid targets
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Approved, ProposalStatus::Executed).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Approved, ProposalStatus::Scheduled).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Approved, ProposalStatus::Cancelled).is_ok());
+
+    // Scheduled → valid targets
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Scheduled, ProposalStatus::Executed).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Scheduled, ProposalStatus::Cancelled).is_ok());
+}
+
+#[test]
+fn test_invalid_status_transitions() {
+    use crate::types::ProposalStatus;
+    use crate::{VaultDAO, errors::VaultError};
+
+    // Executed is terminal
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Executed, ProposalStatus::Pending),
+        Err(VaultError::InvalidStatusTransition)
+    );
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Executed, ProposalStatus::Approved),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Rejected is terminal
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Rejected, ProposalStatus::Pending),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Cancelled is terminal
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Cancelled, ProposalStatus::Approved),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Expired is terminal
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Expired, ProposalStatus::Approved),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Vetoed is terminal
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Vetoed, ProposalStatus::Approved),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Pending cannot go directly to Executed
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Executed),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Approved cannot go to Pending
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Approved, ProposalStatus::Pending),
+        Err(VaultError::InvalidStatusTransition)
+    );
+}
+
+// ============================================================================
+// Issue #937: Proposal Dependency Execution Order Enforcement
+// ============================================================================
+
+fn setup_dependency_env(env: &Env) -> (VaultDAOClient, Address, Address, Address) {
+    env.mock_all_auths();
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    let mut signers = Vec::new(env);
+    signers.push_back(admin.clone());
+    client.initialize(&admin, &init_config(env, signers, 1, ThresholdStrategy::Fixed));
+    client.set_role(&admin, &admin, &Role::Treasurer);
+
+    let token_admin = Address::generate(env);
+    let token = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    StellarAssetClient::new(env, &token).mint(&contract_id, &1_000_000);
+
+    let recipient = Address::generate(env);
+    (client, admin, token, recipient)
+}
+
+#[test]
+fn test_same_ledger_dependency_rejected() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup_dependency_env(&env);
+
+    // Create dependency proposal (proposal 1)
+    let dep_id = client.propose_transfer(
+        &admin, &recipient, &token, &100i128,
+        &Symbol::new(&env, "dep"), &Priority::Normal, &Vec::new(&env),
+    );
+    client.approve_proposal(&admin, &dep_id);
+
+    // Create dependent proposal (proposal 2)
+    let mut deps = Vec::new(&env);
+    deps.push_back(dep_id);
+    let dep2_id = client.propose_transfer_with_deps(
+        &admin, &recipient, &token, &100i128,
+        &Symbol::new(&env, "dep2"), &Priority::Normal, &Vec::new(&env), &deps,
+    );
+    client.approve_proposal(&admin, &dep2_id);
+
+    // Execute dep_id — sets execution_ledger = current_ledger
+    client.execute_proposal(&admin, &dep_id);
+
+    // Try to execute dep2_id in the SAME ledger — must fail with DependencyNotExecuted
+    let result = client.try_execute_proposal(&admin, &dep2_id);
+    assert_eq!(result, Err(Ok(VaultError::DependencyNotExecuted)));
+}
+
+#[test]
+fn test_cross_ledger_dependency_succeeds() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup_dependency_env(&env);
+
+    let dep_id = client.propose_transfer(
+        &admin, &recipient, &token, &100i128,
+        &Symbol::new(&env, "dep"), &Priority::Normal, &Vec::new(&env),
+    );
+    client.approve_proposal(&admin, &dep_id);
+
+    let mut deps = Vec::new(&env);
+    deps.push_back(dep_id);
+    let dep2_id = client.propose_transfer_with_deps(
+        &admin, &recipient, &token, &100i128,
+        &Symbol::new(&env, "dep2"), &Priority::Normal, &Vec::new(&env), &deps,
+    );
+    client.approve_proposal(&admin, &dep2_id);
+
+    // Execute dep_id on ledger N
+    client.execute_proposal(&admin, &dep_id);
+
+    // Advance to ledger N+1
+    env.ledger().with_mut(|l| l.sequence_number += 1);
+
+    // Now dep2_id should execute successfully
+    client.execute_proposal(&admin, &dep2_id);
+
+    let p = client.get_proposal(&dep2_id);
+    assert_eq!(p.status, crate::types::ProposalStatus::Executed);
+    assert!(p.execution_ledger > 0);
+}
+
+#[test]
+fn test_execution_ledger_set_on_execute() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup_dependency_env(&env);
+
+    let id = client.propose_transfer(
+        &admin, &recipient, &token, &100i128,
+        &Symbol::new(&env, "p"), &Priority::Normal, &Vec::new(&env),
+    );
+    client.approve_proposal(&admin, &id);
+
+    let before = env.ledger().sequence() as u64;
+    client.execute_proposal(&admin, &id);
+
+    let p = client.get_proposal(&id);
+    assert_eq!(p.execution_ledger, before);
 }

@@ -32,8 +32,7 @@ fn default_init_config(
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         veto_addresses: Vec::new(_env),
@@ -160,8 +159,7 @@ fn test_multisig_approval() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -240,8 +238,7 @@ fn test_unauthorized_proposal() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -307,8 +304,7 @@ fn test_timelock_violation() {
         timelock_delay: 200,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -797,8 +793,7 @@ fn test_priority_levels() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -901,8 +896,7 @@ fn test_get_proposals_by_priority() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -983,8 +977,7 @@ fn test_change_priority_unauthorized() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -1048,8 +1041,7 @@ fn test_comment_functionality() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -1139,8 +1131,7 @@ fn test_blacklist_mode() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -1223,8 +1214,7 @@ fn test_abstention_does_not_count_toward_threshold() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -1298,8 +1288,7 @@ fn test_list_management() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -1362,8 +1351,7 @@ fn test_cannot_abstain_after_voting() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -1430,8 +1418,7 @@ fn test_cannot_abstain_twice() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -1499,8 +1486,7 @@ fn test_velocity_limit_enforcement() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 2,
-            window: 60,
-        },
+            window: 60, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -1565,8 +1551,7 @@ fn test_propose_transfer_exact_spending_limit_passes_and_limit_plus_one_fails() 
         20_000,
         VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
     );
 
     let proposal_id = client.propose_transfer(
@@ -1608,8 +1593,7 @@ fn test_propose_transfer_daily_limit_accumulates_across_multiple_proposals() {
         10_000,
         VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
     );
 
     client.propose_transfer(
@@ -1661,8 +1645,7 @@ fn test_propose_transfer_weekly_limit_accumulates_across_multiple_proposals() {
         900,
         VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
     );
 
     client.propose_transfer(
@@ -1725,8 +1708,7 @@ fn test_propose_transfer_reputation_boost_thresholds_at_799_800_and_900() {
         20_000,
         VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
     );
 
     set_exact_reputation(&env, &proposer, 799);
@@ -1812,8 +1794,7 @@ fn test_cancel_proposal_refunds_daily_and_weekly_spending_limits() {
         1000,
         VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
     );
 
     let proposal_id = client.propose_transfer(
@@ -1886,8 +1867,7 @@ fn test_verify_attachment() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -1952,8 +1932,7 @@ fn test_remove_attachment() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -2024,8 +2003,7 @@ fn test_attachment_unauthorized() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -2093,8 +2071,7 @@ fn test_attachment_duplicate() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -2162,8 +2139,7 @@ fn test_attachment_invalid_hash() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -2228,8 +2204,7 @@ fn test_admin_can_add_attachment() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -2294,8 +2269,7 @@ fn test_duplicate_attachment_rejected() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -2364,8 +2338,7 @@ fn test_set_and_get_proposal_metadata() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -2438,8 +2411,7 @@ fn test_remove_proposal_metadata() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -2511,8 +2483,7 @@ fn test_proposal_metadata_unauthorized() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -2995,8 +2966,7 @@ fn test_fixed_threshold_strategy() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -3072,8 +3042,7 @@ fn test_percentage_threshold_strategy() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Percentage(67),
         retry_config: RetryConfig {
             enabled: false,
@@ -3166,8 +3135,7 @@ fn test_amount_based_threshold_strategy() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::AmountBased(tiers),
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -3292,8 +3260,7 @@ fn test_time_based_threshold_strategy() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 3,
             reduced_threshold: 2,
@@ -3373,8 +3340,7 @@ fn test_condition_balance_above() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
@@ -3447,8 +3413,7 @@ fn test_condition_date_after() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -3532,8 +3497,7 @@ fn test_condition_multiple_and_logic() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -3623,8 +3587,7 @@ fn test_condition_multiple_or_logic() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -3707,8 +3670,7 @@ fn test_condition_no_conditions() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -3778,8 +3740,7 @@ fn test_dex_config_setup() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -3844,8 +3805,7 @@ fn test_swap_proposal_creation() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -3916,8 +3876,7 @@ fn test_dex_not_enabled_error() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -3977,8 +3936,7 @@ fn test_execute_swap_proposal() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -4066,8 +4024,7 @@ fn test_execute_swap_proposal() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -4122,7 +4079,6 @@ fn test_execute_swap_proposal() {
     assert_eq!(swap_result.amount_out, 990); // Mock: 1% slippage
     assert!(swap_result.price_impact_bps <= 500); // Within max_price_impact_bps
 }
-}
 
 #[test]
 fn test_batch_propose_multi_token() {
@@ -4155,8 +4111,7 @@ fn test_batch_propose_multi_token() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -4241,8 +4196,7 @@ fn test_batch_propose_exceeds_max_size() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -4317,8 +4271,7 @@ fn test_quorum_disabled_behaves_like_fixed_threshold() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -4393,8 +4346,7 @@ fn test_quorum_blocks_approval_until_satisfied() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -4491,8 +4443,7 @@ fn test_abstentions_count_toward_quorum_but_not_threshold() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -4589,8 +4540,7 @@ fn test_get_quorum_status() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -4674,8 +4624,7 @@ fn test_get_quorum_status_quorum_disabled() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -4738,8 +4687,7 @@ fn test_update_quorum() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -4802,8 +4750,7 @@ fn test_execution_rechecks_quorum_requirement() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -4879,8 +4826,7 @@ fn test_batch_execution_rechecks_quorum_requirement() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -4961,8 +4907,7 @@ fn test_quorum_satisfied_by_approvals_alone() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -5030,8 +4975,7 @@ fn test_initialize_rejects_quorum_too_high() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -5091,8 +5035,7 @@ macro_rules! setup_retry_test {
             timelock_delay: 100,
             velocity_limit: VelocityConfig {
                 limit: 100,
-                window: 3600,
-            },
+                window: 3600, per_token_limit: 0 },
             threshold_strategy: ThresholdStrategy::Fixed,
             default_voting_deadline: 0,
             retry_config: RetryConfig {
@@ -5289,8 +5232,7 @@ fn test_retry_not_enabled_passes_through_error() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -5395,8 +5337,7 @@ fn test_retry_disabled_rejects_retry_execution() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -5936,8 +5877,7 @@ fn test_cross_vault_multi_vault_actions() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -6430,8 +6370,7 @@ fn test_reputation_initialized_at_neutral() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -6491,8 +6430,7 @@ fn test_reputation_increases_on_proposal_creation() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -6562,8 +6500,7 @@ fn test_reputation_increases_on_approval() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -6638,8 +6575,7 @@ fn test_participation_tracking_on_abstention() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -6710,8 +6646,7 @@ fn test_reputation_increases_on_execution() {
         timelock_delay: 0, // No timelock
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -6786,8 +6721,7 @@ fn test_reputation_decreases_on_rejection() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -6864,8 +6798,7 @@ fn test_reputation_decay_over_time() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -6957,8 +6890,7 @@ fn test_create_from_template_with_overrides() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -7042,8 +6974,7 @@ fn test_create_from_template_amount_out_of_range() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -7132,8 +7063,7 @@ fn test_create_from_inactive_template() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -7215,8 +7145,7 @@ fn test_reputation_based_spending_limit() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -7297,8 +7226,7 @@ fn test_reputation_high_score_get_limits_boost() {
         timelock_delay: 0,
         velocity_limit: VelocityConfig {
             limit: 1000,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -7369,8 +7297,7 @@ fn test_template_not_found() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -7443,8 +7370,7 @@ fn test_retry_not_enabled() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -7701,8 +7627,7 @@ fn test_insurance_posting_and_refund() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 1000,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -7806,8 +7731,7 @@ fn test_insurance_slashing_on_rejection() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 1000,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -7903,8 +7827,7 @@ fn test_insurance_pool_withdrawal() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 1000,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
         retry_config: RetryConfig {
@@ -8486,8 +8409,7 @@ fn test_veto_blocks_execution() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses,
         retry_config: RetryConfig {
@@ -8570,8 +8492,7 @@ fn test_veto_refunds_insurance_and_stake() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 10000,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         veto_addresses,
         retry_config: crate::types::RetryConfig {
@@ -8647,8 +8568,7 @@ fn test_execution_rollback_restores_proposal_status_on_transfer_failure() {
         quorum_percentage: 0,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         spending_limit: 1000,
         daily_limit: 5000,
         weekly_limit: 10000,
@@ -8721,8 +8641,7 @@ fn test_execution_rollback_restores_priority_queue_on_transfer_failure() {
         quorum_percentage: 0,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         spending_limit: 1000,
         daily_limit: 5000,
         weekly_limit: 10000,
@@ -8844,8 +8763,7 @@ fn setup_escrow_env(
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         pre_execution_hooks: Vec::new(env),
         post_execution_hooks: Vec::new(env),
@@ -9968,7 +9886,7 @@ fn test_price_below_condition_satisfied() {
     let client = VaultDAOClient::new(&env, &contract_id);
     token_sac.mint(&contract_id, &1000);
 
-    // Mock oracle returns price = 1000 with timestamp = 0
+    // Mock oracle (default price=1000, timestamp=0; configurable for staleness tests)
     let oracle_id = env.register(mock_oracle::MockOracle, ());
 
     let mut signers = Vec::new(&env);
@@ -10030,7 +9948,7 @@ fn test_price_below_condition_not_satisfied() {
     let client = VaultDAOClient::new(&env, &contract_id);
     token_sac.mint(&contract_id, &1000);
 
-    // Mock oracle returns price = 1000
+    // Mock oracle (default price=1000, timestamp=0; configurable for staleness tests)
     let oracle_id = env.register(mock_oracle::MockOracle, ());
 
     let mut signers = Vec::new(&env);
@@ -10069,6 +9987,187 @@ fn test_price_below_condition_not_satisfied() {
 
     let res = client.try_execute_proposal(&admin, &proposal_id);
     assert!(res.is_err(), "PriceBelow not satisfied should block execution");
+}
+
+// ============================================================================
+// Oracle staleness validation (Issue: oracle-staleness-validation)
+// ============================================================================
+
+#[test]
+fn test_price_condition_fresh_price_passes() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    env.ledger().set_sequence_number(100);
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let token_contract = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = token_contract.address();
+    let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+    token_sac.mint(&contract_id, &1000);
+
+    let oracle_id = env.register(mock_oracle::MockOracle, ());
+    // Set price recorded at current ledger, so it's fresh.
+    let _set: () = env.invoke_contract(
+        &oracle_id,
+        &Symbol::new(&env, "set_price"),
+        soroban_sdk::vec![&env, 1000i128.into_val(&env), 100u64.into_val(&env)],
+    );
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+    client.set_role(&admin, &signer1, &Role::Treasurer);
+
+    client.set_oracle_config(
+        &admin,
+        &crate::types::VaultOracleConfig {
+            address: oracle_id,
+            base_symbol: Symbol::new(&env, "USD"),
+            max_staleness: 1,
+        },
+    );
+
+    let asset = Address::generate(&env);
+    let mut conditions = Vec::new(&env);
+    conditions.push_back(Condition::PriceBelow(asset, 2000));
+
+    let proposal_id = client.propose_transfer(
+        &signer1,
+        &recipient,
+        &token_addr,
+        &100,
+        &Symbol::new(&env, "fresh"),
+        &Priority::Normal,
+        &conditions,
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&signer1, &proposal_id);
+    client.execute_proposal(&admin, &proposal_id);
+
+    assert_eq!(
+        client.get_proposal(&proposal_id).status,
+        ProposalStatus::Executed
+    );
+}
+
+#[test]
+fn test_price_condition_stale_price_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    env.ledger().set_sequence_number(100);
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let token_contract = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = token_contract.address();
+    let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+    token_sac.mint(&contract_id, &1000);
+
+    let oracle_id = env.register(mock_oracle::MockOracle, ());
+    // Set price far in the past so it is stale.
+    let _set: () = env.invoke_contract(
+        &oracle_id,
+        &Symbol::new(&env, "set_price"),
+        soroban_sdk::vec![&env, 1000i128.into_val(&env), 0u64.into_val(&env)],
+    );
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+    client.set_role(&admin, &signer1, &Role::Treasurer);
+
+    client.set_oracle_config(
+        &admin,
+        &crate::types::VaultOracleConfig {
+            address: oracle_id,
+            base_symbol: Symbol::new(&env, "USD"),
+            max_staleness: 10,
+        },
+    );
+
+    let asset = Address::generate(&env);
+    let mut conditions = Vec::new(&env);
+    conditions.push_back(Condition::PriceBelow(asset, 2000));
+
+    let proposal_id = client.propose_transfer(
+        &signer1,
+        &recipient,
+        &token_addr,
+        &100,
+        &Symbol::new(&env, "stale"),
+        &Priority::Normal,
+        &conditions,
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&signer1, &proposal_id);
+
+    let res = client.try_execute_proposal(&admin, &proposal_id);
+    assert_eq!(res, Err(Ok(VaultError::OraclePriceStale)));
+}
+
+#[test]
+fn test_price_condition_without_oracle_config_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let token_contract = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = token_contract.address();
+    let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+    token_sac.mint(&contract_id, &1000);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+    client.set_role(&admin, &signer1, &Role::Treasurer);
+
+    // Do NOT set oracle config.
+    let asset = Address::generate(&env);
+    let mut conditions = Vec::new(&env);
+    conditions.push_back(Condition::PriceBelow(asset, 2000));
+
+    let proposal_id = client.propose_transfer(
+        &signer1,
+        &recipient,
+        &token_addr,
+        &100,
+        &Symbol::new(&env, "no_oracle"),
+        &Priority::Normal,
+        &conditions,
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&signer1, &proposal_id);
+
+    let res = client.try_execute_proposal(&admin, &proposal_id);
+    assert_eq!(res, Err(Ok(VaultError::OracleNotConfigured)));
 }
 
 
@@ -10351,8 +10450,7 @@ fn test_veto_within_window() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -10424,8 +10522,7 @@ fn test_veto_after_window() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -10499,8 +10596,7 @@ fn test_veto_disabled_when_window_zero() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,
@@ -10566,8 +10662,7 @@ fn test_add_veto_address_cap() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         retry_config: RetryConfig {
             enabled: false,

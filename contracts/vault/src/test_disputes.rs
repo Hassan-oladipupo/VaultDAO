@@ -24,8 +24,7 @@ fn setup(env: &Env) -> (VaultDAOClient<'static>, Address, Address) {
             timelock_delay: 0,
             velocity_limit: crate::types::VelocityConfig {
                 limit: 1_000_000,
-                window: 3600,
-            },
+                window: 3600, per_token_limit: 0 },
             threshold_strategy: crate::types::ThresholdStrategy::Fixed,
             default_voting_deadline: 0,
             veto_addresses: Vec::new(env),

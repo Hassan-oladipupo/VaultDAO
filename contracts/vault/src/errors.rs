@@ -88,18 +88,26 @@ pub enum VaultError {
     TemplateValidationFailed = 212,
     /// Invalid time-based threshold configuration
     InvalidThresholdConfig = 310,
+    /// Oracle price is stale beyond max staleness
+    OraclePriceStale = 340,
+    /// Oracle is not configured but a price condition was used
+    OracleNotConfigured = 341,
     /// Contract upgrade is not authorized
     UpgradeUnauthorized = 920,
     /// Contract upgrade timelock is still active
     UpgradeTimelockActive = 921,
-    /// Batch of addresses exceeds the maximum allowed (50)
-    BatchTooLargeAddresses = 931,
-    /// Stream rate adjustment to zero or negative is invalid
-    InvalidStreamRate = 936,
-    /// Ledger range is invalid (from_ledger > to_ledger)
-    InvalidLedgerRange = 990,
-    /// Proposal ID prefix is invalid (must be multiple of 1_000_000 and <= u64::MAX/2)
-    InvalidProposalIdPrefix = 960,
+    /// Veto window has closed
+    VetoWindowClosed = 930,
+    /// Proposal status transition is not valid
+    InvalidStatusTransition = 940,
+    /// Dependency proposal was executed in the same ledger
+    DependencyNotExecuted = 950,
+    /// Recurring payment is paused
+    RecurringPaymentPaused = 1000,
+    /// Recurring payment is stopped and cannot be resumed
+    RecurringPaymentStopped = 1001,
+    /// A config change proposal is already pending
+    ConfigChangeInProgress = 1010,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above

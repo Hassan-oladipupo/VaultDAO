@@ -107,12 +107,8 @@ pub enum DataKey {
     NextDelegationId,
     /// Reverse delegation index: delegate -> Vec<delegators>
     DelegatorsFor(Address),
-    /// Whitelist address index -> Vec<Address>
-    WhitelistIndex,
-    /// Blacklist address index -> Vec<Address>
-    BlacklistIndex,
-    /// Status index: ProposalStatus (as u32) -> Vec<u64>
-    StatusIndex(u32),
+    /// Per-proposer per-token velocity history -> Vec<u64>
+    VelocityHistoryByToken(Address, Address),
 }
 
 #[contracttype]
@@ -233,6 +229,8 @@ pub enum FeatureKey {
     MetricsBucket(u64),
     /// Ordered list of stored bucket week numbers (for pruning) -> Vec<u64>
     MetricsBucketIndex,
+    /// Pending config change proposal ID -> u64
+    PendingConfig,
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -919,34 +917,67 @@ pub fn validate_recipient_list(env: &Env, recipient: &Address) -> Result<(), Vau
 // Velocity Checking (Sliding Window)
 // ============================================================================
 
-pub fn check_and_update_velocity(env: &Env, addr: &Address, config: &VelocityConfig) -> bool {
+pub fn check_and_update_velocity(
+    env: &Env,
+    addr: &Address,
+    token: &Address,
+    config: &VelocityConfig,
+) -> bool {
     let now = env.ledger().timestamp();
-    let key = DataKey::VelocityHistory(addr.clone());
-
-    let history: Vec<u64> = env
-        .storage()
-        .temporary()
-        .get(&key)
-        .unwrap_or_else(|| Vec::new(env));
-
     let window_start = now.saturating_sub(config.window);
 
-    let mut updated_history: Vec<u64> = Vec::new(env);
-    for ts in history.iter() {
+    // --- Global per-proposer check ---
+    let global_key = DataKey::VelocityHistory(addr.clone());
+    let global_history: Vec<u64> = env
+        .storage()
+        .temporary()
+        .get(&global_key)
+        .unwrap_or_else(|| Vec::new(env));
+
+    let mut updated_global: Vec<u64> = Vec::new(env);
+    for ts in global_history.iter() {
         if ts > window_start {
-            updated_history.push_back(ts);
+            updated_global.push_back(ts);
         }
     }
 
-    if updated_history.len() >= config.limit {
+    if updated_global.len() >= config.limit {
         return false;
     }
 
-    updated_history.push_back(now);
-    env.storage().temporary().set(&key, &updated_history);
+    // --- Per-token per-proposer check (if per_token_limit > 0) ---
+    if config.per_token_limit > 0 {
+        let token_key = DataKey::VelocityHistoryByToken(addr.clone(), token.clone());
+        let token_history: Vec<u64> = env
+            .storage()
+            .temporary()
+            .get(&token_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        let mut updated_token: Vec<u64> = Vec::new(env);
+        for ts in token_history.iter() {
+            if ts > window_start {
+                updated_token.push_back(ts);
+            }
+        }
+
+        if updated_token.len() >= config.per_token_limit {
+            return false;
+        }
+
+        updated_token.push_back(now);
+        env.storage().temporary().set(&token_key, &updated_token);
+        env.storage()
+            .temporary()
+            .extend_ttl(&token_key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
+    }
+
+    // Commit global history
+    updated_global.push_back(now);
+    env.storage().temporary().set(&global_key, &updated_global);
     env.storage()
         .temporary()
-        .extend_ttl(&key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
+        .extend_ttl(&global_key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
 
     true
 }
@@ -2430,4 +2461,26 @@ pub fn get_metrics_for_period(env: &Env, from_week: u64, to_week: u64) -> VaultM
         }
     }
     agg
+}
+
+// ============================================================================
+// Pending Config Change (Issue #943)
+// ============================================================================
+
+pub fn get_pending_config_proposal(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::PendingConfig)
+}
+
+pub fn set_pending_config_proposal(env: &Env, proposal_id: u64) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::PendingConfig, &proposal_id);
+}
+
+pub fn clear_pending_config_proposal(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&FeatureKey::PendingConfig);
 }

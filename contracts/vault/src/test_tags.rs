@@ -30,8 +30,7 @@ fn setup(env: &Env) -> (VaultDAOClient<'_>, Address, Address, Address) {
             timelock_delay: 0,
             velocity_limit: VelocityConfig {
                 limit: 100,
-                window: 3600,
-            },
+                window: 3600, per_token_limit: 0 },
             threshold_strategy: ThresholdStrategy::Fixed,
             pre_execution_hooks: Vec::new(env),
             post_execution_hooks: Vec::new(env),
