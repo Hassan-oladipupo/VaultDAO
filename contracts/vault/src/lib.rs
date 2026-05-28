@@ -18,6 +18,7 @@ mod events;
 mod storage;
 mod token;
 mod types;
+mod types_balance_snapshot;
 
 use errors::VaultError;
 use soroban_sdk::{contract, contractimpl, Address, Env, IntoVal, Map, String, Symbol, Vec};
@@ -31,10 +32,10 @@ use types::{
     Milestone, NotificationPreferences, OptionalVaultOracleConfig, Priority, Proposal,
     ProposalAmendment, ProposalStatus, ProposalTemplate, RecoveryConfig, RecoveryProposal,
     RecoveryStatus, RecurringPayment, Reputation, ReputationConfig, RetryConfig, RetryState, Role,
-    RoleAssignment, StakingConfig, StreamStatus, StreamingPayment, Subscription,
-    SubscriptionStatus, SubscriptionTier, SwapProposal, SwapResult, TemplateOverrides,
-    ThresholdStrategy, TransferDetails, VaultAction, VaultMetrics, VaultOracleConfig,
-    VaultPriceData, VelocityConfig, VotingStrategy,
+    RoleAssignment, ScheduledTransferConfig, StakingConfig, StreamStatus, StreamingPayment,
+    Subscription, SubscriptionStatus, SubscriptionTier, SwapProposal, SwapResult,
+    TemplateOverrides, ThresholdStrategy, TransferDetails, VaultAction, VaultMetrics,
+    VaultOracleConfig, VaultPriceData, VelocityConfig, VotingStrategy,
 };
 
 /// The main contract structure for VaultDAO.
@@ -320,6 +321,7 @@ impl VaultDAO {
             insurance_amount,
             empty_dependencies,
             None,
+            0,
         )
     }
 
@@ -335,7 +337,7 @@ impl VaultDAO {
     /// * `conditions` - Optional execution conditions.
     /// * `condition_logic` - And/Or logic for combining conditions.
     /// * `insurance_amount` - Tokens staked by proposer as guarantee (0 = none).
-    /// * `execution_time` - Scheduled execution ledger.
+    /// * `schedule` - Scheduled execution time and optional window (0 window = no upper bound).
     ///
     /// # Returns
     /// The unique ID of the newly created proposal.
@@ -351,7 +353,7 @@ impl VaultDAO {
         conditions: Vec<Condition>,
         condition_logic: ConditionLogic,
         insurance_amount: i128,
-        execution_time: u64,
+        schedule: ScheduledTransferConfig,
     ) -> Result<u64, VaultError> {
         let empty_dependencies = Vec::new(&env);
         Self::propose_transfer_internal(
@@ -366,7 +368,8 @@ impl VaultDAO {
             condition_logic,
             insurance_amount,
             empty_dependencies,
-            Some(execution_time),
+            Some(schedule.execution_time),
+            schedule.execution_window_ledgers,
         )
     }
 
@@ -401,6 +404,7 @@ impl VaultDAO {
             insurance_amount,
             depends_on,
             None,
+            0,
         )
     }
 
@@ -418,6 +422,7 @@ impl VaultDAO {
         insurance_amount: i128,
         depends_on: Vec<u64>,
         execution_time: Option<u64>,
+        execution_window_ledgers: u64,
     ) -> Result<u64, VaultError> {
         // 1. Verify identity
         proposer.require_auth();
@@ -607,6 +612,7 @@ impl VaultDAO {
             expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
             unlock_ledger,
             execution_time,
+            execution_window_ledgers,
             insurance_amount: actual_insurance,
             stake_amount: actual_stake,
             gas_limit: proposal_gas_limit,
@@ -841,6 +847,7 @@ impl VaultDAO {
                     0
                 },
                 execution_time: None,
+                execution_window_ledgers: 0,
                 insurance_amount: insurance_per_proposal,
                 stake_amount: 0, // Batch proposals don't require individual stakes
                 gas_limit: proposal_gas_limit,
@@ -1297,6 +1304,7 @@ impl VaultDAO {
                 storage::refund_spending_limits(&env, proposal.amount);
             }
             proposal.status = ProposalStatus::Expired;
+            storage::tag_index_prune_proposal(&env, &proposal.tags, proposal_id);
             storage::set_proposal(&env, &proposal);
             storage::metrics_on_expiry(&env);
             events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
@@ -2878,6 +2886,7 @@ impl VaultDAO {
             expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
             unlock_ledger: 0,
             execution_time: None,
+                execution_window_ledgers: 0,
             insurance_amount: 0,
             stake_amount: 0,
             gas_limit: 0,
@@ -4802,24 +4811,45 @@ impl VaultDAO {
 
         let proposal = storage::get_proposal(&env, proposal_id)?;
 
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+
         let role = storage::get_role(&env, &caller);
         if role != Role::Admin && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
-        // IPFS CID v0 is 46 chars; CIDv1 base32 is 59+ chars; reject anything
-        // outside the valid range with a dedicated error code.
         let alen = attachment.len();
         if !(MIN_ATTACHMENT_LEN..=MAX_ATTACHMENT_LEN).contains(&alen) {
-            return Err(VaultError::InvalidAmount);
+            return Err(VaultError::AttachmentHashInvalid);
+        }
+
+        // Validate CID prefix: CIDv0 starts with "Qm", CIDv1 base32 starts with "bafy".
+        // Copy the first 4 bytes into a stack buffer for prefix comparison.
+        let mut prefix = [0u8; 4];
+        {
+            // copy_into_slice requires exact length — copy full string into a
+            // MAX_ATTACHMENT_LEN-sized buffer and read the first 4 bytes.
+            let mut buf = [0u8; MAX_ATTACHMENT_LEN as usize];
+            let buf_slice = &mut buf[..alen as usize];
+            attachment.copy_into_slice(buf_slice);
+            prefix.copy_from_slice(&buf_slice[..4]);
+        }
+        // "Qm" = [0x51, 0x6d], "bafy" = [0x62, 0x61, 0x66, 0x79]
+        let is_cidv0 = prefix[0] == b'Q' && prefix[1] == b'm';
+        let is_cidv1 = prefix == *b"bafy";
+        if !is_cidv0 && !is_cidv1 {
+            return Err(VaultError::AttachmentHashInvalid);
         }
 
         let mut attachments = storage::get_attachments(&env, proposal_id);
         if attachments.len() >= MAX_ATTACHMENTS {
             return Err(VaultError::TooManyAttachments);
         }
+        // O(n) duplicate check over MAX_ATTACHMENTS = 10 entries.
         if attachments.contains(attachment.clone()) {
-            return Err(VaultError::InvalidAmount);
+            return Err(VaultError::AttachmentAlreadyExists);
         }
         attachments.push_back(attachment);
         storage::set_attachments(&env, proposal_id, &attachments);
@@ -4828,16 +4858,22 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Remove an attachment by index.
+    /// Remove an attachment by CID value from a pending proposal.
+    ///
+    /// Only the original proposer or an Admin may remove attachments.
     pub fn remove_attachment(
         env: Env,
         caller: Address,
         proposal_id: u64,
-        index: u32,
+        cid: String,
     ) -> Result<(), VaultError> {
         caller.require_auth();
 
         let proposal = storage::get_proposal(&env, proposal_id)?;
+
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
 
         let role = storage::get_role(&env, &caller);
         if role != Role::Admin && caller != proposal.proposer {
@@ -4845,10 +4881,15 @@ impl VaultDAO {
         }
 
         let mut attachments = storage::get_attachments(&env, proposal_id);
-        if index >= attachments.len() {
-            return Err(VaultError::ProposalNotFound); // reuse as "index out of range"
+        let mut found: Option<u32> = None;
+        for i in 0..attachments.len() {
+            if attachments.get(i).unwrap() == cid {
+                found = Some(i);
+                break;
+            }
         }
-        attachments.remove(index);
+        let idx = found.ok_or(VaultError::ProposalNotFound)?;
+        attachments.remove(idx);
         storage::set_attachments(&env, proposal_id, &attachments);
         storage::extend_instance_ttl(&env);
 
@@ -4981,8 +5022,9 @@ impl VaultDAO {
             return Err(VaultError::TooManyTags);
         }
 
-        proposal.tags.push_back(tag);
+        proposal.tags.push_back(tag.clone());
         storage::set_proposal(&env, &proposal);
+        storage::tag_index_add(&env, &tag, proposal_id);
         storage::extend_instance_ttl(&env);
 
         Ok(())
@@ -5016,10 +5058,11 @@ impl VaultDAO {
         }
 
         if !found {
-            return Err(VaultError::ProposalNotFound); // tag not found
+            return Err(VaultError::TagNotFound);
         }
 
         storage::set_proposal(&env, &proposal);
+        storage::tag_index_remove(&env, &tag, proposal_id);
         storage::extend_instance_ttl(&env);
 
         Ok(())
@@ -5031,20 +5074,70 @@ impl VaultDAO {
         Ok(proposal.tags)
     }
 
-    /// Get proposal IDs that include a specific tag.
-    pub fn get_proposals_by_tag(env: Env, tag: Symbol) -> Vec<u64> {
-        let mut proposal_ids = Vec::new(&env);
-        let next_id = storage::get_next_proposal_id(&env);
+    /// Get proposal IDs tagged with `tag`, with pagination.
+    ///
+    /// Results are capped at 50. Pass `offset` and `limit` (max 50) to paginate.
+    pub fn get_proposals_by_tag(env: Env, tag: Symbol, offset: u32, limit: u32) -> Vec<u64> {
+        const MAX_RESULTS: u32 = 50;
+        let cap = if limit == 0 || limit > MAX_RESULTS { MAX_RESULTS } else { limit };
 
-        for proposal_id in 1..next_id {
-            if let Ok(proposal) = storage::get_proposal(&env, proposal_id) {
-                if proposal.tags.contains(&tag) {
-                    proposal_ids.push_back(proposal_id);
-                }
+        let ids = storage::get_tag_index(&env, &tag);
+        let mut result = Vec::new(&env);
+        let mut count: u32 = 0;
+        let mut skipped: u32 = 0;
+
+        for id in ids.iter() {
+            if skipped < offset {
+                skipped += 1;
+                continue;
             }
+            if count >= cap {
+                break;
+            }
+            result.push_back(id);
+            count += 1;
         }
 
-        proposal_ids
+        result
+    }
+
+    /// Batch-add multiple tags to a proposal.
+    ///
+    /// Only Admin or the original proposer can add tags.
+    /// Stops and returns `TooManyTags` if the limit would be exceeded.
+    pub fn bulk_add_tags(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+        tags: Vec<Symbol>,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if role != Role::Admin && caller != proposal.proposer {
+            return Err(VaultError::Unauthorized);
+        }
+
+        for tag in tags.iter() {
+            if tag == Symbol::new(&env, "") {
+                return Err(VaultError::MetadataValueInvalid);
+            }
+            if proposal.tags.contains(&tag) {
+                continue;
+            }
+            if proposal.tags.len() >= MAX_TAGS {
+                return Err(VaultError::TooManyTags);
+            }
+            proposal.tags.push_back(tag.clone());
+            storage::tag_index_add(&env, &tag, proposal_id);
+        }
+
+        storage::set_proposal(&env, &proposal);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
     }
 
     // ========================================================================
@@ -5760,11 +5853,63 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Evaluate whether all/any execution conditions are satisfied.
+    /// Evaluate whether execution conditions are satisfied using short-circuit logic.
+    ///
+    /// # Short-Circuit Behavior (gas savings)
+    /// - `And`: returns false immediately on the first failing condition — no further oracle
+    ///   calls are made once the outcome is determined.
+    /// - `Or`: returns true immediately on the first passing condition — remaining conditions
+    ///   (and their oracle calls) are skipped.
+    /// - `Majority`: evaluates all conditions but stops early once a majority is impossible
+    ///   or already guaranteed.
+    /// - `None`: always passes without evaluating any condition.
+    ///
+    /// Oracle calls are deduplicated per unique asset address: each asset is queried at most
+    /// once per evaluation, with the result cached in a local map.
     fn evaluate_conditions(env: &Env, proposal: &Proposal) -> Result<(), VaultError> {
-        let current_ledger = env.ledger().sequence() as u64;
-        let mut results = Vec::new(env);
+        // ConditionLogic::None always passes — no evaluation needed.
+        if proposal.condition_logic == ConditionLogic::None || proposal.conditions.is_empty() {
+            return Ok(());
+        }
 
+        let current_ledger = env.ledger().sequence() as u64;
+        // Cache oracle prices per asset to avoid redundant cross-contract calls.
+        let mut price_cache: Map<Address, i128> = Map::new(env);
+
+        // Helper closure: resolve price with cache.
+        // Returns Ok(price) or Err on oracle failure.
+        let get_price =
+            |cache: &mut Map<Address, i128>, asset: &Address| -> Result<i128, VaultError> {
+                if let Some(cached) = cache.get(asset.clone()) {
+                    return Ok(cached);
+                }
+                let price = Self::get_asset_price(env, asset.clone())?;
+                cache.set(asset.clone(), price);
+                Ok(price)
+            };
+
+        let total = proposal.conditions.len();
+
+        match proposal.condition_logic {
+            // Short-circuit And: fail fast on first false condition.
+            ConditionLogic::And => {
+                for i in 0..total {
+                    if let Some(cond) = proposal.conditions.get(i) {
+                        let satisfied = match cond {
+                            Condition::BalanceAbove(min) => {
+                                token::balance(env, &proposal.token) > min
+                            }
+                            Condition::DateAfter(after) => current_ledger > after,
+                            Condition::DateBefore(before) => current_ledger < before,
+                            Condition::PriceAbove(asset, threshold) => {
+                                get_price(&mut price_cache, &asset)? >= threshold
+                            }
+                            Condition::PriceBelow(asset, threshold) => {
+                                get_price(&mut price_cache, &asset)? <= threshold
+                            }
+                        };
+                        if !satisfied {
+                            return Err(VaultError::ConditionsNotMet);
         for i in 0..proposal.conditions.len() {
             if let Some(cond) = proposal.conditions.get(i) {
                 let satisfied = match cond {
@@ -5789,38 +5934,76 @@ impl VaultDAO {
                             Err(_) => false,
                         }
                     }
-                };
-                results.push_back(satisfied);
-            }
-        }
-
-        let all_passed = match proposal.condition_logic {
-            ConditionLogic::And => {
-                let mut all = true;
-                for i in 0..results.len() {
-                    if !results.get(i).unwrap_or(false) {
-                        all = false;
-                        break;
-                    }
                 }
-                all
+                Ok(())
             }
+            // Short-circuit Or: succeed fast on first true condition.
             ConditionLogic::Or => {
-                let mut any = false;
-                for i in 0..results.len() {
-                    if results.get(i).unwrap_or(false) {
-                        any = true;
-                        break;
+                for i in 0..total {
+                    if let Some(cond) = proposal.conditions.get(i) {
+                        let satisfied = match cond {
+                            Condition::BalanceAbove(min) => {
+                                token::balance(env, &proposal.token) > min
+                            }
+                            Condition::DateAfter(after) => current_ledger > after,
+                            Condition::DateBefore(before) => current_ledger < before,
+                            Condition::PriceAbove(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MIN) >= threshold
+                            }
+                            Condition::PriceBelow(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MAX) <= threshold
+                            }
+                        };
+                        if satisfied {
+                            return Ok(());
+                        }
                     }
                 }
-                any
+                Err(VaultError::ConditionsNotMet)
             }
-        };
-
-        if all_passed {
-            Ok(())
-        } else {
-            Err(VaultError::ProposalNotApproved) // repurpose for "conditions not met"
+            // Majority: more than half must pass. Short-circuits when majority is impossible
+            // or already guaranteed.
+            ConditionLogic::Majority => {
+                let needed = total / 2 + 1;
+                let mut passed: u32 = 0;
+                let mut failed: u32 = 0;
+                for i in 0..total {
+                    if let Some(cond) = proposal.conditions.get(i) {
+                        let satisfied = match cond {
+                            Condition::BalanceAbove(min) => {
+                                token::balance(env, &proposal.token) > min
+                            }
+                            Condition::DateAfter(after) => current_ledger > after,
+                            Condition::DateBefore(before) => current_ledger < before,
+                            Condition::PriceAbove(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MIN) >= threshold
+                            }
+                            Condition::PriceBelow(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MAX) <= threshold
+                            }
+                        };
+                        if satisfied {
+                            passed += 1;
+                            if passed >= needed {
+                                return Ok(());
+                            }
+                        } else {
+                            failed += 1;
+                            // Remaining conditions cannot make up a majority.
+                            if failed > total - needed {
+                                return Err(VaultError::ConditionsNotMet);
+                            }
+                        }
+                    }
+                }
+                if passed >= needed {
+                    Ok(())
+                } else {
+                    Err(VaultError::ConditionsNotMet)
+                }
+            }
+            // None always passes — handled above, but exhaustive match requires this arm.
+            ConditionLogic::None => Ok(()),
         }
     }
 
@@ -6257,6 +6440,7 @@ impl VaultDAO {
             expires_at: calculate_expiration_ledger(&config, &priority, current_ledger),
             unlock_ledger: 0,
             execution_time: None,
+                execution_window_ledgers: 0,
             insurance_amount,
             stake_amount: 0,
             gas_limit: 0,
@@ -7468,6 +7652,7 @@ impl VaultDAO {
             expires_at,
             unlock_ledger,
             execution_time: None,
+                execution_window_ledgers: 0,
             insurance_amount: 0,
             stake_amount: 0, // Template proposals don't require stake
             gas_limit: 0,
@@ -8733,6 +8918,17 @@ impl VaultDAO {
             return Err(VaultError::TimelockNotExpired);
         }
 
+        // Check execution window upper bound
+        if proposal.execution_window_ledgers > 0
+            && current_ledger > execution_time + proposal.execution_window_ledgers
+        {
+            proposal.status = ProposalStatus::Expired;
+            storage::tag_index_prune_proposal(&env, &proposal.tags, proposal_id);
+            storage::set_proposal(&env, &proposal);
+            events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
+            return Err(VaultError::ExecutionWindowExpired);
+        }
+
         // Verify sufficient approvals
         let config = storage::get_config(&env)?;
         if proposal.approvals.len() < config.threshold {
@@ -8929,6 +9125,36 @@ impl VaultDAO {
 
         sorted
     }
+
+    /// Expire a scheduled proposal whose execution window has passed.
+    ///
+    /// Anyone can call this to transition a window-expired scheduled proposal to
+    /// `ProposalStatus::Expired`. No-ops if the proposal is not scheduled or the
+    /// window has not yet passed.
+    pub fn expire_proposal(env: Env, proposal_id: u64) -> Result<(), VaultError> {
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        if proposal.status != ProposalStatus::Scheduled {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        let execution_time = proposal.execution_time.ok_or(VaultError::ProposalNotPending)?;
+        let current_ledger = env.ledger().sequence() as u64;
+
+        if proposal.execution_window_ledgers == 0
+            || current_ledger <= execution_time + proposal.execution_window_ledgers
+        {
+            return Err(VaultError::TimelockNotExpired);
+        }
+
+        proposal.status = ProposalStatus::Expired;
+        storage::tag_index_prune_proposal(&env, &proposal.tags, proposal_id);
+        storage::set_proposal(&env, &proposal);
+        events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
+
+        Ok(())
+    }
+
     // ============================================================================
     // Funding Rounds
     // ============================================================================
@@ -9336,6 +9562,7 @@ impl VaultDAO {
             expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
             unlock_ledger,
             execution_time: None,
+                execution_window_ledgers: 0,
             insurance_amount,
             stake_amount: 0,
             gas_limit: 0,
@@ -9985,6 +10212,7 @@ impl VaultDAO {
             expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
             unlock_ledger,
             execution_time: None,
+                execution_window_ledgers: 0,
             insurance_amount,
             stake_amount: 0,
             gas_limit: 0,
@@ -10243,6 +10471,7 @@ impl VaultDAO {
             expires_at: current_ledger + (config.timelock_delay * 10), // Longer expiry for upgrades
             unlock_ledger: current_ledger + config.timelock_delay, // Mandatory timelock
             execution_time: None,
+                execution_window_ledgers: 0,
             insurance_amount: 0,
             stake_amount: 0,
             gas_limit: 0,
@@ -10453,6 +10682,7 @@ impl VaultDAO {
                 0
             },
             execution_time: None,
+            execution_window_ledgers: 0,
             insurance_amount: 0, // Insurance not cloned
             stake_amount: 0, // Stake not cloned
             gas_limit: source_proposal.gas_limit,

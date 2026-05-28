@@ -358,6 +358,10 @@ pub enum ConditionLogic {
     And = 0,
     /// At least one condition must be true
     Or = 1,
+    /// More than half of conditions must be true
+    Majority = 2,
+    /// Always passes regardless of conditions (used when conditions vec is empty)
+    None = 3,
 }
 
 /// Recipient list access mode
@@ -373,6 +377,16 @@ pub enum ListMode {
 }
 
 /// Transfer proposal
+/// Parameters for a scheduled transfer proposal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ScheduledTransferConfig {
+    /// Ledger sequence at which the proposal becomes executable
+    pub execution_time: u64,
+    /// Number of ledgers after execution_time within which execution is valid (0 = no upper bound)
+    pub execution_window_ledgers: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Proposal {
@@ -414,6 +428,8 @@ pub struct Proposal {
     pub unlock_ledger: u64,
     /// Optional scheduled execution time (ledger number) for delayed execution
     pub execution_time: Option<u64>,
+    /// Execution window in ledgers after execution_time (0 = no upper bound)
+    pub execution_window_ledgers: u64,
     /// Insurance amount staked by proposer (0 = no insurance). Held in vault.
     pub insurance_amount: i128,
     /// Stake amount locked by proposer (0 = no stake). Held in vault.

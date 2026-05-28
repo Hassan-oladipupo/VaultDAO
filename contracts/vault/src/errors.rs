@@ -112,9 +112,7 @@ pub enum VaultError {
 
 // Additional error types that exceed contracterror limits - use generic errors above
 // AttachmentHashInvalid -> InvalidAmount
-// TooManyAttachments -> BatchTooLarge  
-// TooManyTags -> BatchTooLarge
-// MetadataValueInvalid -> InvalidAmount
+// TooManyAttachments -> BatchTooLarge
 // SubscriptionNotFound -> TemplateNotFound
 // SubscriptionAlreadyCancelled -> ProposalAlreadyCancelled
 // RenewalNotDue -> TimelockNotExpired

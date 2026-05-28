@@ -2875,12 +2875,12 @@ fn test_get_proposals_by_tag() {
     client.add_proposal_tag(&signer1, &payroll_id, &payroll_tag);
     client.add_proposal_tag(&signer1, &second_ops_id, &ops_tag);
 
-    let ops_results = client.get_proposals_by_tag(&ops_tag);
+    let ops_results = client.get_proposals_by_tag(&ops_tag, &0, &50);
     assert!(ops_results.contains(ops_id));
     assert!(ops_results.contains(second_ops_id));
     assert!(!ops_results.contains(payroll_id));
 
-    let payroll_results = client.get_proposals_by_tag(&payroll_tag);
+    let payroll_results = client.get_proposals_by_tag(&payroll_tag, &0, &50);
     assert!(payroll_results.contains(payroll_id));
     assert!(!payroll_results.contains(ops_id));
 }
