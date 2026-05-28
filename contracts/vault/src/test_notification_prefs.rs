@@ -30,6 +30,7 @@ fn setup(env: &Env) -> (VaultDAOClient, Address, Address) {
         retry_config: RetryConfig { enabled: false, max_retries: 0, initial_backoff_ledgers: 0 },
         recovery_config: crate::types::RecoveryConfig::default(env),
         staking_config: crate::types::StakingConfig::default(),
+        proposal_id_prefix: 0,
         pre_execution_hooks: Vec::new(env),
         post_execution_hooks: Vec::new(env),
     };
@@ -158,6 +159,7 @@ fn test_get_addresses_subscribed_to_capped_at_100() {
         retry_config: RetryConfig { enabled: false, max_retries: 0, initial_backoff_ledgers: 0 },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: crate::types::StakingConfig::default(),
+        proposal_id_prefix: 0,
         pre_execution_hooks: Vec::new(&env),
         post_execution_hooks: Vec::new(&env),
     };

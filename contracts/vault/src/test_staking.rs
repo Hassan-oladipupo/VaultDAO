@@ -61,6 +61,7 @@ fn setup_with_staking(
                 reputation_discount_percentage: 0,
                 slash_percentage: slash_pct,
             },
+            proposal_id_prefix: 0,
         },
     );
 

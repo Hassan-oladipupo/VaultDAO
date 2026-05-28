@@ -1056,6 +1056,14 @@ pub fn emit_stream_created(
     );
 }
 
+/// Emit when a stream rate is adjusted
+pub fn emit_stream_rate_adjusted(env: &Env, stream_id: u64, old_rate: i128, new_rate: i128, adjusted_by: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "stream_rate_adj"), stream_id),
+        (old_rate, new_rate, adjusted_by.clone()),
+    );
+}
+
 /// Emit when a stream status is updated (paused, resumed, or cancelled)
 #[allow(dead_code)]
 pub fn emit_stream_status_updated(env: &Env, stream_id: u64, status: u32, updated_by: &Address) {

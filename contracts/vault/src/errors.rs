@@ -92,6 +92,14 @@ pub enum VaultError {
     UpgradeUnauthorized = 920,
     /// Contract upgrade timelock is still active
     UpgradeTimelockActive = 921,
+    /// Batch of addresses exceeds the maximum allowed (50)
+    BatchTooLargeAddresses = 931,
+    /// Stream rate adjustment to zero or negative is invalid
+    InvalidStreamRate = 936,
+    /// Ledger range is invalid (from_ledger > to_ledger)
+    InvalidLedgerRange = 990,
+    /// Proposal ID prefix is invalid (must be multiple of 1_000_000 and <= u64::MAX/2)
+    InvalidProposalIdPrefix = 960,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above

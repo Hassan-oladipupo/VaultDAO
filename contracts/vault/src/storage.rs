@@ -107,6 +107,12 @@ pub enum DataKey {
     NextDelegationId,
     /// Reverse delegation index: delegate -> Vec<delegators>
     DelegatorsFor(Address),
+    /// Whitelist address index -> Vec<Address>
+    WhitelistIndex,
+    /// Blacklist address index -> Vec<Address>
+    BlacklistIndex,
+    /// Status index: ProposalStatus (as u32) -> Vec<u64>
+    StatusIndex(u32),
 }
 
 #[contracttype]
@@ -371,13 +377,36 @@ pub fn set_proposal(env: &Env, proposal: &Proposal) {
     env.storage()
         .persistent()
         .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+    // Maintain StatusIndex
+    let status_u32 = proposal.status.clone() as u32;
+    let idx_key = DataKey::StatusIndex(status_u32);
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&idx_key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !ids.contains(proposal.id) {
+        ids.push_back(proposal.id);
+        env.storage().persistent().set(&idx_key, &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&idx_key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+    }
 }
 
 pub fn get_next_proposal_id(env: &Env) -> u64 {
     env.storage()
         .instance()
         .get(&DataKey::NextProposalId)
-        .unwrap_or(1)
+        .unwrap_or_else(|| {
+            // Start from prefix + 1 if prefix is set
+            let cfg: Option<crate::types::Config> = env.storage().instance().get(&DataKey::Config);
+            if let Some(c) = cfg {
+                if c.proposal_id_prefix > 0 { c.proposal_id_prefix + 1 } else { 1 }
+            } else {
+                1
+            }
+        })
 }
 
 pub fn increment_proposal_id(env: &Env) -> u64 {
@@ -685,12 +714,36 @@ pub fn add_to_whitelist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    // Maintain index
+    let mut index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::WhitelistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    if !index.contains(addr) {
+        index.push_back(addr.clone());
+        env.storage().persistent().set(&DataKey::WhitelistIndex, &index);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::WhitelistIndex, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    }
 }
 
 pub fn remove_from_whitelist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .remove(&DataKey::Whitelist(addr.clone()));
+    // Remove from index
+    let index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::WhitelistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut new_index: Vec<Address> = Vec::new(env);
+    for a in index.iter() {
+        if a != *addr { new_index.push_back(a); }
+    }
+    env.storage().persistent().set(&DataKey::WhitelistIndex, &new_index);
 }
 
 pub fn is_blacklisted(env: &Env, addr: &Address) -> bool {
@@ -706,12 +759,140 @@ pub fn add_to_blacklist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    // Maintain index
+    let mut index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::BlacklistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    if !index.contains(addr) {
+        index.push_back(addr.clone());
+        env.storage().persistent().set(&DataKey::BlacklistIndex, &index);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::BlacklistIndex, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    }
 }
 
 pub fn remove_from_blacklist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .remove(&DataKey::Blacklist(addr.clone()));
+    // Remove from index
+    let index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::BlacklistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut new_index: Vec<Address> = Vec::new(env);
+    for a in index.iter() {
+        if a != *addr { new_index.push_back(a); }
+    }
+    env.storage().persistent().set(&DataKey::BlacklistIndex, &new_index);
+}
+
+pub fn get_whitelist_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::WhitelistIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn get_blacklist_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::BlacklistIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn get_whitelist_paginated(env: &Env, offset: u64, limit: u64) -> Vec<Address> {
+    let cap: u64 = if limit > 100 { 100 } else { limit };
+    let index = get_whitelist_index(env);
+    let mut result: Vec<Address> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    for i in 0..index.len() {
+        if let Some(addr) = index.get(i) {
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(addr);
+            if result.len() as u64 >= cap { break; }
+        }
+    }
+    result
+}
+
+pub fn get_blacklist_paginated(env: &Env, offset: u64, limit: u64) -> Vec<Address> {
+    let cap: u64 = if limit > 100 { 100 } else { limit };
+    let index = get_blacklist_index(env);
+    let mut result: Vec<Address> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    for i in 0..index.len() {
+        if let Some(addr) = index.get(i) {
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(addr);
+            if result.len() as u64 >= cap { break; }
+        }
+    }
+    result
+}
+
+pub fn get_proposals_by_status(env: &Env, status: u32, offset: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit > 50 { 50 } else { limit };
+    let key = DataKey::StatusIndex(status);
+    let ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut result: Vec<u64> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    for i in 0..ids.len() {
+        if let Some(id) = ids.get(i) {
+            if !env.storage().persistent().has(&DataKey::Proposal(id)) { continue; }
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(id);
+            if result.len() as u64 >= cap { break; }
+        }
+    }
+    result
+}
+
+pub fn get_proposals_by_ledger_range(env: &Env, from_ledger: u64, to_ledger: u64, offset: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit > 50 { 50 } else { limit };
+    let next_id = get_next_proposal_id(env);
+    let mut result: Vec<u64> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    // Determine start ID: for prefixed vaults, scan from prefix+1
+    let cfg: Option<crate::types::Config> = env.storage().instance().get(&DataKey::Config);
+    let start_id = if let Some(c) = cfg {
+        if c.proposal_id_prefix > 0 { c.proposal_id_prefix + 1 } else { 1 }
+    } else { 1 };
+    for id in start_id..next_id {
+        if result.len() as u64 >= cap { break; }
+        if !env.storage().persistent().has(&DataKey::Proposal(id)) { continue; }
+        let proposal: crate::types::Proposal = match env.storage().persistent().get(&DataKey::Proposal(id)) {
+            Some(p) => p,
+            None => continue,
+        };
+        if proposal.created_at >= from_ledger && proposal.created_at <= to_ledger {
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(id);
+        }
+    }
+    result
+}
+
+pub fn prune_status_index_for_proposal(env: &Env, proposal_id: u64) {
+    // Remove proposal_id from all status index entries
+    for status_u32 in 0u32..8u32 {
+        let key = DataKey::StatusIndex(status_u32);
+        if let Some(ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) {
+            let mut new_ids: Vec<u64> = Vec::new(env);
+            for id in ids.iter() {
+                if id != proposal_id { new_ids.push_back(id); }
+            }
+            env.storage().persistent().set(&key, &new_ids);
+        }
+    }
 }
 
 #[allow(dead_code)]

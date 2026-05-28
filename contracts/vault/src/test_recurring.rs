@@ -49,6 +49,7 @@ fn default_init_config(env: &Env, admin: &Address) -> InitConfig {
         },
         recovery_config: crate::types::RecoveryConfig::default(env),
         staking_config: crate::types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     }
 }
 
