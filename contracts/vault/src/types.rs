@@ -1122,6 +1122,8 @@ pub struct Subscription {
     pub total_payments: u32,
     pub last_payment_ledger: u64,
     pub auto_renew: bool,
+    /// Number of ledgers after next_renewal_ledger during which late renewal is still accepted
+    pub grace_period_ledgers: u64,
 }
 
 /// Payment record for subscription tracking

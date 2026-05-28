@@ -122,6 +122,8 @@ mod test_tags;
 mod test_retry;
 #[cfg(test)]
 mod test_staking;
+#[cfg(test)]
+mod test_fees;
 
 
 #[cfg(test)]
@@ -1482,6 +1484,66 @@ impl VaultDAO {
         storage::get_retry_state(&env, proposal_id)
     }
 
+    /// Retry execution of a previously failed proposal.
+    ///
+    /// Only available for proposals in `ProposalStatus::Approved` that have a
+    /// `RetryState` with `retry_count > 0` (i.e., at least one prior failure).
+    /// Checks that `current_ledger >= retry_state.next_retry_ledger` before
+    /// attempting execution.
+    ///
+    /// On failure, schedules the next retry with exponential backoff and emits
+    /// `retry_scheduled`. When `retry_count >= max_retries`, emits
+    /// `retries_exhausted` and sets the proposal to `ProposalStatus::Expired`.
+    ///
+    /// Returns `VaultError::RetryError` if retry is disabled or conditions are
+    /// not met.
+    pub fn retry_execute_proposal(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        let config = storage::get_config(&env)?;
+
+        if !config.retry_config.enabled {
+            return Err(VaultError::RetryError);
+        }
+
+        let retry_state = storage::get_retry_state(&env, proposal_id)
+            .ok_or(VaultError::RetryError)?;
+
+        // Only proposals that have already failed at least once are retryable here
+        if retry_state.retry_count == 0 {
+            return Err(VaultError::RetryError);
+        }
+
+        let proposal = storage::get_proposal(&env, proposal_id)?;
+        if proposal.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+
+        // Enforce backoff window
+        if current_ledger < retry_state.next_retry_ledger {
+            return Err(VaultError::RetryError);
+        }
+
+        // Check max retries — if exhausted, expire the proposal
+        if retry_state.retry_count >= config.retry_config.max_retries {
+            let mut expired = proposal;
+            expired.status = ProposalStatus::Expired;
+            storage::set_proposal(&env, &expired);
+            events::emit_retries_exhausted(&env, proposal_id, retry_state.retry_count);
+            return Err(VaultError::RetryError);
+        }
+
+        // Delegate to execute_proposal which handles the full execution path
+        // including retry scheduling on failure
+        Self::execute_proposal(env, executor, proposal_id)
+    }
+
     /// Execute a batch transaction atomically: either all proposals succeed or
     /// any partial progress is attempted to be reversed and the batch is marked RolledBack.
     pub fn execute_batch(env: Env, executor: Address, batch_id: u64) -> Result<(), VaultError> {
@@ -2617,7 +2679,7 @@ impl VaultDAO {
 
         let role = storage::get_role(&env, &admin);
         if role != Role::Admin {
-            return Err(VaultError::Unauthorized);
+            return Err(VaultError::InsufficientRole);
         }
 
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
@@ -2626,9 +2688,23 @@ impl VaultDAO {
             return Err(VaultError::ProposalNotPending);
         }
 
+        // new_deadline must be strictly after the current deadline
+        // and must not exceed the proposal's expiry
+        if new_deadline <= proposal.voting_deadline || new_deadline > proposal.expires_at {
+            return Err(VaultError::InvalidDeadline);
+        }
+
+        // Cap total extensions at 3 per proposal
+        const MAX_DEADLINE_EXTENSIONS: u32 = 3;
+        let extension_count = storage::get_deadline_extension_count(&env, proposal_id);
+        if extension_count >= MAX_DEADLINE_EXTENSIONS {
+            return Err(VaultError::MaxDeadlineExtensionsReached);
+        }
+
         let old_deadline = proposal.voting_deadline;
         proposal.voting_deadline = new_deadline;
         storage::set_proposal(&env, &proposal);
+        storage::increment_deadline_extension_count(&env, proposal_id);
         storage::extend_instance_ttl(&env);
 
         events::emit_voting_deadline_extended(
@@ -4907,7 +4983,7 @@ impl VaultDAO {
 
     /// Set or update a metadata key for a proposal.
     ///
-    /// Only Admin or the original proposer can update metadata.
+    /// Only Admin or the original proposer can update metadata on a Pending proposal.
     pub fn set_proposal_metadata(
         env: Env,
         caller: Address,
@@ -4922,6 +4998,16 @@ impl VaultDAO {
         let role = storage::get_role(&env, &caller);
         if role != Role::Admin && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
+        }
+
+        // Only allow metadata changes on Pending proposals
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        // Validate key: must be non-empty
+        if key == Symbol::new(&env, "") {
+            return Err(VaultError::MetadataValueInvalid);
         }
 
         // Metadata validation: non-empty bounded value and bounded entry count.
@@ -4944,7 +5030,7 @@ impl VaultDAO {
 
     /// Remove a metadata key from a proposal.
     ///
-    /// Only Admin or the original proposer can remove metadata.
+    /// Only Admin or the original proposer can remove metadata on a Pending proposal.
     pub fn remove_proposal_metadata(
         env: Env,
         caller: Address,
@@ -4958,6 +5044,11 @@ impl VaultDAO {
         let role = storage::get_role(&env, &caller);
         if role != Role::Admin && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
+        }
+
+        // Only allow metadata changes on Pending proposals
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
         }
 
         proposal.metadata.remove(key);
@@ -4984,6 +5075,48 @@ impl VaultDAO {
     ) -> Result<Map<Symbol, String>, VaultError> {
         let proposal = storage::get_proposal(&env, proposal_id)?;
         Ok(proposal.metadata)
+    }
+
+    /// Search proposals by a metadata key-value pair.
+    ///
+    /// Scans all proposals and returns IDs where `proposal.metadata[key] == value`.
+    /// Results are paginated via `offset` and `limit` (capped at 50).
+    ///
+    /// # Arguments
+    /// * `key`    - Metadata key to match
+    /// * `value`  - Metadata value to match
+    /// * `offset` - Number of matching proposals to skip
+    /// * `limit`  - Maximum number of IDs to return (capped at 50)
+    pub fn get_proposals_by_metadata(
+        env: Env,
+        key: Symbol,
+        value: String,
+        offset: u64,
+        limit: u64,
+    ) -> Vec<u64> {
+        let cap: u64 = if limit > 50 { 50 } else { limit };
+        let next_id = storage::get_next_proposal_id(&env);
+        let mut results: Vec<u64> = Vec::new(&env);
+        let mut skipped: u64 = 0;
+
+        for id in 1..next_id {
+            if results.len() as u64 >= cap {
+                break;
+            }
+            if let Ok(proposal) = storage::get_proposal(&env, id) {
+                if let Some(v) = proposal.metadata.get(key.clone()) {
+                    if v == value {
+                        if skipped < offset {
+                            skipped += 1;
+                        } else {
+                            results.push_back(id);
+                        }
+                    }
+                }
+            }
+        }
+
+        results
     }
 
     // ========================================================================
@@ -5245,6 +5378,61 @@ impl VaultDAO {
         amount: i128,
     ) -> types::FeeCalculation {
         Self::calculate_fee_internal(&env, &user, &token, amount)
+    }
+
+    /// Collect an execution fee from the caller for a given token and amount.
+    ///
+    /// Computes `fee = amount * fee_bps / 10_000` after applying volume-based
+    /// tier discounts and reputation discounts. Transfers the fee from `user`
+    /// into the vault, updates `FeesCollected` and `UserVolume`, and emits
+    /// `fee_collected`.
+    ///
+    /// If `FeeStructure::enabled = false`, returns `Ok(0)` immediately.
+    ///
+    /// # Arguments
+    /// * `user`   - The user paying the fee (must authorize)
+    /// * `token`  - Token in which the fee is collected
+    /// * `amount` - The transaction amount on which the fee is based
+    ///
+    /// # Returns
+    /// The fee amount collected (0 if fees are disabled or fee rounds to zero).
+    pub fn collect_execution_fee(
+        env: Env,
+        user: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<i128, VaultError> {
+        user.require_auth();
+
+        let fee_structure = storage::get_fee_structure(&env);
+        if !fee_structure.enabled {
+            return Ok(0);
+        }
+
+        let fee_calc = Self::calculate_fee_internal(&env, &user, &token, amount);
+        if fee_calc.final_fee == 0 {
+            return Ok(0);
+        }
+
+        // Transfer fee from user into vault
+        token::transfer_to_vault(&env, &token, &user, fee_calc.final_fee);
+
+        // Update accounting
+        storage::add_fees_collected(&env, &token, fee_calc.final_fee);
+        storage::add_user_volume(&env, &user, &token, amount);
+
+        events::emit_fee_collected(
+            &env,
+            &user,
+            &token,
+            amount,
+            fee_calc.final_fee,
+            fee_calc.fee_bps,
+            fee_calc.reputation_discount_applied,
+        );
+
+        storage::extend_instance_ttl(&env);
+        Ok(fee_calc.final_fee)
     }
 
     /// Get total fees collected for a specific token.
@@ -7065,16 +7253,20 @@ impl VaultDAO {
             Self::evaluate_conditions(env, proposal)?;
         }
 
-        // Gas limit check
+        // Compute the execution fee estimate (base_cost + condition_cost * operations)
         let fee_estimate = Self::calculate_execution_fee(env, proposal);
+
+        // Enforce gas limit before executing the transfer: 0 means unlimited
         if proposal.gas_limit > 0 && fee_estimate.total_fee > proposal.gas_limit {
+            // Always record gas_used even when the limit is exceeded
+            proposal.gas_used = fee_estimate.total_fee;
             events::emit_gas_limit_exceeded(
                 env,
                 proposal.id,
                 fee_estimate.total_fee,
                 proposal.gas_limit,
             );
-            return Err(VaultError::ExceedsProposalLimit);
+            return Err(VaultError::GasLimitExceeded);
         }
 
         // Calculate fee for this transaction
@@ -7141,7 +7333,7 @@ impl VaultDAO {
             }
         }
 
-        // Record gas used
+        // Always record gas_used after execution (even on success)
         proposal.gas_used = fee_estimate.total_fee;
 
         Ok(())
@@ -9873,6 +10065,7 @@ impl VaultDAO {
         amount_per_period: i128,
         interval_ledgers: u64,
         auto_renew: bool,
+        grace_period_ledgers: u64,
     ) -> Result<u64, VaultError> {
         subscriber.require_auth();
         if !storage::is_initialized(&env) {
@@ -9906,6 +10099,7 @@ impl VaultDAO {
             total_payments: 1,
             last_payment_ledger: current_ledger,
             auto_renew,
+            grace_period_ledgers,
         };
 
         storage::set_subscription(&env, &sub);
@@ -9927,6 +10121,8 @@ impl VaultDAO {
     ///
     /// Can be called by anyone when `auto_renew = true` and the renewal ledger
     /// has passed. The subscriber must call it themselves otherwise.
+    /// Succeeds if `current_ledger <= next_renewal_ledger + grace_period_ledgers`.
+    /// After the grace period, the subscription is expired and renewal is rejected.
     pub fn renew_subscription(
         env: Env,
         caller: Address,
@@ -9939,6 +10135,9 @@ impl VaultDAO {
         if sub.status == SubscriptionStatus::Cancelled {
             return Err(VaultError::SubscriptionAlreadyCancelled);
         }
+        if sub.status == SubscriptionStatus::Expired {
+            return Err(VaultError::SubscriptionAlreadyExpired);
+        }
         if sub.status != SubscriptionStatus::Active {
             return Err(VaultError::SubscriptionNotActive);
         }
@@ -9946,6 +10145,16 @@ impl VaultDAO {
         let current_ledger = env.ledger().sequence() as u64;
         if current_ledger < sub.next_renewal_ledger {
             return Err(VaultError::RenewalNotDue);
+        }
+
+        // Check if grace period has lapsed — expire and reject
+        let grace_deadline = sub.next_renewal_ledger + sub.grace_period_ledgers;
+        if current_ledger > grace_deadline {
+            sub.status = SubscriptionStatus::Expired;
+            sub.auto_renew = false;
+            storage::set_subscription(&env, &sub);
+            events::emit_subscription_expired(&env, subscription_id);
+            return Err(VaultError::SubscriptionAlreadyExpired);
         }
 
         // Only the subscriber can renew unless auto_renew is enabled.
@@ -10061,6 +10270,84 @@ impl VaultDAO {
         subscriber: Address,
     ) -> Vec<u64> {
         storage::get_subscriber_index(&env, &subscriber)
+    }
+
+    /// Scan all subscriptions up to `next_subscription_id` and expire any that
+    /// are past their grace deadline. Permissionless — anyone may call this to
+    /// prevent griefing by inaction.
+    ///
+    /// Emits `subscription_expired` for each subscription that transitions to
+    /// `SubscriptionStatus::Expired`.
+    pub fn expire_overdue_subscriptions(env: Env, caller: Address) -> u32 {
+        caller.require_auth();
+        let current_ledger = env.ledger().sequence() as u64;
+        let next_id = storage::get_next_subscription_id(&env);
+        let mut expired_count: u32 = 0;
+
+        for id in 1..next_id {
+            let sub = match storage::get_subscription(&env, id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if sub.status != SubscriptionStatus::Active {
+                continue;
+            }
+            let grace_deadline = sub.next_renewal_ledger + sub.grace_period_ledgers;
+            if current_ledger > grace_deadline {
+                let mut expired_sub = sub;
+                expired_sub.status = SubscriptionStatus::Expired;
+                expired_sub.auto_renew = false;
+                storage::set_subscription(&env, &expired_sub);
+                events::emit_subscription_expired(&env, id);
+                expired_count += 1;
+            }
+        }
+
+        storage::extend_instance_ttl(&env);
+        expired_count
+    }
+
+    /// Reactivate an expired subscription by paying the overdue amount.
+    ///
+    /// Only the original subscriber may reactivate. The subscriber pays one
+    /// period's amount immediately and the next renewal is scheduled from now.
+    pub fn reactivate_subscription(
+        env: Env,
+        subscriber: Address,
+        subscription_id: u64,
+    ) -> Result<(), VaultError> {
+        subscriber.require_auth();
+
+        let mut sub = storage::get_subscription(&env, subscription_id)?;
+
+        if sub.subscriber != subscriber {
+            return Err(VaultError::NotSubscriberOrAdmin);
+        }
+        if sub.status != SubscriptionStatus::Expired {
+            return Err(VaultError::SubscriptionNotActive);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+
+        // Collect reactivation payment: subscriber → vault → provider
+        token::transfer_to_vault(&env, &sub.token, &subscriber, sub.amount_per_period);
+        token::transfer(&env, &sub.token, &sub.service_provider, sub.amount_per_period);
+
+        sub.status = SubscriptionStatus::Active;
+        sub.auto_renew = true;
+        sub.total_payments += 1;
+        sub.last_payment_ledger = current_ledger;
+        sub.next_renewal_ledger = current_ledger + sub.interval_ledgers;
+
+        let payment_number = sub.total_payments;
+        let amount = sub.amount_per_period;
+
+        storage::set_subscription(&env, &sub);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_subscription_renewed(&env, subscription_id, payment_number, amount);
+
+        Ok(())
     }
 
     // ========================================================================

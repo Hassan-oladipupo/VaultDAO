@@ -82,6 +82,7 @@ fn test_create_subscription_success() {
         &100i128,
         &1000u64,
         &true,
+        &0u64,
     );
 
     assert_eq!(id, 1);
@@ -110,6 +111,7 @@ fn test_create_subscription_zero_amount_fails() {
         &0i128,
         &1000u64,
         &false,
+        &0u64,
     );
     assert_eq!(res, Err(Ok(VaultError::InvalidAmount)));
 }
@@ -133,6 +135,7 @@ fn test_create_subscription_zero_interval_fails() {
         &100i128,
         &0u64,
         &false,
+        &0u64,
     );
     assert_eq!(res, Err(Ok(VaultError::IntervalTooShort)));
 }
@@ -160,6 +163,7 @@ fn test_renew_subscription_success() {
         &100i128,
         &500u64,
         &true,
+        &0u64,
     );
 
     env.ledger().with_mut(|l| l.sequence_number += 501);
@@ -191,6 +195,7 @@ fn test_renew_before_renewal_ledger_fails() {
         &100i128,
         &1000u64,
         &true,
+        &0u64,
     );
 
     // Do NOT advance ledger — renewal not due yet.
@@ -217,6 +222,7 @@ fn test_renew_cancelled_subscription_fails() {
         &100i128,
         &500u64,
         &true,
+        &0u64,
     );
 
     client.cancel_subscription(&subscriber, &id);
@@ -249,6 +255,7 @@ fn test_cancel_subscription_by_subscriber() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     client.cancel_subscription(&subscriber, &id);
@@ -276,6 +283,7 @@ fn test_cancel_subscription_by_admin() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     client.cancel_subscription(&admin, &id);
@@ -304,6 +312,7 @@ fn test_cancel_by_non_subscriber_non_admin_fails() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     let res = client.try_cancel_subscription(&rando, &id);
@@ -329,6 +338,7 @@ fn test_cancel_already_cancelled_fails() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     client.cancel_subscription(&subscriber, &id);
@@ -359,6 +369,7 @@ fn test_upgrade_subscription_success() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     client.upgrade_subscription(&subscriber, &id, &SubscriptionTier::Premium, &300i128);
@@ -388,6 +399,7 @@ fn test_upgrade_cancelled_subscription_fails() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     client.cancel_subscription(&subscriber, &id);
@@ -420,6 +432,7 @@ fn test_upgrade_by_non_subscriber_fails() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     let res =
@@ -446,6 +459,7 @@ fn test_upgrade_zero_amount_fails() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     let res =
@@ -477,6 +491,7 @@ fn test_auto_renew_by_third_party() {
         &100i128,
         &500u64,
         &true,
+        &0u64,
     );
 
     env.ledger().with_mut(|l| l.sequence_number += 501);
@@ -507,6 +522,7 @@ fn test_manual_renew_by_third_party_fails_when_auto_renew_false() {
         &100i128,
         &500u64,
         &false,
+        &0u64,
     );
 
     env.ledger().with_mut(|l| l.sequence_number += 501);
@@ -548,6 +564,7 @@ fn test_subscription_ids_are_sequential() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
     let id2 = client.create_subscription(
         &subscriber,
@@ -557,6 +574,7 @@ fn test_subscription_ids_are_sequential() {
         &200i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     assert_eq!(id1, 1);
@@ -582,6 +600,7 @@ fn test_get_subscriptions_by_subscriber() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
     let id2 = client.create_subscription(
         &subscriber,
@@ -591,6 +610,7 @@ fn test_get_subscriptions_by_subscriber() {
         &300i128,
         &2000u64,
         &false,
+        &0u64,
     );
 
     let ids = client.get_subscriptions_by_subscriber(&subscriber);
@@ -637,6 +657,7 @@ fn test_subscription_created_event_emitted() {
         &100i128,
         &1000u64,
         &true,
+        &0u64,
     );
 
     let events = env.events().all();
@@ -673,6 +694,7 @@ fn test_subscription_renewed_event_emitted() {
         &100i128,
         &500u64,
         &true,
+        &0u64,
     );
 
     env.ledger().with_mut(|l| l.sequence_number += 501);
@@ -712,6 +734,7 @@ fn test_subscription_cancelled_event_emitted() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     client.cancel_subscription(&subscriber, &id);
@@ -750,6 +773,7 @@ fn test_subscription_upgraded_event_emitted() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     client.upgrade_subscription(&subscriber, &id, &SubscriptionTier::Enterprise, &500i128);
@@ -789,6 +813,7 @@ fn test_status_transitions_create_cancel() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     // After creation: Active
@@ -818,6 +843,7 @@ fn test_renew_increments_total_payments() {
         &100i128,
         &500u64,
         &true,
+        &0u64,
     );
 
     assert_eq!(client.get_subscription(&id).total_payments, 1);
@@ -850,6 +876,7 @@ fn test_upgrade_preserves_active_status() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     client.upgrade_subscription(&subscriber, &id, &SubscriptionTier::Premium, &300i128);
@@ -912,6 +939,7 @@ fn test_auto_renew_flag_stored_correctly() {
         &100i128,
         &1000u64,
         &true,
+        &0u64,
     );
     let id_manual = client.create_subscription(
         &subscriber,
@@ -921,6 +949,7 @@ fn test_auto_renew_flag_stored_correctly() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     assert!(client.get_subscription(&id_auto).auto_renew);
@@ -946,6 +975,7 @@ fn test_renew_at_exact_renewal_ledger_succeeds() {
         &100i128,
         &500u64,
         &true,
+        &0u64,
     );
 
     // Advance exactly to next_renewal_ledger
@@ -979,6 +1009,7 @@ fn test_multiple_subscribers_independent_indexes() {
         &100i128,
         &1000u64,
         &false,
+        &0u64,
     );
     client.create_subscription(
         &sub_b,
@@ -988,6 +1019,7 @@ fn test_multiple_subscribers_independent_indexes() {
         &200i128,
         &1000u64,
         &false,
+        &0u64,
     );
     client.create_subscription(
         &sub_a,
@@ -997,6 +1029,7 @@ fn test_multiple_subscribers_independent_indexes() {
         &500i128,
         &1000u64,
         &false,
+        &0u64,
     );
 
     let ids_a = client.get_subscriptions_by_subscriber(&sub_a);
@@ -1004,4 +1037,189 @@ fn test_multiple_subscribers_independent_indexes() {
 
     assert_eq!(ids_a.len(), 2);
     assert_eq!(ids_b.len(), 1);
+}
+
+// ============================================================================
+// Grace Period Tests (#898)
+// ============================================================================
+
+#[test]
+fn test_renew_on_time_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 10_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &token,
+        &100i128,
+        &500u64,
+        &true,
+        &200u64, // grace period
+    );
+
+    let sub = client.get_subscription(&id);
+    let advance = sub.next_renewal_ledger - env.ledger().sequence() as u64;
+    env.ledger().with_mut(|l| l.sequence_number += advance as u32);
+
+    client.renew_subscription(&subscriber, &id);
+    assert_eq!(client.get_subscription(&id).total_payments, 2);
+}
+
+#[test]
+fn test_renew_within_grace_period_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 10_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &token,
+        &100i128,
+        &500u64,
+        &true,
+        &200u64, // 200-ledger grace period
+    );
+
+    let sub = client.get_subscription(&id);
+    // Advance to next_renewal_ledger + 100 (inside grace period)
+    let advance = sub.next_renewal_ledger + 100 - env.ledger().sequence() as u64;
+    env.ledger().with_mut(|l| l.sequence_number += advance as u32);
+
+    client.renew_subscription(&subscriber, &id);
+    assert_eq!(client.get_subscription(&id).total_payments, 2);
+    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Active);
+}
+
+#[test]
+fn test_renew_after_grace_period_fails_and_expires() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 10_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &token,
+        &100i128,
+        &500u64,
+        &true,
+        &200u64, // 200-ledger grace period
+    );
+
+    let sub = client.get_subscription(&id);
+    // Advance past next_renewal_ledger + grace_period_ledgers
+    let advance = sub.next_renewal_ledger + sub.grace_period_ledgers + 1
+        - env.ledger().sequence() as u64;
+    env.ledger().with_mut(|l| l.sequence_number += advance as u32);
+
+    let res = client.try_renew_subscription(&subscriber, &id);
+    assert_eq!(res, Err(Ok(VaultError::SubscriptionAlreadyExpired)));
+
+    // Subscription should now be Expired with auto_renew = false
+    let expired_sub = client.get_subscription(&id);
+    assert_eq!(expired_sub.status, SubscriptionStatus::Expired);
+    assert!(!expired_sub.auto_renew);
+}
+
+#[test]
+fn test_expire_overdue_subscriptions_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 100_000);
+
+    // Create two subscriptions with short grace periods
+    let id1 = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &token,
+        &100i128,
+        &500u64,
+        &false,
+        &50u64,
+    );
+    let id2 = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Standard,
+        &token,
+        &200i128,
+        &500u64,
+        &false,
+        &50u64,
+    );
+
+    let sub1 = client.get_subscription(&id1);
+    // Advance past both grace deadlines
+    let advance = sub1.next_renewal_ledger + 51 - env.ledger().sequence() as u64;
+    env.ledger().with_mut(|l| l.sequence_number += advance as u32);
+
+    let expired = client.expire_overdue_subscriptions(&subscriber);
+    assert_eq!(expired, 2);
+
+    assert_eq!(client.get_subscription(&id1).status, SubscriptionStatus::Expired);
+    assert_eq!(client.get_subscription(&id2).status, SubscriptionStatus::Expired);
+}
+
+#[test]
+fn test_reactivate_expired_subscription() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 100_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &token,
+        &100i128,
+        &500u64,
+        &true,
+        &50u64,
+    );
+
+    let sub = client.get_subscription(&id);
+    // Expire it
+    let advance = sub.next_renewal_ledger + 51 - env.ledger().sequence() as u64;
+    env.ledger().with_mut(|l| l.sequence_number += advance as u32);
+    client.expire_overdue_subscriptions(&subscriber);
+    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Expired);
+
+    // Reactivate
+    client.reactivate_subscription(&subscriber, &id);
+    let reactivated = client.get_subscription(&id);
+    assert_eq!(reactivated.status, SubscriptionStatus::Active);
+    assert!(reactivated.auto_renew);
+    assert_eq!(reactivated.total_payments, 2);
 }

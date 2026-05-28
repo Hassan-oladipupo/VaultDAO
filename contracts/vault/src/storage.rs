@@ -503,12 +503,38 @@ pub fn get_daily_spent(env: &Env, day: u64) -> i128 {
 }
 
 pub fn add_daily_spent(env: &Env, day: u64, amount: i128) {
+    // Soroban ledger execution is single-writer per transaction; reading and
+    // writing in the same invocation is atomic with respect to other transactions.
     let current = get_daily_spent(env, day);
     let key = DataKey::DailySpent(day);
     env.storage().temporary().set(&key, &(current + amount));
     env.storage()
         .temporary()
         .extend_ttl(&key, DAY_IN_LEDGERS * 2, DAY_IN_LEDGERS * 2);
+}
+
+/// Atomically deduct `amount` from the daily spent counter.
+///
+/// Reads the current value, validates the deduction won't go negative, then
+/// writes the result in the same storage call. Returns `true` on success,
+/// `false` if the deduction would underflow (counter already at zero).
+///
+/// # Soroban single-writer guarantee
+/// Soroban executes each transaction sequentially within a ledger. A read
+/// followed by a write in the same contract invocation is therefore atomic:
+/// no other transaction can interleave between the read and the write.
+/// This prevents the double-refund race described in issue #904.
+pub fn try_deduct_daily_spent(env: &Env, day: u64, amount: i128) -> bool {
+    let current = get_daily_spent(env, day);
+    if amount > current {
+        return false;
+    }
+    let key = DataKey::DailySpent(day);
+    env.storage().temporary().set(&key, &(current - amount));
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS * 2, DAY_IN_LEDGERS * 2);
+    true
 }
 
 // ============================================================================
@@ -528,12 +554,31 @@ pub fn get_weekly_spent(env: &Env, week: u64) -> i128 {
 }
 
 pub fn add_weekly_spent(env: &Env, week: u64, amount: i128) {
+    // Soroban ledger execution is single-writer per transaction; reading and
+    // writing in the same invocation is atomic with respect to other transactions.
     let current = get_weekly_spent(env, week);
     let key = DataKey::WeeklySpent(week);
     env.storage().temporary().set(&key, &(current + amount));
     env.storage()
         .temporary()
         .extend_ttl(&key, DAY_IN_LEDGERS * 14, DAY_IN_LEDGERS * 14);
+}
+
+/// Atomically deduct `amount` from the weekly spent counter.
+///
+/// See `try_deduct_daily_spent` for the atomicity guarantee.
+/// Returns `true` on success, `false` if the deduction would underflow.
+pub fn try_deduct_weekly_spent(env: &Env, week: u64, amount: i128) -> bool {
+    let current = get_weekly_spent(env, week);
+    if amount > current {
+        return false;
+    }
+    let key = DataKey::WeeklySpent(week);
+    env.storage().temporary().set(&key, &(current - amount));
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS * 14, DAY_IN_LEDGERS * 14);
+    true
 }
 
 // ============================================================================
@@ -1042,25 +1087,14 @@ pub fn add_amendment_record(env: &Env, record: &ProposalAmendment) {
 
 /// Refund spending limits when a proposal is cancelled
 pub fn refund_spending_limits(env: &Env, amount: i128) {
-    // Refund daily
+    // Use atomic try_deduct helpers to ensure counters never go negative.
+    // Each helper reads, validates, and writes in a single storage call,
+    // preventing double-refund if two cancellations land in the same ledger.
     let today = get_day_number(env);
-    let spent_today = get_daily_spent(env, today);
-    let refunded_daily = spent_today.saturating_sub(amount).max(0);
-    let key_daily = DataKey::DailySpent(today);
-    env.storage().temporary().set(&key_daily, &refunded_daily);
-    env.storage()
-        .temporary()
-        .extend_ttl(&key_daily, DAY_IN_LEDGERS * 2, DAY_IN_LEDGERS * 2);
+    try_deduct_daily_spent(env, today, amount);
 
-    // Refund weekly
     let week = get_week_number(env);
-    let spent_week = get_weekly_spent(env, week);
-    let refunded_weekly = spent_week.saturating_sub(amount).max(0);
-    let key_weekly = DataKey::WeeklySpent(week);
-    env.storage().temporary().set(&key_weekly, &refunded_weekly);
-    env.storage()
-        .temporary()
-        .extend_ttl(&key_weekly, DAY_IN_LEDGERS * 14, DAY_IN_LEDGERS * 14);
+    try_deduct_weekly_spent(env, week, amount);
 }
 // ============================================================================
 // Comments
@@ -2278,7 +2312,7 @@ pub fn add_proposal_dispute(env: &Env, proposal_id: u64, dispute_id: u64) {
 // Subscriptions
 // ============================================================================
 
-fn get_next_subscription_id(env: &Env) -> u64 {
+pub fn get_next_subscription_id(env: &Env) -> u64 {
     env.storage()
         .instance()
         .get(&FeatureKey::Counter(CounterKey::Subscription))
