@@ -4185,7 +4185,6 @@ fn test_execute_swap_proposal() {
     assert_eq!(swap_result.amount_out, 990); // Mock: 1% slippage
     assert!(swap_result.price_impact_bps <= 500); // Within max_price_impact_bps
 }
-}
 
 #[test]
 fn test_batch_propose_multi_token() {
@@ -10089,7 +10088,7 @@ fn test_price_below_condition_satisfied() {
     let client = VaultDAOClient::new(&env, &contract_id);
     token_sac.mint(&contract_id, &1000);
 
-    // Mock oracle returns price = 1000 with timestamp = 0
+    // Mock oracle (default price=1000, timestamp=0; configurable for staleness tests)
     let oracle_id = env.register(mock_oracle::MockOracle, ());
 
     let mut signers = Vec::new(&env);
@@ -10151,7 +10150,7 @@ fn test_price_below_condition_not_satisfied() {
     let client = VaultDAOClient::new(&env, &contract_id);
     token_sac.mint(&contract_id, &1000);
 
-    // Mock oracle returns price = 1000
+    // Mock oracle (default price=1000, timestamp=0; configurable for staleness tests)
     let oracle_id = env.register(mock_oracle::MockOracle, ());
 
     let mut signers = Vec::new(&env);
@@ -10190,6 +10189,187 @@ fn test_price_below_condition_not_satisfied() {
 
     let res = client.try_execute_proposal(&admin, &proposal_id);
     assert!(res.is_err(), "PriceBelow not satisfied should block execution");
+}
+
+// ============================================================================
+// Oracle staleness validation (Issue: oracle-staleness-validation)
+// ============================================================================
+
+#[test]
+fn test_price_condition_fresh_price_passes() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    env.ledger().set_sequence_number(100);
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let token_contract = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = token_contract.address();
+    let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+    token_sac.mint(&contract_id, &1000);
+
+    let oracle_id = env.register(mock_oracle::MockOracle, ());
+    // Set price recorded at current ledger, so it's fresh.
+    let _set: () = env.invoke_contract(
+        &oracle_id,
+        &Symbol::new(&env, "set_price"),
+        soroban_sdk::vec![&env, 1000i128.into_val(&env), 100u64.into_val(&env)],
+    );
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+    client.set_role(&admin, &signer1, &Role::Treasurer);
+
+    client.set_oracle_config(
+        &admin,
+        &crate::types::VaultOracleConfig {
+            address: oracle_id,
+            base_symbol: Symbol::new(&env, "USD"),
+            max_staleness: 1,
+        },
+    );
+
+    let asset = Address::generate(&env);
+    let mut conditions = Vec::new(&env);
+    conditions.push_back(Condition::PriceBelow(asset, 2000));
+
+    let proposal_id = client.propose_transfer(
+        &signer1,
+        &recipient,
+        &token_addr,
+        &100,
+        &Symbol::new(&env, "fresh"),
+        &Priority::Normal,
+        &conditions,
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&signer1, &proposal_id);
+    client.execute_proposal(&admin, &proposal_id);
+
+    assert_eq!(
+        client.get_proposal(&proposal_id).status,
+        ProposalStatus::Executed
+    );
+}
+
+#[test]
+fn test_price_condition_stale_price_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    env.ledger().set_sequence_number(100);
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let token_contract = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = token_contract.address();
+    let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+    token_sac.mint(&contract_id, &1000);
+
+    let oracle_id = env.register(mock_oracle::MockOracle, ());
+    // Set price far in the past so it is stale.
+    let _set: () = env.invoke_contract(
+        &oracle_id,
+        &Symbol::new(&env, "set_price"),
+        soroban_sdk::vec![&env, 1000i128.into_val(&env), 0u64.into_val(&env)],
+    );
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+    client.set_role(&admin, &signer1, &Role::Treasurer);
+
+    client.set_oracle_config(
+        &admin,
+        &crate::types::VaultOracleConfig {
+            address: oracle_id,
+            base_symbol: Symbol::new(&env, "USD"),
+            max_staleness: 10,
+        },
+    );
+
+    let asset = Address::generate(&env);
+    let mut conditions = Vec::new(&env);
+    conditions.push_back(Condition::PriceBelow(asset, 2000));
+
+    let proposal_id = client.propose_transfer(
+        &signer1,
+        &recipient,
+        &token_addr,
+        &100,
+        &Symbol::new(&env, "stale"),
+        &Priority::Normal,
+        &conditions,
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&signer1, &proposal_id);
+
+    let res = client.try_execute_proposal(&admin, &proposal_id);
+    assert_eq!(res, Err(Ok(VaultError::OraclePriceStale)));
+}
+
+#[test]
+fn test_price_condition_without_oracle_config_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let token_contract = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = token_contract.address();
+    let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+    token_sac.mint(&contract_id, &1000);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer1.clone());
+
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+    client.set_role(&admin, &signer1, &Role::Treasurer);
+
+    // Do NOT set oracle config.
+    let asset = Address::generate(&env);
+    let mut conditions = Vec::new(&env);
+    conditions.push_back(Condition::PriceBelow(asset, 2000));
+
+    let proposal_id = client.propose_transfer(
+        &signer1,
+        &recipient,
+        &token_addr,
+        &100,
+        &Symbol::new(&env, "no_oracle"),
+        &Priority::Normal,
+        &conditions,
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&signer1, &proposal_id);
+
+    let res = client.try_execute_proposal(&admin, &proposal_id);
+    assert_eq!(res, Err(Ok(VaultError::OracleNotConfigured)));
 }
 
 

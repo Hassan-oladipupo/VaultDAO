@@ -88,6 +88,10 @@ pub enum VaultError {
     TemplateValidationFailed = 212,
     /// Invalid time-based threshold configuration
     InvalidThresholdConfig = 310,
+    /// Oracle price is stale beyond max staleness
+    OraclePriceStale = 340,
+    /// Oracle is not configured but a price condition was used
+    OracleNotConfigured = 341,
     /// Contract upgrade is not authorized
     UpgradeUnauthorized = 920,
     /// Contract upgrade timelock is still active

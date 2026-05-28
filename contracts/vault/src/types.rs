@@ -19,6 +19,7 @@
 
 use soroban_sdk::{contracttype, Address, Env, Map, String, Symbol, Vec};
 
+#[path = "types_balance_snapshot.rs"]
 mod types_balance_snapshot;
 use types_balance_snapshot::BalanceSnapshot;
 
