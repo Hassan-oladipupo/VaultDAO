@@ -9562,13 +9562,35 @@ impl VaultDAO {
 
         // Must be submitted, not already verified
         if milestone.status != FundingMilestoneStatus::Submitted {
-            return Err(VaultError::InvalidAmount);
+            return Err(VaultError::InvalidStatusTransition);
         }
-
-        let amount = milestone.amount;
-
-        let mut updated = milestone.clone();
-        updated.status = FundingMilestoneStatus::Verified;
+        
+        // Prevent duplicate verification
+        if milestone.verifications.contains(&verifier) {
+            return Err(VaultError::AlreadyVerified);
+        }
+        
+        // Role check (Admin or Treasurer only)
+        let role = storage::get_role(&env, &verifier)?;
+        if role != Role::Admin && role != Role::Treasurer {
+            return Err(VaultError::InsufficientRole);
+        }
+        
+        // First verification timestamp
+        if milestone.verifications.is_empty() {
+            milestone.verified_at = env.ledger().sequence();
+        }
+        
+        // Add verifier
+        milestone.verifications.push(verifier.clone());
+        
+        // Check quorum
+        if (milestone.verifications.len() as u32) >= milestone.required_verifiers {
+            milestone.status = FundingMilestoneStatus::Verified;
+        
+            // Optional: trigger fund release logic
+            storage::release_milestone_funds(&env, round_id, milestone_index)?;
+        }
         updated.verified_at = env.ledger().timestamp();
         updated.verified_by = Some(verifier.clone());
 
