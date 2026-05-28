@@ -217,6 +217,14 @@ impl VaultDAO {
             _ => {} // Other strategies don't need additional validation
         }
 
+        // Validate proposal_id_prefix
+        let prefix = config.proposal_id_prefix;
+        if prefix != 0 {
+            if prefix % 1_000_000 != 0 || prefix > u64::MAX / 2 {
+                return Err(VaultError::InvalidProposalIdPrefix);
+            }
+        }
+
         // Admin must authorize initialization
         admin.require_auth();
 
@@ -241,6 +249,7 @@ impl VaultDAO {
             retry_config: config.retry_config,
             recovery_config: config.recovery_config.clone(),
             staking_config: config.staking_config,
+            proposal_id_prefix: config.proposal_id_prefix,
         };
 
         // Store state
@@ -3912,6 +3921,61 @@ impl VaultDAO {
     pub fn get_stream(env: Env, stream_id: u64) -> Result<StreamingPayment, VaultError> {
         storage::get_streaming_payment(&env, stream_id)
     }
+
+    /// Adjust the rate of an active or paused stream.
+    ///
+    /// Snapshots accumulated seconds and claimed amount before changing the rate
+    /// so that accrual history is preserved. Recalculates end_timestamp based on
+    /// the remaining unclaimed amount and the new rate.
+    ///
+    /// Only the stream sender or an Admin may call this.
+    pub fn adjust_stream_rate(
+        env: Env,
+        sender: Address,
+        stream_id: u64,
+        new_rate: i128,
+    ) -> Result<(), VaultError> {
+        sender.require_auth();
+
+        if new_rate <= 0 {
+            return Err(VaultError::InvalidStreamRate);
+        }
+
+        let mut stream = storage::get_streaming_payment(&env, stream_id)?;
+
+        let role = storage::get_role(&env, &sender);
+        if stream.sender != sender && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if stream.status == StreamStatus::Cancelled || stream.status == StreamStatus::Completed {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Snapshot accumulated seconds up to now (if active)
+        if stream.status == StreamStatus::Active {
+            let effective_now = if now > stream.end_timestamp { stream.end_timestamp } else { now };
+            stream.accumulated_seconds += effective_now.saturating_sub(stream.last_update_timestamp);
+        }
+        stream.last_update_timestamp = now;
+
+        let old_rate = stream.rate;
+        stream.rate = new_rate;
+
+        // Recalculate end_timestamp: remaining = total - claimed, new_duration = remaining / new_rate
+        let remaining = stream.total_amount - stream.claimed_amount;
+        if remaining > 0 {
+            let new_duration_secs = (remaining / new_rate) as u64;
+            stream.end_timestamp = now + new_duration_secs;
+        }
+
+        storage::set_streaming_payment(&env, &stream);
+        events::emit_stream_rate_adjusted(&env, stream_id, old_rate, new_rate, &sender);
+
+        Ok(())
+    }
     // ========================================================================
     // Recipient List Management
     // ========================================================================
@@ -4038,6 +4102,142 @@ impl VaultDAO {
     /// Check if an address is blacklisted
     pub fn is_blacklisted(env: Env, addr: Address) -> bool {
         storage::is_blacklisted(&env, &addr)
+    }
+
+    /// Bulk add addresses to the whitelist (up to 50). Duplicates are silently skipped.
+    pub fn bulk_add_to_whitelist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if addresses.len() > 50 {
+            return Err(VaultError::BatchTooLarge);
+        }
+        for i in 0..addresses.len() {
+            if let Some(addr) = addresses.get(i) {
+                if !storage::is_whitelisted(&env, &addr) {
+                    storage::add_to_whitelist(&env, &addr);
+                }
+            }
+        }
+        events::emit_config_updated(&env, &admin);
+        Ok(())
+    }
+
+    /// Bulk remove addresses from the whitelist. Missing addresses are silently skipped.
+    pub fn bulk_remove_from_whitelist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if addresses.len() > 50 {
+            return Err(VaultError::BatchTooLarge);
+        }
+        for i in 0..addresses.len() {
+            if let Some(addr) = addresses.get(i) {
+                if storage::is_whitelisted(&env, &addr) {
+                    storage::remove_from_whitelist(&env, &addr);
+                }
+            }
+        }
+        events::emit_config_updated(&env, &admin);
+        Ok(())
+    }
+
+    /// Bulk add addresses to the blacklist (up to 50). Duplicates are silently skipped.
+    pub fn bulk_add_to_blacklist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if addresses.len() > 50 {
+            return Err(VaultError::BatchTooLarge);
+        }
+        for i in 0..addresses.len() {
+            if let Some(addr) = addresses.get(i) {
+                if !storage::is_blacklisted(&env, &addr) {
+                    storage::add_to_blacklist(&env, &addr);
+                }
+            }
+        }
+        events::emit_config_updated(&env, &admin);
+        Ok(())
+    }
+
+    /// Bulk remove addresses from the blacklist. Missing addresses are silently skipped.
+    pub fn bulk_remove_from_blacklist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if addresses.len() > 50 {
+            return Err(VaultError::BatchTooLarge);
+        }
+        for i in 0..addresses.len() {
+            if let Some(addr) = addresses.get(i) {
+                if storage::is_blacklisted(&env, &addr) {
+                    storage::remove_from_blacklist(&env, &addr);
+                }
+            }
+        }
+        events::emit_config_updated(&env, &admin);
+        Ok(())
+    }
+
+    /// Get paginated whitelist entries (capped at 100 per page).
+    pub fn get_whitelist_paginated(env: Env, offset: u64, limit: u64) -> Vec<Address> {
+        storage::get_whitelist_paginated(&env, offset, limit)
+    }
+
+    /// Get paginated blacklist entries (capped at 100 per page).
+    pub fn get_blacklist_paginated(env: Env, offset: u64, limit: u64) -> Vec<Address> {
+        storage::get_blacklist_paginated(&env, offset, limit)
+    }
+
+    /// Get proposal IDs filtered by status (capped at 50 per page).
+    pub fn get_proposals_by_status(
+        env: Env,
+        status: ProposalStatus,
+        offset: u64,
+        limit: u64,
+    ) -> Vec<u64> {
+        storage::get_proposals_by_status(&env, status as u32, offset, limit)
+    }
+
+    /// Get proposal IDs created within a ledger range (capped at 50 per page).
+    pub fn get_proposals_by_ledger_range(
+        env: Env,
+        from_ledger: u64,
+        to_ledger: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<u64>, VaultError> {
+        if from_ledger > to_ledger {
+            return Err(VaultError::InvalidLedgerRange);
+        }
+        Ok(storage::get_proposals_by_ledger_range(&env, from_ledger, to_ledger, offset, limit))
+    }
+
+    /// Get the configured proposal ID namespace prefix.
+    pub fn get_vault_namespace(env: Env) -> Result<u64, VaultError> {
+        let config = storage::get_config(&env)?;
+        Ok(config.proposal_id_prefix)
     }
 
     /// Validate if a recipient is allowed based on current list mode

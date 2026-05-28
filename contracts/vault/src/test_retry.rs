@@ -57,6 +57,7 @@ mod tests {
                 reputation_discount_percentage: 0,
                 slash_percentage: 0,
             },
+        proposal_id_prefix: 0,
         };
 
         client.initialize(&admin, &init_config);

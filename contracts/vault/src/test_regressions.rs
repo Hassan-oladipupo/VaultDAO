@@ -40,6 +40,7 @@ fn init_config(
         },
         recovery_config: RecoveryConfig::default(env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     }
 }
 
@@ -990,6 +991,7 @@ fn test_execute_before_timelock_expires_fails() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);

@@ -51,6 +51,7 @@ fn deadline_init_config(env: &Env, signers: Vec<Address>, deadline_offset: u64) 
         },
         recovery_config: RecoveryConfig::default(env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     }
 }
 
@@ -576,6 +577,7 @@ fn test_other_rejection_already_approved() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: crate::types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -900,6 +902,7 @@ fn test_time_based_threshold_before_reduction() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -987,6 +990,7 @@ fn test_time_based_threshold_after_reduction() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -1079,6 +1083,7 @@ fn test_time_based_threshold_respects_quorum() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -1165,6 +1170,7 @@ fn test_time_based_threshold_reduction_irreversible() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -1259,6 +1265,7 @@ fn test_time_based_threshold_config_validation() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     let result1 = client.try_initialize(&admin, &invalid_config1);
@@ -1294,6 +1301,7 @@ fn test_time_based_threshold_config_validation() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     let result2 = client.try_initialize(&admin, &invalid_config2);
@@ -1329,6 +1337,7 @@ fn test_time_based_threshold_config_validation() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     let result3 = client.try_initialize(&admin, &invalid_config3);
@@ -1364,6 +1373,7 @@ fn test_time_based_threshold_config_validation() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     let result4 = client.try_initialize(&admin, &valid_config);

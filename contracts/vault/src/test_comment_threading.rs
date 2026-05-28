@@ -37,6 +37,7 @@ fn setup_comments(env: &Env) -> (VaultDAOClient, Address, Address, Address, u64)
         retry_config: RetryConfig { enabled: false, max_retries: 0, initial_backoff_ledgers: 0 },
         recovery_config: crate::types::RecoveryConfig::default(env),
         staking_config: crate::types::StakingConfig::default(),
+        proposal_id_prefix: 0,
         pre_execution_hooks: Vec::new(env),
         post_execution_hooks: Vec::new(env),
     };

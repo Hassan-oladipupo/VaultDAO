@@ -91,6 +91,8 @@ pub struct InitConfig {
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
     pub staking_config: StakingConfig,
+    /// Proposal ID namespace prefix for multi-vault coordination (must be multiple of 1_000_000)
+    pub proposal_id_prefix: u64,
 }
 
 /// Vault configuration
@@ -134,6 +136,8 @@ pub struct Config {
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
     pub staking_config: StakingConfig,
+    /// Proposal ID namespace prefix for multi-vault coordination
+    pub proposal_id_prefix: u64,
 }
 
 /// Audit record for a cancelled proposal
