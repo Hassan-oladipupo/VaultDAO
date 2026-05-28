@@ -16,6 +16,7 @@ import { createAuditRouter } from "./modules/audit/audit.routes.js";
 import { createNotificationsRouter } from "./modules/notifications/notifications.routes.js";
 import { createCacheRouter } from "./shared/cache/cache.routes.js";
 import { createVaultRouter } from "./modules/vault/vault.routes.js";
+import { createCursorsRouter } from "./modules/events/cursor/cursors.routes.js";
 import { error } from "./shared/http/response.js";
 import { createRateLimitMiddleware } from "./shared/http/rateLimit.js";
 import { createAuthMiddleware, requireApiKey } from "./shared/http/auth.js";
@@ -197,6 +198,13 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
       "/cache",
       authMiddleware,
       createCacheRouter(runtime.cacheManager),
+    );
+  }
+
+  if (runtime.dbCursorAdapter) {
+    v1Router.use(
+      "/cursors",
+      createCursorsRouter(runtime.dbCursorAdapter, adminAuthMiddleware),
     );
   }
 

@@ -5,6 +5,7 @@ import {
   EventPollingService,
   FileCursorAdapter,
   DatabaseCursorAdapter,
+  migrateFileCursorToDatabase,
 } from "./modules/events/index.js";
 import { MetricsRegistry } from "./modules/health/metrics.registry.js";
 import {
@@ -47,6 +48,7 @@ export interface BackendRuntime {
   readonly metricsRegistry: MetricsRegistry;
   readonly notificationQueue?: PriorityNotificationQueue;
   readonly cacheManager?: CacheManager;
+  readonly dbCursorAdapter?: DatabaseCursorAdapter;
 }
 
 export interface BackendServer {
@@ -143,12 +145,21 @@ export async function startServer(
   const wsServer = new EventWebSocketServer(server);
   runtime.wsServer = wsServer;
 
+  // Determine cursor storage and run one-time file→database migration if needed
+  let dbCursorAdapter: DatabaseCursorAdapter | undefined;
   const cursorStorage =
     env.cursorStorageType === "database"
-      ? new DatabaseCursorAdapter(
-          new SqliteStorageAdapter(env.databasePath, "event_cursors"),
-        )
+      ? (() => {
+          dbCursorAdapter = new DatabaseCursorAdapter(
+            new SqliteStorageAdapter(env.databasePath, "event_cursors"),
+          );
+          // One-time idempotent migration from file cursor (kept as backup)
+          void migrateFileCursorToDatabase(new FileCursorAdapter(), dbCursorAdapter);
+          return dbCursorAdapter;
+        })()
       : new FileCursorAdapter();
+
+  runtime.dbCursorAdapter = dbCursorAdapter;
 
   // Multi-contract indexing: determine contract IDs to index
   const contractIds =
