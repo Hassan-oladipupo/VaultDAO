@@ -115,6 +115,8 @@ pub enum VaultError {
     DependencyDepthExceeded = 301,
     /// Bridge operation failed or is misconfigured
     BridgeError = 400,
+    /// Veto window has closed for this proposal
+    VetoWindowClosed = 710,
 }
 
 // Compatibility markers for CI source checks:

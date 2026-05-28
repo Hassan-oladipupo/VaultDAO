@@ -1430,22 +1430,56 @@ pub fn get_audit_entry(env: &Env, id: u64) -> Result<AuditEntry, VaultError> {
         .ok_or(VaultError::ProposalNotFound)
 }
 
+/// Compute audit hash using SHA256 over deterministic serialization
+/// 
+/// Serialization format (documented for upgrade compatibility):
+/// - id: u64 (8 bytes, little-endian)
+/// - action: u32 (4 bytes, little-endian) 
+/// - actor: Address bytes (32 bytes)
+/// - target: u64 (8 bytes, little-endian)
+/// - timestamp: u64 (8 bytes, little-endian)
+/// - prev_hash: u64 (8 bytes, little-endian)
+/// 
+/// Total: 68 bytes deterministic input to SHA256
 pub fn compute_audit_hash(
-    _env: &Env,
+    env: &Env,
+    id: u64,
     action: &crate::types::AuditAction,
     actor: &Address,
     target: u64,
     timestamp: u64,
     prev_hash: u64,
 ) -> u64 {
-    let mut hash = prev_hash;
-    hash = hash.wrapping_mul(31).wrapping_add(action.clone() as u64);
-    hash = hash
-        .wrapping_mul(31)
-        .wrapping_add(actor.to_string().len() as u64);
-    hash = hash.wrapping_mul(31).wrapping_add(target);
-    hash = hash.wrapping_mul(31).wrapping_add(timestamp);
-    hash
+    use soroban_sdk::Bytes;
+    
+    // Create deterministic serialization (68 bytes total)
+    let mut data = Bytes::new(env);
+    
+    // id: u64 (8 bytes, little-endian)
+    data.extend_from_array(&id.to_le_bytes());
+    
+    // action: u32 (4 bytes, little-endian)
+    data.extend_from_array(&(action.clone() as u32).to_le_bytes());
+    
+    // actor: Address bytes (32 bytes)
+    data.extend_from_slice(&actor.to_bytes());
+    
+    // target: u64 (8 bytes, little-endian)
+    data.extend_from_array(&target.to_le_bytes());
+    
+    // timestamp: u64 (8 bytes, little-endian)
+    data.extend_from_array(&timestamp.to_le_bytes());
+    
+    // prev_hash: u64 (8 bytes, little-endian)
+    data.extend_from_array(&prev_hash.to_le_bytes());
+    
+    // Compute SHA256 hash
+    let hash_bytes = env.crypto().sha256(&data);
+    
+    // Convert first 8 bytes of hash to u64 (little-endian)
+    let mut hash_array = [0u8; 8];
+    hash_array.copy_from_slice(&hash_bytes.slice(0..8).to_array());
+    u64::from_le_bytes(hash_array)
 }
 
 pub fn create_audit_entry(
@@ -1457,7 +1491,7 @@ pub fn create_audit_entry(
     let id = increment_audit_id(env);
     let timestamp = env.ledger().sequence() as u64;
     let prev_hash = get_last_audit_hash(env);
-    let hash = compute_audit_hash(env, &action, actor, target, timestamp, prev_hash);
+    let hash = compute_audit_hash(env, id, &action, actor, target, timestamp, prev_hash);
 
     let entry = AuditEntry {
         id,

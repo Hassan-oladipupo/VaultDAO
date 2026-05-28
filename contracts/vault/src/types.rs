@@ -80,6 +80,8 @@ pub struct InitConfig {
     pub default_voting_deadline: u64,
     /// Addresses allowed to veto proposals.
     pub veto_addresses: Vec<Address>,
+    /// Veto window in ledgers after proposal creation (0 = veto disabled)
+    pub veto_window_ledgers: u64,
     /// Retry configuration for failed executions
     pub retry_config: RetryConfig,
     /// Recovery configuration
@@ -121,6 +123,8 @@ pub struct Config {
     pub default_voting_deadline: u64,
     /// Addresses allowed to veto proposals.
     pub veto_addresses: Vec<Address>,
+    /// Veto window in ledgers after proposal creation (0 = veto disabled)
+    pub veto_window_ledgers: u64,
     /// Retry configuration for failed executions
     pub retry_config: RetryConfig,
     /// Recovery configuration
@@ -917,6 +921,7 @@ pub enum AuditAction {
     UpdateLimits = 8,
     UpdateThreshold = 9,
     AbstainProposal = 10,
+    AmendProposal = 11,
 }
 
 /// Audit trail entry with cryptographic verification
@@ -1670,74 +1675,4 @@ pub struct ExecutionSnapshot {
     pub proposal: Proposal,
     /// Whether it was in priority queue
     pub was_in_priority_queue: bool,
-}
-
-// ============================================================================
-// Batch Operations
-// ============================================================================
-
-/// Single operation in a batch transaction
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BatchOperation {
-    /// Recipient address
-    pub recipient: Address,
-    /// Token contract address
-    pub token: Address,
-    /// Amount to transfer
-    pub amount: i128,
-}
-
-/// Details of a transfer
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct TransferDetails {
-    /// Recipient address
-    pub recipient: Address,
-    /// Token contract address
-    pub token: Address,
-    /// Amount to transfer
-    pub amount: i128,
-}
-
-/// Status of a batch transaction
-#[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BatchStatus {
-    Pending,
-    Executing,
-    Completed,
-    RolledBack,
-}
-
-/// Batch transaction containing multiple operations
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BatchTransaction {
-    /// Unique batch ID
-    pub id: u64,
-    /// Creator of the batch
-    pub creator: Address,
-    /// List of operations
-    pub operations: Vec<BatchOperation>,
-    /// Current status
-    pub status: BatchStatus,
-    /// Creation timestamp
-    pub created_at: u64,
-    /// Optional memo
-    pub memo: Symbol,
-}
-
-/// Result of batch execution
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BatchExecutionResult {
-    /// Batch ID
-    pub batch_id: u64,
-    /// Whether all operations succeeded
-    pub success: bool,
-    /// Number of successful operations
-    pub successful_ops: u32,
-    /// Number of failed operations
-    pub failed_ops: u32,
 }
