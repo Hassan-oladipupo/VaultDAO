@@ -125,20 +125,35 @@ mod test_staking;
 
 #[cfg(test)]
 pub mod mock_oracle {
-    use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
+    use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
     use crate::types::VaultPriceData;
+
+    #[contracttype]
+    #[derive(Clone)]
+    enum DataKey {
+        Price,
+    }
 
     #[contract]
     pub struct MockOracle;
 
     #[contractimpl]
     impl MockOracle {
-        /// Always returns price = 1000 at timestamp = 0.
-        pub fn lastprice(_env: Env, _asset: Address) -> Option<VaultPriceData> {
-            Some(VaultPriceData {
-                price: 1000,
-                timestamp: 0,
-            })
+        /// Set the mocked price and timestamp (ledger sequence).
+        pub fn set_price(env: Env, price: i128, timestamp: u64) {
+            env.storage()
+                .instance()
+                .set(&DataKey::Price, &VaultPriceData { price, timestamp });
+        }
+
+        /// Return the last mocked price, defaulting to price=1000, timestamp=0.
+        pub fn lastprice(env: Env, _asset: Address) -> Option<VaultPriceData> {
+            Some(env.storage().instance().get(&DataKey::Price).unwrap_or(
+                VaultPriceData {
+                    price: 1000,
+                    timestamp: 0,
+                },
+            ))
         }
 
         pub fn base(_env: Env) -> Symbol {
@@ -5236,18 +5251,16 @@ impl VaultDAO {
                     Condition::PriceAbove(asset, threshold) => {
                         match Self::get_asset_price(env, asset.clone()) {
                             Ok(price) => price >= threshold,
-                            Err(VaultError::ConditionsNotMet) => {
-                                return Err(VaultError::ConditionsNotMet)
-                            }
+                            Err(VaultError::OraclePriceStale) => return Err(VaultError::OraclePriceStale),
+                            Err(VaultError::OracleNotConfigured) => return Err(VaultError::OracleNotConfigured),
                             Err(_) => false,
                         }
                     }
                     Condition::PriceBelow(asset, threshold) => {
                         match Self::get_asset_price(env, asset.clone()) {
                             Ok(price) => price <= threshold,
-                            Err(VaultError::ConditionsNotMet) => {
-                                return Err(VaultError::ConditionsNotMet)
-                            }
+                            Err(VaultError::OraclePriceStale) => return Err(VaultError::OraclePriceStale),
+                            Err(VaultError::OracleNotConfigured) => return Err(VaultError::OracleNotConfigured),
                             Err(_) => false,
                         }
                     }
@@ -5296,6 +5309,9 @@ impl VaultDAO {
         if storage::get_role(&env, &admin) != Role::Admin {
             return Err(VaultError::InsufficientRole);
         }
+        if oracle_config.max_staleness == 0 {
+            return Err(VaultError::InvalidAmount);
+        }
         storage::set_oracle_config(
             &env,
             &crate::OptionalVaultOracleConfig::Some(oracle_config.clone()),
@@ -5320,7 +5336,7 @@ impl VaultDAO {
     pub fn get_asset_price(env: &Env, asset: Address) -> Result<i128, VaultError> {
         let oracle_cfg = match storage::get_oracle_config(env) {
             crate::OptionalVaultOracleConfig::Some(cfg) => cfg,
-            crate::OptionalVaultOracleConfig::None => return Err(VaultError::NotInitialized),
+            crate::OptionalVaultOracleConfig::None => return Err(VaultError::OracleNotConfigured),
         };
 
         // Interface with standard Oracle contract
@@ -5338,7 +5354,7 @@ impl VaultDAO {
                 let current_ledger = env.ledger().sequence() as u64;
                 if current_ledger.saturating_sub(data.timestamp) > oracle_cfg.max_staleness as u64 {
                     events::emit_oracle_price_stale(env, &asset, data.timestamp, current_ledger);
-                    return Err(VaultError::ConditionsNotMet);
+                    return Err(VaultError::OraclePriceStale);
                 }
                 Ok(data.price)
             }
