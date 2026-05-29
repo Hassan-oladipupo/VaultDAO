@@ -218,15 +218,25 @@ pub struct TimeBasedThreshold {
 
 /// Permissions assigned to vault participants.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Role {
+    /// Read-only access for external auditors (passes no permission checks).
+    Observer = 0,
     /// Read-only access (default for non-signers).
-    Member = 0,
+    Member = 1,
     /// Authorized to initiate and approve transfer proposals.
-    Treasurer = 1,
+    Treasurer = 2,
     /// Full operational control: manages roles, signers, and configuration.
-    Admin = 2,
+    Admin = 3,
+}
+
+impl Role {
+    /// Check whether `actual` satisfies the `required` role.
+    /// Hierarchy: Admin >= Treasurer >= Member >= Observer
+    pub fn role_satisfies(required: Role, actual: Role) -> bool {
+        (actual as u32) >= (required as u32)
+    }
 }
 
 /// Address-role pair returned by role enumeration queries.
@@ -320,6 +330,14 @@ pub enum ProposalStatus {
     Scheduled = 6,
     /// Vetoed by a veto address
     Vetoed = 7,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum VoteChoice {
+    Approve = 0,
+    Abstain = 1,
 }
 
 /// Proposal priority level for queue ordering
@@ -1536,10 +1554,12 @@ pub enum FundingMilestoneStatus {
 pub struct FundingMilestone {
     /// Milestone description
     pub description: String,
-
-    /// Amount to release upon completion (in stroops)
+    /// Amount to release upon completion (in stroops) — used when release_percentage_bps = 0
     pub amount: i128,
-
+    /// Percentage of total amount in basis points (e.g. 2500 = 25%).
+    /// Must sum to exactly 10000 across all milestones in a round.
+    /// When 0 for all milestones, the fixed `amount` field is used instead.
+    pub release_percentage_bps: u32,
     /// Current status
     pub status: FundingMilestoneStatus,
 

@@ -8,14 +8,70 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Layers,
 } from 'lucide-react';
 import { useNotifications } from '../context/NotificationContext';
 import NotificationItem from './NotificationItem';
-import type { NotificationCategory, NotificationPriority, NotificationStatus } from '../types/notification';
+import type { Notification, NotificationCategory, NotificationPriority, NotificationStatus } from '../types/notification';
 
 interface NotificationCenterProps {
   isOpen: boolean;
   onClose: () => void;
+}
+
+type TabId = 'all' | 'proposals' | 'payments' | 'system';
+
+const TABS: { id: TabId; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'proposals', label: 'Proposals' },
+  { id: 'payments', label: 'Payments' },
+  { id: 'system', label: 'System' },
+];
+
+const CATEGORY_MAP: Record<TabId, NotificationCategory | null> = {
+  all: null,
+  proposals: 'proposals',
+  payments: 'payments',
+  system: 'system',
+};
+
+function requestBrowserPermission(): void {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+}
+
+function sendBrowserNotification(title: string, body: string): void {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    new Notification(title, { body, icon: '/vite.svg' });
+  }
+}
+
+function groupNotifications(items: Notification[]): Notification[] {
+  const groups = new Map<string, Notification[]>();
+  const ungrouped: Notification[] = [];
+
+  for (const n of items) {
+    if (n.groupKey) {
+      const existing = groups.get(n.groupKey) || [];
+      existing.push(n);
+      groups.set(n.groupKey, existing);
+    } else {
+      ungrouped.push(n);
+    }
+  }
+
+  const result: Notification[] = [...ungrouped];
+  for (const [, group] of groups) {
+    if (group.length > 1) {
+      const sorted = group.sort((a, b) => b.timestamp - a.timestamp);
+      result.push({ ...sorted[0], count: group.length });
+    } else if (group.length === 1) {
+      result.push(group[0]);
+    }
+  }
+
+  return result.sort((a, b) => b.timestamp - a.timestamp);
 }
 
 const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose }) => {
@@ -26,6 +82,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
     sort,
     page,
     pageSize,
+    addNotification,
     markAsRead,
     markAllAsRead,
     dismissNotification,
@@ -35,6 +92,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
     clearAll,
   } = useNotifications();
 
+  const [activeTab, setActiveTab] = useState<TabId>('all');
   const [showFilters, setShowFilters] = useState(false);
   const [selectedCategories, setSelectedCategories] = useState<NotificationCategory[]>(
     filter.categories
@@ -45,6 +103,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
   const [selectedStatus, setSelectedStatus] = useState<NotificationStatus | 'all'>(
     filter.status || 'all'
   );
+  const [grouped, setGrouped] = useState(true);
 
   const panelRef = useRef<HTMLDivElement>(null);
   const prevIsOpenRef = useRef(isOpen);
@@ -60,16 +119,41 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
     prevIsOpenRef.current = isOpen;
   }, [isOpen, filter]);
 
+  // Request browser notification permission on mount
+  useEffect(() => {
+    requestBrowserPermission();
+  }, []);
+
+  // Compute category unread counts
+  const tabUnreadCounts = useMemo(() => {
+    const counts: Record<TabId, number> = { all: unreadCount, proposals: 0, payments: 0, system: 0 };
+    for (const n of notifications) {
+      if (n.status === 'unread') {
+        if (n.category === 'proposals') counts.proposals++;
+        else if (n.category === 'payments') counts.payments++;
+        else if (n.category === 'system') counts.system++;
+        else counts.system++;
+      }
+    }
+    return counts;
+  }, [notifications, unreadCount]);
+
+  // Filter notifications by active tab
+  const tabFiltered = useMemo(() => {
+    const activeCategory = CATEGORY_MAP[activeTab];
+    if (!activeCategory) return notifications;
+    return notifications.filter((n) => n.category === activeCategory);
+  }, [notifications, activeTab]);
+
   // Filter and sort notifications
   const filteredNotifications = useMemo(() => {
-    let filtered = notifications.filter((n) => {
+    let filtered = tabFiltered.filter((n) => {
       const categoryMatch = filter.categories.includes(n.category);
       const priorityMatch = filter.priorities.includes(n.priority);
       const statusMatch = !filter.status || n.status === filter.status;
       return categoryMatch && priorityMatch && statusMatch;
     });
 
-    // Sort
     filtered.sort((a, b) => {
       if (sort.by === 'timestamp') {
         return sort.order === 'desc' ? b.timestamp - a.timestamp : a.timestamp - b.timestamp;
@@ -81,8 +165,8 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
       return 0;
     });
 
-    return filtered;
-  }, [notifications, filter, sort]);
+    return grouped ? groupNotifications(filtered) : filtered;
+  }, [tabFiltered, filter, sort, grouped]);
 
   // Reset page when filtered notifications change (e.g., new notifications arrive)
   useEffect(() => {
@@ -107,11 +191,11 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
   }, [selectedCategories, selectedPriorities, selectedStatus, setFilter]);
 
   const resetFilters = useCallback(() => {
-    setSelectedCategories(['proposals', 'approvals', 'system']);
+    setSelectedCategories(['proposals', 'approvals', 'system', 'payments']);
     setSelectedPriorities(['critical', 'high', 'normal', 'low']);
     setSelectedStatus('all');
     setFilter({
-      categories: ['proposals', 'approvals', 'system'],
+      categories: ['proposals', 'approvals', 'system', 'payments'],
       priorities: ['critical', 'high', 'normal', 'low'],
       status: undefined,
     });
@@ -129,6 +213,16 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
       prev.includes(priority) ? prev.filter((p) => p !== priority) : [...prev, priority]
     );
   };
+
+  // Send browser notification for critical items
+  useEffect(() => {
+    const latestCritical = notifications
+      .filter((n) => n.priority === 'critical' && n.status === 'unread')
+      .slice(0, 3);
+    for (const n of latestCritical) {
+      sendBrowserNotification(n.title, n.message);
+    }
+  }, [notifications]);
 
   // Close on escape key
   useEffect(() => {
@@ -213,6 +307,37 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
             </button>
           </div>
 
+          {/* Categorized Tabs */}
+          <div className="flex gap-1 mb-3" role="tablist" aria-label="Notification categories">
+            {TABS.map((tab) => {
+              const isActive = activeTab === tab.id;
+              const count = tabUnreadCounts[tab.id];
+              return (
+                <button
+                  key={tab.id}
+                  role="tab"
+                  aria-selected={isActive}
+                  aria-controls={`tab-panel-${tab.id}`}
+                  onClick={() => { setActiveTab(tab.id); setPage(1); }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                    isActive
+                      ? 'bg-purple-600 text-white shadow-sm'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+                >
+                  {tab.label}
+                  {count > 0 && (
+                    <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                      isActive ? 'bg-purple-500' : 'bg-gray-600'
+                    }`}>
+                      {count > 99 ? '99+' : count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
           {/* Action Buttons */}
           <div className="flex items-center gap-2 flex-wrap">
             <button
@@ -227,6 +352,20 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
                 size={14}
                 className={`transition-transform ${showFilters ? 'rotate-180' : ''}`}
               />
+            </button>
+
+            <button
+              onClick={() => setGrouped(!grouped)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                grouped
+                  ? 'bg-purple-600/20 text-purple-300 border border-purple-500/30'
+                  : 'bg-gray-700 text-gray-200 hover:bg-gray-600'
+              }`}
+              aria-label="Toggle notification grouping"
+              aria-pressed={grouped}
+            >
+              <Layers size={14} />
+              <span>Group</span>
             </button>
 
             <button
@@ -264,7 +403,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
                   Categories
                 </label>
                 <div className="flex flex-wrap gap-2">
-                  {(['proposals', 'approvals', 'system'] as NotificationCategory[]).map((cat) => (
+                  {(['proposals', 'approvals', 'payments', 'system'] as NotificationCategory[]).map((cat) => (
                     <button
                       key={cat}
                       onClick={() => toggleCategory(cat)}
@@ -378,7 +517,12 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
         </div>
 
         {/* Notification List */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3" role="list">
+        <div
+          id="tab-panel-all"
+          role="tabpanel"
+          aria-label={`${activeTab} notifications`}
+          className="flex-1 overflow-y-auto p-4 space-y-3"
+        >
           {paginatedNotifications.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center p-8">
               <Bell size={48} className="text-gray-600 mb-4" />

@@ -25,10 +25,11 @@ use crate::types::{
     AuditEntry, BatchExecutionResult, BatchTransaction, Comment, Config, DelegatedPermission,
     Delegation, DelegationHistory, DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot,
     FeeStructure, FundingRound, FundingRoundConfig, GasConfig, InsuranceConfig, ListMode,
-    NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalTemplate,
-    RecoveryProposal, Reputation, ReputationConfig, RetryState, Role, RoleAssignment, StakeRecord,
-    StakingConfig, Subscription, SwapProposal, SwapResult, TimeWeightedConfig, TokenLock,
-    VaultMetrics, VelocityConfig, VotingStrategy, BridgeConfig, CrossChainProposal,
+    NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalStatus,
+    ProposalTemplate, RecoveryProposal, Reputation, ReputationConfig, RetryState, Role,
+    RoleAssignment, StakeRecord, StakingConfig, Subscription, SwapProposal, SwapResult,
+    TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy, BridgeConfig,
+    CrossChainProposal,
 };
 
 /// Core storage key definitions (kept minimal to avoid size limits)
@@ -460,6 +461,25 @@ pub fn get_priority_queue(env: &Env, priority: u32) -> Vec<u64> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
+pub fn get_active_priority_queue(env: &Env, priority: u32) -> Vec<u64> {
+    let queue = get_priority_queue(env, priority);
+    let mut active_queue = Vec::new(env);
+
+    for proposal_id in queue.iter() {
+        let status = env
+            .storage()
+            .persistent()
+            .get::<_, Proposal>(&DataKey::Proposal(proposal_id))
+            .map(|proposal| proposal.status);
+
+        if status == Some(ProposalStatus::Pending) {
+            active_queue.push_back(proposal_id);
+        }
+    }
+
+    active_queue
+}
+
 pub fn add_to_priority_queue(env: &Env, priority: u32, proposal_id: u64) {
     let mut queue = get_priority_queue(env, priority);
     queue.push_back(proposal_id);
@@ -484,6 +504,16 @@ pub fn remove_from_priority_queue(env: &Env, priority: u32, proposal_id: u64) {
     env.storage()
         .persistent()
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+}
+
+pub fn compact_priority_queue(env: &Env, priority: u32) -> Vec<u64> {
+    let active_queue = get_active_priority_queue(env, priority);
+    let key = DataKey::PriorityQueue(priority);
+    env.storage().persistent().set(&key, &active_queue);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    active_queue
 }
 
 // ============================================================================

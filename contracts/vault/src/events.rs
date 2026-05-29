@@ -69,6 +69,19 @@ pub fn emit_proposal_abstained(
     );
 }
 
+pub fn emit_vote_changed(
+    env: &Env,
+    proposal_id: u64,
+    voter: &Address,
+    old_vote: u32,
+    new_vote: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "vote_changed"), proposal_id),
+        (voter.clone(), old_vote, new_vote),
+    );
+}
+
 /// Emit when a proposal reaches threshold and is ready for execution
 pub fn emit_proposal_ready(env: &Env, proposal_id: u64, unlock_ledger: u64) {
     env.events().publish(
@@ -850,10 +863,11 @@ pub fn emit_funding_released(
     recipient: &Address,
     amount: i128,
     milestone_index: u32,
+    percentage_bps: u32,
 ) {
     env.events().publish(
         (Symbol::new(env, "funding_released"), round_id),
-        (recipient.clone(), amount, milestone_index),
+        (recipient.clone(), amount, milestone_index, percentage_bps),
     );
 }
 

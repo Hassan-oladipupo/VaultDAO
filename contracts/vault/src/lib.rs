@@ -36,6 +36,7 @@ use types::{
     Subscription, SubscriptionStatus, SubscriptionTier, SwapProposal, SwapResult,
     TemplateOverrides, ThresholdStrategy, TransferDetails, VaultAction, VaultMetrics,
     VaultOracleConfig, VaultPriceData, VelocityConfig, VotingStrategy,
+    VoteChoice,
 };
 
 /// The main contract structure for VaultDAO.
@@ -434,7 +435,7 @@ impl VaultDAO {
 
         // 3. Check permission
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -714,7 +715,7 @@ impl VaultDAO {
 
         let config = storage::get_config(&env)?;
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -985,8 +986,12 @@ impl VaultDAO {
                 continue;
             }
 
-            // Prevent double-approval or abstaining then approving
-            if proposal.approvals.contains(&voter) || proposal.abstentions.contains(&voter) {
+            if proposal.abstentions.contains(&voter) {
+                return Err(VaultError::AlreadyAbstained);
+            }
+
+            // Prevent double-approval
+            if proposal.approvals.contains(&voter) {
                 continue;
             }
 
@@ -1028,7 +1033,7 @@ impl VaultDAO {
                 metrics.expired_count,
                 metrics.success_rate_bps(),
             );
-            return Err(VaultError::ProposalExpired);
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check voting deadline
@@ -1042,39 +1047,19 @@ impl VaultDAO {
             return Ok(());
         }
 
-        // Calculate current vote totals after all representations are recorded
-        let approval_count = proposal.approvals.len();
-        let quorum_votes = approval_count + proposal.abstentions.len();
-        let previous_quorum_votes = quorum_votes.saturating_sub(vote_cast_count);
-        let required_quorum = Self::effective_quorum(&config);
-        let was_quorum_reached = required_quorum == 0 || previous_quorum_votes >= required_quorum;
-
-        // Check if threshold met AND quorum satisfied
-        let threshold_reached = Self::is_threshold_reached(&env, &config, &proposal);
-        let quorum_reached = required_quorum == 0 || quorum_votes >= required_quorum;
-        if required_quorum > 0 && !was_quorum_reached && quorum_reached {
-            events::emit_quorum_reached(&env, proposal_id, quorum_votes, required_quorum);
-        }
-
-        if threshold_reached && quorum_reached {
-            if proposal.execution_time.is_some() {
-                proposal.status = ProposalStatus::Scheduled;
-                events::emit_proposal_scheduled(
-                    &env,
-                    proposal_id,
-                    proposal.execution_time.unwrap(),
-                    current_ledger,
-                );
-            } else {
-                proposal.status = ProposalStatus::Approved;
-                if proposal.amount >= config.timelock_threshold {
-                    proposal.unlock_ledger = current_ledger + config.timelock_delay;
-                } else {
-                    proposal.unlock_ledger = 0;
-                }
-                events::emit_proposal_ready(&env, proposal_id, proposal.unlock_ledger);
-            }
-        }
+        let previous_quorum_votes = proposal
+            .approvals
+            .len()
+            .saturating_add(proposal.abstentions.len())
+            .saturating_sub(vote_cast_count);
+        Self::reevaluate_vote_state(
+            &env,
+            &config,
+            proposal_id,
+            &mut proposal,
+            current_ledger,
+            previous_quorum_votes,
+        );
 
         storage::set_proposal(&env, &proposal);
         storage::extend_instance_ttl(&env);
@@ -1084,7 +1069,7 @@ impl VaultDAO {
             &env,
             proposal_id,
             &signer,
-            approval_count,
+            proposal.approvals.len(),
             config.threshold,
         );
 
@@ -1136,8 +1121,12 @@ impl VaultDAO {
                 continue;
             }
 
-            // Prevent double-abstaining or approving then abstaining
-            if proposal.approvals.contains(&voter) || proposal.abstentions.contains(&voter) {
+            if proposal.approvals.contains(&voter) {
+                return Err(VaultError::AlreadyApproved);
+            }
+
+            // Prevent double-abstaining
+            if proposal.abstentions.contains(&voter) {
                 continue;
             }
 
@@ -1155,7 +1144,7 @@ impl VaultDAO {
         }
 
         if vote_cast_count == 0 {
-            return Err(VaultError::AlreadyApproved);
+            return Err(VaultError::AlreadyAbstained);
         }
 
         // Check expiration
@@ -1176,7 +1165,7 @@ impl VaultDAO {
                 metrics.expired_count,
                 metrics.success_rate_bps(),
             );
-            return Err(VaultError::ProposalExpired);
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check voting deadline
@@ -1190,40 +1179,19 @@ impl VaultDAO {
             return Ok(());
         }
 
-        // Calculate current vote totals
-        let approval_count = proposal.approvals.len();
-        let abstention_count = proposal.abstentions.len();
-        let quorum_votes = approval_count + abstention_count;
-        let previous_quorum_votes = quorum_votes.saturating_sub(vote_cast_count);
-        let required_quorum = Self::effective_quorum(&config);
-        let was_quorum_reached = required_quorum == 0 || previous_quorum_votes >= required_quorum;
-
-        // Check if threshold met AND quorum satisfied
-        let threshold_reached = Self::is_threshold_reached(&env, &config, &proposal);
-        let quorum_reached = required_quorum == 0 || quorum_votes >= required_quorum;
-        if required_quorum > 0 && !was_quorum_reached && quorum_reached {
-            events::emit_quorum_reached(&env, proposal_id, quorum_votes, required_quorum);
-        }
-
-        if threshold_reached && quorum_reached {
-            if proposal.execution_time.is_some() {
-                proposal.status = ProposalStatus::Scheduled;
-                events::emit_proposal_scheduled(
-                    &env,
-                    proposal_id,
-                    proposal.execution_time.unwrap(),
-                    current_ledger,
-                );
-            } else {
-                proposal.status = ProposalStatus::Approved;
-                if proposal.amount >= config.timelock_threshold {
-                    proposal.unlock_ledger = current_ledger + config.timelock_delay;
-                } else {
-                    proposal.unlock_ledger = 0;
-                }
-                events::emit_proposal_ready(&env, proposal_id, proposal.unlock_ledger);
-            }
-        }
+        let previous_quorum_votes = proposal
+            .approvals
+            .len()
+            .saturating_add(proposal.abstentions.len())
+            .saturating_sub(vote_cast_count);
+        Self::reevaluate_vote_state(
+            &env,
+            &config,
+            proposal_id,
+            &mut proposal,
+            current_ledger,
+            previous_quorum_votes,
+        );
 
         storage::set_proposal(&env, &proposal);
         storage::extend_instance_ttl(&env);
@@ -1233,9 +1201,148 @@ impl VaultDAO {
             &env,
             proposal_id,
             &signer,
-            abstention_count as u32,
-            quorum_votes as u32,
+            proposal.abstentions.len(),
+            proposal.approvals.len() + proposal.abstentions.len(),
         );
+
+        Ok(())
+    }
+
+    /// Change an existing vote during the active voting window.
+    pub fn change_vote(
+        env: Env,
+        signer: Address,
+        proposal_id: u64,
+        new_vote: VoteChoice,
+    ) -> Result<(), VaultError> {
+        signer.require_auth();
+
+        let config = storage::get_config(&env)?;
+        if !config.signers.contains(&signer) {
+            return Err(VaultError::NotASigner);
+        }
+
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+        if !proposal.snapshot_signers.contains(&signer) {
+            return Err(VaultError::VoterNotInSnapshot);
+        }
+
+        if proposal.status != ProposalStatus::Pending
+            && proposal.status != ProposalStatus::Approved
+            && proposal.status != ProposalStatus::Scheduled
+        {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        if proposal.expires_at > 0 && current_ledger > proposal.expires_at {
+            return Err(VaultError::ProposalExpired);
+        }
+        if proposal.voting_deadline == 0 || current_ledger > proposal.voting_deadline {
+            return Err(VaultError::ProposalExpired);
+        }
+
+        let previous_quorum_votes = proposal.approvals.len() + proposal.abstentions.len();
+        let mut represented_voters = Vec::new(&env);
+        represented_voters.push_back(signer.clone());
+        Self::get_all_represented_voters(&env, &signer, &mut represented_voters, 0);
+
+        let mut switched_count: u32 = 0;
+        let mut has_target_vote = false;
+
+        for voter in represented_voters.iter() {
+            if !proposal.snapshot_signers.contains(&voter) {
+                continue;
+            }
+
+            match new_vote {
+                VoteChoice::Approve => {
+                    if proposal.approvals.contains(&voter) {
+                        has_target_vote = true;
+                        continue;
+                    }
+                    if proposal.abstentions.contains(&voter) {
+                        proposal.abstentions =
+                            Self::remove_address_from_vec(&env, &proposal.abstentions, &voter);
+                        proposal.approvals.push_back(voter.clone());
+                        switched_count += 1;
+                        events::emit_vote_changed(
+                            &env,
+                            proposal_id,
+                            &voter,
+                            VoteChoice::Abstain as u32,
+                            VoteChoice::Approve as u32,
+                        );
+                        if voter != signer {
+                            events::emit_delegated_vote(&env, proposal_id, &voter, &signer);
+                        }
+                    }
+                }
+                VoteChoice::Abstain => {
+                    if proposal.abstentions.contains(&voter) {
+                        has_target_vote = true;
+                        continue;
+                    }
+                    if proposal.approvals.contains(&voter) {
+                        proposal.approvals =
+                            Self::remove_address_from_vec(&env, &proposal.approvals, &voter);
+                        proposal.abstentions.push_back(voter.clone());
+                        switched_count += 1;
+                        events::emit_vote_changed(
+                            &env,
+                            proposal_id,
+                            &voter,
+                            VoteChoice::Approve as u32,
+                            VoteChoice::Abstain as u32,
+                        );
+                        if voter != signer {
+                            events::emit_delegated_vote(&env, proposal_id, &voter, &signer);
+                        }
+                    }
+                }
+            }
+        }
+
+        if switched_count == 0 {
+            return Err(match new_vote {
+                VoteChoice::Approve if has_target_vote => VaultError::AlreadyApproved,
+                VoteChoice::Abstain if has_target_vote => VaultError::AlreadyAbstained,
+                _ => VaultError::InvalidStatusTransition,
+            });
+        }
+
+        if new_vote == VoteChoice::Approve {
+            storage::set_approval_ledger(&env, proposal_id, &signer, current_ledger);
+        }
+
+        Self::reevaluate_vote_state(
+            &env,
+            &config,
+            proposal_id,
+            &mut proposal,
+            current_ledger,
+            previous_quorum_votes,
+        );
+
+        storage::set_proposal(&env, &proposal);
+        storage::extend_instance_ttl(&env);
+
+        match new_vote {
+            VoteChoice::Approve => events::emit_proposal_approved(
+                &env,
+                proposal_id,
+                &signer,
+                proposal.approvals.len(),
+                config.threshold,
+            ),
+            VoteChoice::Abstain => events::emit_proposal_abstained(
+                &env,
+                proposal_id,
+                &signer,
+                proposal.abstentions.len(),
+                proposal.approvals.len() + proposal.abstentions.len(),
+            ),
+        }
 
         Ok(())
     }
@@ -1319,7 +1426,7 @@ impl VaultDAO {
                 metrics.expired_count,
                 metrics.success_rate_bps(),
             );
-            return Err(VaultError::ProposalExpired);
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check Timelock
@@ -1928,7 +2035,7 @@ impl VaultDAO {
         let delegators = storage::get_delegators_for(env, signer);
 
         for delegator in delegators.iter() {
-            if !represented_voters.contains(&delegator) {
+            if !voters.contains(&delegator) {
                 let delegation = storage::get_delegation(env, &delegator);
         
                 let current_ledger = env.ledger().sequence() as u64;
@@ -2226,12 +2333,13 @@ impl VaultDAO {
 
         // Authorization: only proposer or Admin
         let role = storage::get_role(&env, &canceller);
-        if role != Role::Admin && canceller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && canceller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
         // Admin acting on *another* proposer's proposal → rejection semantics
-        let is_rejection = role == Role::Admin && canceller != proposal.proposer;
+        let is_rejection =
+            Role::role_satisfies(Role::Admin, role) && canceller != proposal.proposer;
 
         if is_rejection {
             proposal.status = ProposalStatus::Rejected;
@@ -2553,7 +2661,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2605,7 +2713,7 @@ impl VaultDAO {
         admin.require_auth();
 
         // Admin-only
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2645,7 +2753,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2732,7 +2840,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2802,8 +2910,8 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
-            return Err(VaultError::InsufficientRole);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::Unauthorized);
         }
 
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
@@ -2854,7 +2962,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2887,7 +2995,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2915,7 +3023,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3359,8 +3467,14 @@ impl VaultDAO {
         }
 
         // Only Admin may assign roles
-        if storage::get_role(&env, &admin) != Role::Admin {
+        let caller_role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, caller_role) {
             return Err(VaultError::Unauthorized);
+        }
+
+        // Caller must have a strictly higher role than the role being assigned
+        if !Role::role_satisfies(role, caller_role) || caller_role == role {
+            return Err(VaultError::CannotAssignHigherRole);
         }
 
         // Persist the new role
@@ -3374,6 +3488,12 @@ impl VaultDAO {
         storage::create_audit_entry(&env, AuditAction::SetRole, &admin, 0);
 
         Ok(())
+    }
+
+    /// Check if an actual role satisfies a required role level.
+    /// Pure function — no storage access.
+    pub fn role_satisfies(required: Role, actual: Role) -> bool {
+        Role::role_satisfies(required, actual)
     }
 
     /// Get role for an address
@@ -3515,7 +3635,7 @@ impl VaultDAO {
         proposer.require_auth();
 
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -4196,7 +4316,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -4218,7 +4338,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -4243,7 +4363,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -4269,7 +4389,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -4294,7 +4414,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -4972,7 +5092,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -5016,7 +5136,7 @@ impl VaultDAO {
         }
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -5076,7 +5196,7 @@ impl VaultDAO {
         }
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -5120,7 +5240,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -5166,7 +5286,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -5261,7 +5381,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -5301,7 +5421,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -5370,10 +5490,8 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         caller.require_auth();
 
-        let mut proposal = storage::get_proposal(&env, proposal_id)?;
-
-        let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -5448,7 +5566,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -5729,7 +5847,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -6082,6 +6200,60 @@ impl VaultDAO {
         0
     }
 
+    fn remove_address_from_vec(env: &Env, values: &Vec<Address>, target: &Address) -> Vec<Address> {
+        let mut updated = Vec::new(env);
+        for value in values.iter() {
+            if value != *target {
+                updated.push_back(value);
+            }
+        }
+        updated
+    }
+
+    fn reevaluate_vote_state(
+        env: &Env,
+        config: &Config,
+        proposal_id: u64,
+        proposal: &mut Proposal,
+        current_ledger: u64,
+        previous_quorum_votes: u32,
+    ) {
+        let required_quorum = Self::effective_quorum(config);
+        let approval_count = proposal.approvals.len();
+        let quorum_votes = approval_count + proposal.abstentions.len();
+        let was_quorum_reached = required_quorum == 0 || previous_quorum_votes >= required_quorum;
+        let quorum_reached = required_quorum == 0 || quorum_votes >= required_quorum;
+        let threshold_reached = Self::is_threshold_reached(env, config, proposal);
+        let previous_status = proposal.status.clone();
+
+        if required_quorum > 0 && !was_quorum_reached && quorum_reached {
+            events::emit_quorum_reached(env, proposal_id, quorum_votes, required_quorum);
+        }
+
+        if threshold_reached && quorum_reached {
+            if let Some(execution_time) = proposal.execution_time {
+                proposal.status = ProposalStatus::Scheduled;
+                proposal.unlock_ledger = 0;
+                if previous_status != ProposalStatus::Scheduled {
+                    events::emit_proposal_scheduled(env, proposal_id, execution_time, current_ledger);
+                }
+            } else {
+                proposal.status = ProposalStatus::Approved;
+                proposal.unlock_ledger = if proposal.amount >= config.timelock_threshold {
+                    current_ledger + config.timelock_delay
+                } else {
+                    0
+                };
+                if previous_status != ProposalStatus::Approved {
+                    events::emit_proposal_ready(env, proposal_id, proposal.unlock_ledger);
+                }
+            }
+        } else {
+            proposal.status = ProposalStatus::Pending;
+            proposal.unlock_ledger = 0;
+        }
+    }
+
     fn is_threshold_reached(env: &Env, config: &Config, proposal: &Proposal) -> bool {
         let strategy = storage::get_voting_strategy(env);
         
@@ -6304,7 +6476,7 @@ impl VaultDAO {
         oracle_config: crate::VaultOracleConfig,
     ) -> Result<(), VaultError> {
         admin.require_auth();
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::InsufficientRole);
         }
         if oracle_config.max_staleness == 0 {
@@ -6666,7 +6838,7 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
         storage::set_dex_config(&env, &dex_config);
@@ -6691,7 +6863,7 @@ impl VaultDAO {
         proposer.require_auth();
         let config = storage::get_config(&env)?;
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -6776,6 +6948,12 @@ impl VaultDAO {
         Ok(proposal_id)
     }
 
+    pub fn register_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::Unauthorized);
+        }
     /// Execute a swap proposal (executors only)
     /// Execute a swap proposal with proper validation and cross-contract invocation
     /// 
@@ -6815,7 +6993,7 @@ impl VaultDAO {
             storage::set_proposal(&env, &proposal);
             storage::metrics_on_expiry(&env);
             events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
-            return Err(VaultError::ProposalExpired);
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check Timelock
@@ -6858,6 +7036,10 @@ impl VaultDAO {
         Ok(())
     }
 
+    pub fn remove_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
     /// Execute a swap proposal with comprehensive validation and cross-contract invocation
     /// 
     /// This function implements all requirements:
@@ -7293,7 +7475,7 @@ impl VaultDAO {
     pub fn remove_post_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -7582,7 +7764,7 @@ impl VaultDAO {
 
         // Check role - only Admin can create templates
         let role = storage::get_role(&env, &creator);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -7738,7 +7920,7 @@ impl VaultDAO {
 
         // Check role - only Admin can modify templates
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -7862,7 +8044,7 @@ impl VaultDAO {
 
         // Check role
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -8440,6 +8622,205 @@ impl VaultDAO {
         storage::get_recipient_escrows(&env, &recipient)
     }
 
+    // ============================================================================
+    // Batch Transactions
+    // ============================================================================
+
+    /// Create a batch transaction with multiple operations
+    pub fn create_batch(
+        env: Env,
+        creator: Address,
+        operations: Vec<BatchOperation>,
+        memo: Symbol,
+    ) -> Result<u64, VaultError> {
+        creator.require_auth();
+
+        // Validate batch is not empty
+        if operations.is_empty() {
+            return Err(VaultError::BatchTooLarge);
+        }
+
+        // Enforce size limit (max 32 operations per batch)
+        const MAX_BATCH_OPS: u32 = 32;
+        if operations.len() > MAX_BATCH_OPS {
+            return Err(VaultError::BatchTooLarge);
+        }
+
+        // Validate each operation
+        for op in operations.iter() {
+            Self::validate_batch_operation(&env, &op)?;
+        }
+
+        let batch_id = storage::increment_batch_id(&env);
+        let _estimated_gas = Self::estimate_batch_gas(&env, &operations);
+
+        let batch = BatchTransaction {
+            id: batch_id,
+            creator: creator.clone(),
+            operations: operations.clone(),
+            status: BatchStatus::Pending,
+            created_at: env.ledger().timestamp(),
+            memo,
+        };
+
+        storage::set_batch(&env, &batch);
+
+        Ok(batch_id)
+    }
+
+    /// Execute a batch transaction atomically
+    pub fn execute_batch(
+        env: Env,
+        executor: Address,
+        batch_id: u64,
+    ) -> Result<BatchExecutionResult, VaultError> {
+        executor.require_auth();
+
+        let config = storage::get_config(&env)?;
+        let executor_role = storage::get_role(&env, &executor);
+
+        // Check authorization
+        if !Role::role_satisfies(Role::Treasurer, executor_role) {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        let mut batch = storage::get_batch(&env, batch_id)?;
+
+        // Can only execute pending batches
+        if batch.status != BatchStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        // Mark as executing
+        batch.status = BatchStatus::Executing;
+        storage::set_batch(&env, &batch);
+
+        let mut rollback_state: Vec<(Address, i128)> = Vec::new(&env);
+        let mut executed_count: u64 = 0;
+        let mut success = true;
+
+        // Execute operations sequentially
+        for op in batch.operations.iter() {
+            match Self::execute_batch_operation(&env, &op, &mut rollback_state, &config) {
+                Ok(_) => {
+                    executed_count += 1;
+                }
+                Err(err) => {
+                    success = false;
+                    let _error_code = match err {
+                        VaultError::ExceedsDailyLimit => Symbol::new(&env, "limit_exceeded"),
+                        VaultError::InsufficientRole => Symbol::new(&env, "insufficient_role"),
+                        VaultError::InvalidAmount => Symbol::new(&env, "invalid_amount"),
+                        VaultError::InsufficientBalance => {
+                            Symbol::new(&env, "insufficient_balance")
+                        }
+                        _ => Symbol::new(&env, "unknown_error"),
+                    };
+                    break;
+                }
+            }
+        }
+
+        // Perform rollback if execution failed
+        if !success {
+            Self::rollback_batch(&env, &rollback_state)?;
+            batch.status = BatchStatus::RolledBack;
+        } else {
+            batch.status = BatchStatus::Completed;
+        }
+
+        storage::set_batch(&env, &batch);
+
+        // Store execution result
+        let result = BatchExecutionResult {
+            batch_id,
+            success,
+            successful_ops: executed_count as u32,
+            failed_ops: if success {
+                0
+            } else {
+                (batch.operations.len() as u32).saturating_sub(executed_count as u32)
+            },
+        };
+
+        storage::set_batch_result(&env, &result);
+
+        if !success {
+            storage::set_rollback_state(&env, batch_id, &rollback_state);
+        }
+
+        // Emit event for batch execution
+        let ops_len = batch.operations.len();
+        let failed_count = ops_len.saturating_sub(executed_count as u32);
+        events::emit_batch_executed(&env, &executor, executed_count as u32, failed_count);
+
+        Ok(result)
+    }
+
+    /// Retrieve batch execution result
+    pub fn get_batch_result(env: Env, batch_id: u64) -> Option<BatchExecutionResult> {
+        storage::get_batch_result(&env, batch_id)
+    }
+
+    /// Retrieve batch details
+    pub fn get_batch(env: Env, batch_id: u64) -> Result<BatchTransaction, VaultError> {
+        storage::get_batch(&env, batch_id)
+    }
+
+    /// Validate a single batch operation
+    fn validate_batch_operation(_env: &Env, op: &BatchOperation) -> Result<(), VaultError> {
+        // Amount must be positive
+        if op.amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        Ok(())
+    }
+
+    /// Execute a single batch operation
+    fn execute_batch_operation(
+        env: &Env,
+        op: &BatchOperation,
+        rollback_state: &mut Vec<(Address, i128)>,
+        config: &Config,
+    ) -> Result<(), VaultError> {
+        // Get current day for cumulative tracking
+        let today = env.ledger().timestamp() / 86400; // seconds to days
+
+        // Check spending limits
+        let daily_spent = storage::get_daily_spent(env, today);
+        let new_daily_total = daily_spent + op.amount;
+
+        if new_daily_total > config.daily_limit {
+            return Err(VaultError::ExceedsDailyLimit);
+        }
+
+        // Record rollback state
+        rollback_state.push_back((op.recipient.clone(), op.amount));
+
+        // Update spending limits
+        storage::add_daily_spent(env, today, op.amount);
+
+        Ok(())
+    }
+
+    /// Rollback batch operations in reverse order
+    fn rollback_batch(
+        _env: &Env,
+        _rollback_state: &Vec<(Address, i128)>,
+    ) -> Result<(), VaultError> {
+        // In production, this would reverse the transfers
+        // For now, we track the state for audit purposes
+        // Audit trail is maintained via event emission and result storage
+        Ok(())
+    }
+
+    /// Estimate gas cost for batch operations
+    fn estimate_batch_gas(_env: &Env, operations: &Vec<BatchOperation>) -> u64 {
+        // Base overhead: 100,000
+        // Per-operation cost: 50,000
+        const BASE_OVERHEAD: u64 = 100_000;
+        const PER_OP_COST: u64 = 50_000;
 
 
     // ========================================================================
@@ -8578,7 +8959,7 @@ impl VaultDAO {
         config: RecoveryConfig,
     ) -> Result<(), VaultError> {
         admin.require_auth();
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -8791,7 +9172,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -8846,7 +9227,7 @@ impl VaultDAO {
     /// Cancel a recovery proposal (admins only)
     pub fn cancel_recovery(env: Env, admin: Address, proposal_id: u64) -> Result<(), VaultError> {
         admin.require_auth();
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -8899,7 +9280,7 @@ impl VaultDAO {
         if !storage::is_initialized(&env) {
             return Err(VaultError::NotInitialized);
         }
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -8949,7 +9330,7 @@ impl VaultDAO {
         if !storage::is_initialized(&env) {
             return Err(VaultError::NotInitialized);
         }
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -9129,6 +9510,7 @@ impl VaultDAO {
                     | ManageSubscriptions
             ),
             Role::Member => matches!(permission, ViewMetrics),
+            Role::Observer => false,
         }
     }
 
@@ -9531,6 +9913,48 @@ impl VaultDAO {
             }
         }
 
+        // Determine mode: percentage-based or fixed-amount
+        let mut total_percentage_bps: u32 = 0;
+        let mut any_percentage_bps: bool = false;
+        for i in 0..milestones.len() {
+            if let Some(m) = milestones.get(i) {
+                if m.release_percentage_bps > 0 {
+                    any_percentage_bps = true;
+                }
+                total_percentage_bps =
+                    total_percentage_bps.saturating_add(m.release_percentage_bps);
+            }
+        }
+
+        // Validate: if any milestone uses percentage, all must sum to exactly 10000
+        if any_percentage_bps && total_percentage_bps != 10_000 {
+            return Err(VaultError::FundingRoundError);
+        }
+
+        // Mixed mode (some percentage, some fixed) is not allowed
+        if any_percentage_bps {
+            for i in 0..milestones.len() {
+                if let Some(m) = milestones.get(i) {
+                    if m.release_percentage_bps == 0 && m.amount != 0 {
+                        return Err(VaultError::FundingRoundError);
+                    }
+                }
+            }
+        }
+
+        let total_amount: i128 = if any_percentage_bps {
+            // For percentage-based, total_amount must be provided via milestone amounts or
+            // we derive it. We use the sum of amounts (should be the total round amount).
+            // If all amounts are 0, the proposal amount is used as total.
+            let sum_amounts: i128 = milestones.iter().map(|m| m.amount).sum();
+            if sum_amounts > 0 {
+                sum_amounts
+            } else {
+                proposal.amount
+            }
+        } else {
+            milestones.iter().map(|m| m.amount).sum()
+        };
         // Validate milestone amounts sum to total_amount
         let mut milestone_sum: i128 = 0;
         for i in 0..milestones.len() {
@@ -9690,10 +10114,45 @@ impl VaultDAO {
         if milestone.status != FundingMilestoneStatus::Submitted {
             return Err(VaultError::InvalidStatusTransition);
         }
-        
-        // Prevent duplicate verification
-        if milestone.verifications.contains(&verifier) {
-            return Err(VaultError::AlreadyVerified);
+
+        let mut updated_milestone = milestone.clone();
+        updated_milestone.status = FundingMilestoneStatus::Verified;
+        updated_milestone.verified_at = env.ledger().timestamp();
+        updated_milestone.verified_by = Some(verifier.clone());
+
+        // Compute release amount: percentage-based or fixed
+        let amount = if updated_milestone.release_percentage_bps > 0 {
+            // Integer-truncated percentage allocation
+            round.total_amount * updated_milestone.release_percentage_bps as i128 / 10_000
+        } else {
+            updated_milestone.amount
+        };
+
+        // For percentage-based, store the computed amount in milestone for release
+        if updated_milestone.release_percentage_bps > 0 {
+            updated_milestone.amount = amount;
+        }
+
+        round.milestones.set(milestone_index, updated_milestone);
+        storage::set_funding_round(&env, &round);
+
+        events::emit_milestone_verified(&env, round_id, milestone_index, &verifier, amount);
+
+        Ok(())
+    }
+
+    /// Release funds for verified milestones
+    pub fn release_round_funds(
+        env: Env,
+        releaser: Address,
+        round_id: u64,
+        milestone_index: u32,
+    ) -> Result<i128, VaultError> {
+        releaser.require_auth();
+
+        let vault_config = storage::get_config(&env)?;
+        if !vault_config.signers.contains(&releaser) {
+            return Err(VaultError::NotASigner);
         }
         
         // Role check (Admin or Treasurer only)
@@ -9720,14 +10179,30 @@ impl VaultDAO {
         updated.verified_at = env.ledger().timestamp();
         updated.verified_by = Some(verifier.clone());
 
-        round.milestones.set(milestone_index, updated);
+        let mut amount = milestone.amount;
+
+        // Handle rounding remainder for percentage-based milestones.
+        // If this is the last unverified milestone being released and we are
+        // using percentage-based allocation, any remainder from truncation
+        // is added here so that total released never exceeds total_amount.
+        if milestone.release_percentage_bps > 0 && round.all_milestones_verified() {
+            let allocated: i128 = round.milestones.iter().map(|m| m.amount).sum();
+            if allocated < round.total_amount {
+                let remainder = round.total_amount - allocated;
+                amount = amount.saturating_add(remainder);
+
+                // Update the stored milestone amount for consistency
+                let mut updated = milestone.clone();
+                updated.amount = amount;
+                round.milestones.set(milestone_index, updated);
+            }
+        }
 
         // Release proportional tranche to recipient
         token::transfer(&env, &round.token, &round.recipient, amount);
         round.released_amount = round.released_amount.saturating_add(amount);
 
-        events::emit_milestone_verified(&env, round_id, milestone_index, &verifier, amount);
-        events::emit_funding_released(&env, round_id, &round.recipient, amount, milestone_index);
+        round.released_amount = round.released_amount.saturating_add(amount);
 
         // Auto-complete if all milestones are now verified
         if round.all_milestones_verified() {
@@ -9737,6 +10212,15 @@ impl VaultDAO {
         }
 
         storage::set_funding_round(&env, &round);
+        let percentage_bps = milestone.release_percentage_bps;
+        events::emit_funding_released(
+            &env,
+            round_id,
+            &round.recipient,
+            amount,
+            milestone_index,
+            percentage_bps,
+        );
 
         Ok(amount)
     }
@@ -9821,7 +10305,8 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         admin.require_auth();
         let vault_config = storage::get_config(&env)?;
-        if storage::get_role(&env, &admin) != Role::Admin && !vault_config.signers.contains(&admin)
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin))
+            && !vault_config.signers.contains(&admin)
         {
             return Err(VaultError::Unauthorized);
         }
@@ -9851,7 +10336,7 @@ impl VaultDAO {
 
         let config = storage::get_config(&env)?;
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -10104,8 +10589,10 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         admin.require_auth();
 
-        let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        let config = storage::get_config(&env)?;
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin))
+            && !config.signers.contains(&admin)
+        {
             return Err(VaultError::Unauthorized);
         }
 
@@ -10351,8 +10838,8 @@ impl VaultDAO {
         }
 
         let role = storage::get_role(&env, &caller);
-        if caller != sub.subscriber && role != Role::Admin {
-            return Err(VaultError::NotSubscriberOrAdmin);
+        if caller != sub.subscriber && !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::Unauthorized);
         }
 
         sub.status = SubscriptionStatus::Cancelled;

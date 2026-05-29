@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   Info,
   Circle,
+  DollarSign,
 } from 'lucide-react';
 import type { Notification } from '../types/notification';
 import NotificationActions from './NotificationActions';
@@ -33,6 +34,8 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
         return <FileText size={18} />;
       case 'approvals':
         return <CheckCircle size={18} />;
+      case 'payments':
+        return <DollarSign size={18} />;
       case 'system':
         return <Settings size={18} />;
       default:
@@ -76,6 +79,8 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
         return 'text-purple-400';
       case 'approvals':
         return 'text-green-400';
+      case 'payments':
+        return 'text-yellow-400';
       case 'system':
         return 'text-blue-400';
       default:

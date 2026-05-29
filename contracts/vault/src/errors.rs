@@ -41,6 +41,8 @@ pub enum VaultError {
     ProposalAlreadyCancelled = 25,
     /// Signer has already approved this proposal
     AlreadyApproved = 30,
+    /// Signer has already abstained on this proposal
+    AlreadyAbstained = 910,
     /// Amount is invalid (zero, negative, or exceeds limits)
     InvalidAmount = 40,
     /// Amount exceeds the single-proposal spending limit
@@ -59,9 +61,8 @@ pub enum VaultError {
     SignerAlreadyExists = 80,
     /// Signer does not exist in the signer set
     SignerNotFound = 81,
-    /// Cannot remove signer as it would violate threshold requirements
-    CannotRemoveSigner = 82,
-    /// Recipient address is on the blacklist
+    CannotAssignHigherRole = 82,
+    RecipientNotWhitelisted = 90,
     RecipientBlacklisted = 91,
     /// Address is already on the list
     AddressAlreadyOnList = 92,
@@ -123,6 +124,10 @@ pub enum VaultError {
 
     /// Milestone does not have enough verifications to proceed
     InsufficientVerifications = 511,
+
+    PermissionExpired = 320,
+    
+    PermissionNotFound = 321,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above
