@@ -1,4 +1,4 @@
-export type NotificationCategory = 'proposals' | 'approvals' | 'system';
+export type NotificationCategory = 'proposals' | 'approvals' | 'system' | 'payments';
 export type NotificationPriority = 'critical' | 'high' | 'normal' | 'low';
 export type NotificationStatus = 'unread' | 'read';
 
@@ -20,6 +20,8 @@ export interface Notification {
   timestamp: number;
   actions?: NotificationAction[];
   metadata?: Record<string, unknown>;
+  groupKey?: string;
+  count?: number;
 }
 
 export interface NotificationFilter {

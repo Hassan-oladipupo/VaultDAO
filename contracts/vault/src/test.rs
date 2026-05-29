@@ -8257,9 +8257,10 @@ fn test_set_role_overwrite() {
     client.set_role(&admin, &user, &Role::Treasurer);
     assert_eq!(client.get_role(&user), Role::Treasurer);
 
-    // Overwrite with Admin
-    client.set_role(&admin, &user, &Role::Admin);
-    assert_eq!(client.get_role(&user), Role::Admin);
+    // Admin cannot assign Admin (must have strictly higher role)
+    let result = client.try_set_role(&admin, &user, &Role::Admin);
+    assert_eq!(result, Err(Ok(VaultError::CannotAssignHigherRole)));
+    assert_eq!(client.get_role(&user), Role::Treasurer);
 
     // Downgrade back to Member
     client.set_role(&admin, &user, &Role::Member);
@@ -10763,9 +10764,10 @@ fn test_public_api_role_consistency_after_role_change() {
     client.set_role(&admin, &user, &Role::Treasurer);
     assert_eq!(client.get_role(&user), Role::Treasurer);
 
-    // Change again to Admin
-    client.set_role(&admin, &user, &Role::Admin);
-    assert_eq!(client.get_role(&user), Role::Admin);
+    // Admin cannot assign Admin (must have strictly higher role)
+    let result = client.try_set_role(&admin, &user, &Role::Admin);
+    assert_eq!(result, Err(Ok(VaultError::CannotAssignHigherRole)));
+    assert_eq!(client.get_role(&user), Role::Treasurer);
 
     // Verify assignments list is consistent
     let assignments = client.get_role_assignments();
@@ -12885,7 +12887,6 @@ fn test_stake_slash_on_voting_deadline_rejection() {
     assert!(stake_record.slashed);
     assert_eq!(stake_record.slashed_amount, expected_slash);
 }
-
 
 // ============================================================================
 // Tests for Issue #703: Notification Preferences

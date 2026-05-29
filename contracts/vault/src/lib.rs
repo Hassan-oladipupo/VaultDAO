@@ -346,7 +346,7 @@ impl VaultDAO {
 
         // 3. Check permission
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -624,7 +624,7 @@ impl VaultDAO {
 
         let config = storage::get_config(&env)?;
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -1557,12 +1557,13 @@ impl VaultDAO {
 
         // Authorization: only proposer or Admin
         let role = storage::get_role(&env, &canceller);
-        if role != Role::Admin && canceller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && canceller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
         // Admin acting on *another* proposer's proposal → rejection semantics
-        let is_rejection = role == Role::Admin && canceller != proposal.proposer;
+        let is_rejection =
+            Role::role_satisfies(Role::Admin, role) && canceller != proposal.proposer;
 
         if is_rejection {
             proposal.status = ProposalStatus::Rejected;
@@ -1792,7 +1793,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1844,7 +1845,7 @@ impl VaultDAO {
         admin.require_auth();
 
         // Admin-only
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1884,7 +1885,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1917,7 +1918,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1938,7 +1939,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1976,7 +1977,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2009,7 +2010,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2037,7 +2038,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2169,8 +2170,14 @@ impl VaultDAO {
         }
 
         // Only Admin may assign roles
-        if storage::get_role(&env, &admin) != Role::Admin {
+        let caller_role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, caller_role) {
             return Err(VaultError::Unauthorized);
+        }
+
+        // Caller must have a strictly higher role than the role being assigned
+        if !Role::role_satisfies(role, caller_role) || caller_role == role {
+            return Err(VaultError::CannotAssignHigherRole);
         }
 
         // Persist the new role
@@ -2184,6 +2191,12 @@ impl VaultDAO {
         storage::create_audit_entry(&env, AuditAction::SetRole, &admin, 0);
 
         Ok(())
+    }
+
+    /// Check if an actual role satisfies a required role level.
+    /// Pure function — no storage access.
+    pub fn role_satisfies(required: Role, actual: Role) -> bool {
+        Role::role_satisfies(required, actual)
     }
 
     /// Get role for an address
@@ -2287,7 +2300,7 @@ impl VaultDAO {
         proposer.require_auth();
 
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -2499,7 +2512,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2521,7 +2534,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2546,7 +2559,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2572,7 +2585,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2597,7 +2610,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2971,7 +2984,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3011,7 +3024,7 @@ impl VaultDAO {
         let proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3048,7 +3061,7 @@ impl VaultDAO {
         let proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3082,7 +3095,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3118,7 +3131,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3166,7 +3179,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3204,7 +3217,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3264,7 +3277,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3300,7 +3313,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3426,7 +3439,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3838,7 +3851,7 @@ impl VaultDAO {
         oracle_config: crate::VaultOracleConfig,
     ) -> Result<(), VaultError> {
         admin.require_auth();
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::InsufficientRole);
         }
         storage::set_oracle_config(
@@ -4182,7 +4195,7 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
         storage::set_dex_config(&env, &dex_config);
@@ -4207,7 +4220,7 @@ impl VaultDAO {
         proposer.require_auth();
         let config = storage::get_config(&env)?;
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -4293,7 +4306,7 @@ impl VaultDAO {
     pub fn register_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -4312,7 +4325,7 @@ impl VaultDAO {
     pub fn register_post_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -4331,7 +4344,7 @@ impl VaultDAO {
     pub fn remove_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -4355,7 +4368,7 @@ impl VaultDAO {
     pub fn remove_post_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -4622,7 +4635,7 @@ impl VaultDAO {
 
         // Check role - only Admin can create templates
         let role = storage::get_role(&env, &creator);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -4682,7 +4695,7 @@ impl VaultDAO {
 
         // Check role - only Admin can modify templates
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -4748,7 +4761,7 @@ impl VaultDAO {
 
         // Check role
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -5357,7 +5370,7 @@ impl VaultDAO {
         let executor_role = storage::get_role(&env, &executor);
 
         // Check authorization
-        if executor_role != Role::Admin && executor_role != Role::Treasurer {
+        if !Role::role_satisfies(Role::Treasurer, executor_role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -5638,7 +5651,7 @@ impl VaultDAO {
         config: RecoveryConfig,
     ) -> Result<(), VaultError> {
         admin.require_auth();
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -5846,7 +5859,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -5901,7 +5914,7 @@ impl VaultDAO {
     /// Cancel a recovery proposal (admins only)
     pub fn cancel_recovery(env: Env, admin: Address, proposal_id: u64) -> Result<(), VaultError> {
         admin.require_auth();
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -5954,7 +5967,7 @@ impl VaultDAO {
         if !storage::is_initialized(&env) {
             return Err(VaultError::NotInitialized);
         }
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -6004,7 +6017,7 @@ impl VaultDAO {
         if !storage::is_initialized(&env) {
             return Err(VaultError::NotInitialized);
         }
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -6184,6 +6197,7 @@ impl VaultDAO {
                     | ManageSubscriptions
             ),
             Role::Member => matches!(permission, ViewMetrics),
+            Role::Observer => false,
         }
     }
 
@@ -6517,8 +6531,48 @@ impl VaultDAO {
         // Verify proposal exists
         let proposal = storage::get_proposal(&env, proposal_id)?;
 
-        // Verify milestone amounts
-        let total_amount: i128 = milestones.iter().map(|m| m.amount).sum();
+        // Determine mode: percentage-based or fixed-amount
+        let mut total_percentage_bps: u32 = 0;
+        let mut any_percentage_bps: bool = false;
+        for i in 0..milestones.len() {
+            if let Some(m) = milestones.get(i) {
+                if m.release_percentage_bps > 0 {
+                    any_percentage_bps = true;
+                }
+                total_percentage_bps =
+                    total_percentage_bps.saturating_add(m.release_percentage_bps);
+            }
+        }
+
+        // Validate: if any milestone uses percentage, all must sum to exactly 10000
+        if any_percentage_bps && total_percentage_bps != 10_000 {
+            return Err(VaultError::FundingRoundError);
+        }
+
+        // Mixed mode (some percentage, some fixed) is not allowed
+        if any_percentage_bps {
+            for i in 0..milestones.len() {
+                if let Some(m) = milestones.get(i) {
+                    if m.release_percentage_bps == 0 && m.amount != 0 {
+                        return Err(VaultError::FundingRoundError);
+                    }
+                }
+            }
+        }
+
+        let total_amount: i128 = if any_percentage_bps {
+            // For percentage-based, total_amount must be provided via milestone amounts or
+            // we derive it. We use the sum of amounts (should be the total round amount).
+            // If all amounts are 0, the proposal amount is used as total.
+            let sum_amounts: i128 = milestones.iter().map(|m| m.amount).sum();
+            if sum_amounts > 0 {
+                sum_amounts
+            } else {
+                proposal.amount
+            }
+        } else {
+            milestones.iter().map(|m| m.amount).sum()
+        };
 
         let milestone_count = milestones.len();
         let round_id = storage::bump_funding_round_id(&env);
@@ -6656,7 +6710,19 @@ impl VaultDAO {
         updated_milestone.verified_at = env.ledger().timestamp();
         updated_milestone.verified_by = Some(verifier.clone());
 
-        let amount = updated_milestone.amount;
+        // Compute release amount: percentage-based or fixed
+        let amount = if updated_milestone.release_percentage_bps > 0 {
+            // Integer-truncated percentage allocation
+            round.total_amount * updated_milestone.release_percentage_bps as i128 / 10_000
+        } else {
+            updated_milestone.amount
+        };
+
+        // For percentage-based, store the computed amount in milestone for release
+        if updated_milestone.release_percentage_bps > 0 {
+            updated_milestone.amount = amount;
+        }
+
         round.milestones.set(milestone_index, updated_milestone);
         storage::set_funding_round(&env, &round);
 
@@ -6695,12 +6761,29 @@ impl VaultDAO {
             return Err(VaultError::FundingRoundError);
         }
 
-        let amount = milestone.amount;
+        let mut amount = milestone.amount;
+
+        // Handle rounding remainder for percentage-based milestones.
+        // If this is the last unverified milestone being released and we are
+        // using percentage-based allocation, any remainder from truncation
+        // is added here so that total released never exceeds total_amount.
+        if milestone.release_percentage_bps > 0 && round.all_milestones_verified() {
+            let allocated: i128 = round.milestones.iter().map(|m| m.amount).sum();
+            if allocated < round.total_amount {
+                let remainder = round.total_amount - allocated;
+                amount = amount.saturating_add(remainder);
+
+                // Update the stored milestone amount for consistency
+                let mut updated = milestone.clone();
+                updated.amount = amount;
+                round.milestones.set(milestone_index, updated);
+            }
+        }
 
         // Transfer funds
         token::transfer(&env, &round.token, &round.recipient, amount);
 
-        round.released_amount += amount;
+        round.released_amount = round.released_amount.saturating_add(amount);
 
         // Check if all milestones are verified
         if round.all_milestones_verified() {
@@ -6710,7 +6793,15 @@ impl VaultDAO {
         }
 
         storage::set_funding_round(&env, &round);
-        events::emit_funding_released(&env, round_id, &round.recipient, amount, milestone_index);
+        let percentage_bps = milestone.release_percentage_bps;
+        events::emit_funding_released(
+            &env,
+            round_id,
+            &round.recipient,
+            amount,
+            milestone_index,
+            percentage_bps,
+        );
 
         Ok(amount)
     }
@@ -6790,7 +6881,8 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         admin.require_auth();
         let vault_config = storage::get_config(&env)?;
-        if storage::get_role(&env, &admin) != Role::Admin && !vault_config.signers.contains(&admin)
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin))
+            && !vault_config.signers.contains(&admin)
         {
             return Err(VaultError::Unauthorized);
         }
@@ -6820,7 +6912,7 @@ impl VaultDAO {
 
         let config = storage::get_config(&env)?;
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -7064,7 +7156,9 @@ impl VaultDAO {
         admin.require_auth();
 
         let config = storage::get_config(&env)?;
-        if storage::get_role(&env, &admin) != Role::Admin && !config.signers.contains(&admin) {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin))
+            && !config.signers.contains(&admin)
+        {
             return Err(VaultError::Unauthorized);
         }
 
@@ -7239,7 +7333,7 @@ impl VaultDAO {
         }
 
         let role = storage::get_role(&env, &caller);
-        if caller != sub.subscriber && role != Role::Admin {
+        if caller != sub.subscriber && !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 

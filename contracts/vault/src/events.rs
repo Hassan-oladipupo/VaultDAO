@@ -818,10 +818,11 @@ pub fn emit_funding_released(
     recipient: &Address,
     amount: i128,
     milestone_index: u32,
+    percentage_bps: u32,
 ) {
     env.events().publish(
         (Symbol::new(env, "funding_released"), round_id),
-        (recipient.clone(), amount, milestone_index),
+        (recipient.clone(), amount, milestone_index, percentage_bps),
     );
 }
 

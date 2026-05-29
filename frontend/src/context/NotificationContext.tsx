@@ -1,10 +1,12 @@
-import React, { createContext, useContext, useCallback, useReducer, useEffect } from 'react';
+import React, { createContext, useContext, useCallback, useReducer, useEffect, useRef } from 'react';
 import type {
   Notification,
+  NotificationCategory,
   NotificationFilter,
   NotificationSort,
   NotificationState,
 } from '../types/notification';
+import { createWebSocketClient } from '../utils/websocket';
 
 const STORAGE_KEY = 'vaultdao_notifications';
 const MAX_STORED_NOTIFICATIONS = 500;
@@ -24,6 +26,7 @@ interface NotificationContextValue {
   setSort: (sort: Partial<NotificationSort>) => void;
   setPage: (page: number) => void;
   clearAll: () => void;
+  connectionStatus: string;
 }
 
 const NotificationContext = createContext<NotificationContextValue | null>(null);
@@ -128,6 +131,7 @@ function notificationReducer(
 
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(notificationReducer, initialState);
+  const [connectionStatus, setConnectionStatus] = React.useState<string>('disconnected');
 
   // Load from storage on mount
   useEffect(() => {
@@ -138,10 +142,60 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   }, []);
 
   // Save to storage whenever notifications change
-  // Also save when the list is empty (cleared)
   useEffect(() => {
     saveNotificationsToStorage(state.notifications);
   }, [state.notifications]);
+
+  // WebSocket connection for real-time notifications
+  useEffect(() => {
+    const wsUrl = (import.meta.env?.VITE_REALTIME_WS_URL as string | undefined) || '';
+    // Only connect if URL is configured (production mode)
+    if (!wsUrl && import.meta.env?.PROD) return;
+    if (!wsUrl) return;
+
+    const wsClient = createWebSocketClient({
+      url: wsUrl,
+      reconnectInterval: 3000,
+      maxReconnectAttempts: 10,
+      heartbeatInterval: 30000,
+      onConnect: () => {
+        setConnectionStatus('connected');
+      },
+      onDisconnect: () => {
+        setConnectionStatus('disconnected');
+      },
+      onMessage: (message) => {
+        try {
+          const payload = message.payload || {};
+          if (message.type === 'notification') {
+            const notification: Omit<Notification, 'id' | 'timestamp' | 'status'> = {
+              title: payload.title || 'New Notification',
+              message: payload.message || '',
+              category: (payload.category as NotificationCategory) || 'system',
+              priority: payload.priority || 'normal',
+              groupKey: payload.groupKey,
+              metadata: payload.metadata,
+              actions: payload.actions,
+            };
+            const newNotification: Notification = {
+              ...notification,
+              id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`,
+              timestamp: Date.now(),
+              status: 'unread',
+              groupKey: payload.groupKey,
+            };
+            dispatch({ type: 'ADD_NOTIFICATION', payload: newNotification });
+          }
+        } catch {
+          // Ignore non-JSON messages
+        }
+      },
+    });
+
+    return () => {
+      wsClient.disconnect();
+    };
+  }, []);
 
   const addNotification = useCallback(
     (notification: Omit<Notification, 'id' | 'timestamp' | 'status'>) => {
@@ -206,6 +260,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       setSort,
       setPage,
       clearAll,
+      connectionStatus,
     }),
     [
       state.notifications,
@@ -222,6 +277,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       setSort,
       setPage,
       clearAll,
+      connectionStatus,
     ]
   );
 

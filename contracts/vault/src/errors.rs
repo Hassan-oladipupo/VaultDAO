@@ -36,7 +36,7 @@ pub enum VaultError {
     TransferFailed = 71,
     SignerAlreadyExists = 80,
     SignerNotFound = 81,
-    CannotRemoveSigner = 82,
+    CannotAssignHigherRole = 82,
     RecipientNotWhitelisted = 90,
     RecipientBlacklisted = 91,
     AddressAlreadyOnList = 92,
