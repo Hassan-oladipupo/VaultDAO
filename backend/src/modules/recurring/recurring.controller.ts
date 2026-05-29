@@ -93,9 +93,49 @@ export function getRecurringByIdController(
 }
 
 /**
- * Get all payments currently due
+ * Get payments due within the next lookaheadLedgers ledgers.
+ * lookaheadLedgers: 1–17280, default 1440
  */
-export function getDueRecurringController(
+export function getDueWithLookaheadController(
+  service: RecurringIndexerService,
+): RequestHandler {
+  return async (request, response) => {
+    const lookaheadRaw = validateOptionalInteger(
+      request,
+      response,
+      "lookaheadLedgers",
+      { min: 1, max: 17280 },
+    );
+    if (lookaheadRaw === null) return;
+    const lookaheadLedgers = lookaheadRaw ?? 1440;
+
+    const { lastLedgerProcessed } = service.getStatus();
+    const targetLedger = lastLedgerProcessed + lookaheadLedgers;
+
+    try {
+      const all = await service.getDuePaymentsAtLedger(targetLedger);
+      const pagination = validatePagination(request, response);
+      if (!pagination) return;
+      const data = all.slice(pagination.offset, pagination.offset + pagination.limit);
+      success(response, {
+        data,
+        total: all.length,
+        offset: pagination.offset,
+        limit: pagination.limit,
+        lookaheadLedgers,
+        targetLedger,
+      });
+    } catch (err) {
+      error(response, {
+        message: "Failed to fetch due payments",
+        status: 500,
+        code: ErrorCode.INTERNAL_ERROR,
+        details: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+}
+
   service: RecurringIndexerService,
 ): RequestHandler {
   return async (request, response) => {

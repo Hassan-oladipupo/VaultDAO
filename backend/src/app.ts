@@ -153,7 +153,21 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   const registry = new (
     await import("./modules/contracts/contract-registry.js")
   ).default(env);
-  v1Router.use("/contracts", createContractsRouter(registry));
+  // Sync lastIndexedLedger from running pollers
+  if (runtime.eventPollingServices) {
+    const ids =
+      env.contractIds && env.contractIds.length > 0
+        ? env.contractIds
+        : [env.contractId];
+    for (let i = 0; i < ids.length; i++) {
+      const poller = (runtime.eventPollingServices as any)[i];
+      if (poller) {
+        const status = poller.getStatus();
+        registry.updateLastLedger(ids[i]!, status.lastLedgerPolled);
+      }
+    }
+  }
+  v1Router.use("/contracts", createContractsRouter(registry, adminAuthMiddleware));
 
   v1Router.use(
     "/snapshots",
@@ -173,7 +187,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   v1Router.use(
     "/recurring",
     authMiddleware,
-    createRecurringRouter(runtime.recurringIndexerService),
+    createRecurringRouter(runtime.recurringIndexerService, authMiddleware),
   );
 
   v1Router.use(
@@ -182,7 +196,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
     createTransactionsRouter(runtime.transactionsService, env.contractId),
   );
 
-  v1Router.use("/audit", authMiddleware, createAuditRouter(env.sorobanRpcUrl));
+  v1Router.use("/audit", authMiddleware, createAuditRouter(env.sorobanRpcUrl, adminAuthMiddleware));
 
   if (runtime.notificationQueue) {
     v1Router.use(
