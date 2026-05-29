@@ -123,6 +123,10 @@ pub enum VaultError {
 
     /// Milestone does not have enough verifications to proceed
     InsufficientVerifications = 511,
+
+    PermissionExpired = 320,
+    
+    PermissionNotFound = 321,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above

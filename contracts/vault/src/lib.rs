@@ -1028,7 +1028,7 @@ impl VaultDAO {
                 metrics.expired_count,
                 metrics.success_rate_bps(),
             );
-            return Err(VaultError::ProposalExpired);
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check voting deadline
@@ -1176,7 +1176,7 @@ impl VaultDAO {
                 metrics.expired_count,
                 metrics.success_rate_bps(),
             );
-            return Err(VaultError::ProposalExpired);
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check voting deadline
@@ -1319,7 +1319,7 @@ impl VaultDAO {
                 metrics.expired_count,
                 metrics.success_rate_bps(),
             );
-            return Err(VaultError::ProposalExpired);
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check Timelock
@@ -6815,7 +6815,7 @@ impl VaultDAO {
             storage::set_proposal(&env, &proposal);
             storage::metrics_on_expiry(&env);
             events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
-            return Err(VaultError::ProposalExpired);
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check Timelock
