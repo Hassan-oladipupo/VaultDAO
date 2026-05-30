@@ -226,6 +226,9 @@ export function getDueRecurringController(
   };
 }
 
+// Backward-compatible alias used by older imports/tests.
+export const getDuePaymentsController = getDueRecurringController;
+
 /**
  * Get recurring payment execution history
  * GET /api/v1/recurring/:id/history

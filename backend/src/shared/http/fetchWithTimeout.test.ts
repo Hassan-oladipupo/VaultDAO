@@ -264,37 +264,38 @@ test("fetchWithRetry", async (t) => {
 
   await t.test("uses exponential backoff by default", async () => {
     const delays: number[] = [];
-    let lastTime = Date.now();
     let attemptCount = 0;
+    const originalSetTimeout = global.setTimeout;
+
+    global.setTimeout = ((handler: (...args: any[]) => void, timeout?: number, ...args: any[]) => {
+      // Capture retry delays from fetchWithRetry without relying on wall-clock timing.
+      if (typeof timeout === "number" && [100, 200, 400].includes(timeout)) {
+        delays.push(timeout);
+      }
+      return originalSetTimeout(handler, timeout, ...args);
+    }) as typeof setTimeout;
 
     global.fetch = async () => {
       attemptCount++;
-      if (attemptCount > 1) {
-        const now = Date.now();
-        delays.push(now - lastTime);
-        lastTime = now;
-      } else {
-        lastTime = Date.now();
-      }
       throw new TypeError("Network error");
     };
 
     try {
-      await fetchWithRetry("http://example.com", {}, 1000, {
-        maxRetries: 3,
-        initialDelayMs: 100,
-      });
-    } catch (error) {
-      // Expected
+      try {
+        await fetchWithRetry("http://example.com", {}, 1000, {
+          maxRetries: 3,
+          initialDelayMs: 100,
+        });
+      } catch (error) {
+        // Expected
+      }
+
+      // Verify exponential backoff delays requested by fetchWithRetry.
+      assert.deepEqual(delays, [100, 200, 400]);
+    } finally {
+      global.setTimeout = originalSetTimeout;
+      global.fetch = originalFetch;
     }
-
-    // Verify exponential backoff: 100ms, 200ms, 400ms (with some tolerance)
-    assert.equal(delays.length, 3);
-    assert.ok(delays[0] >= 90 && delays[0] <= 150); // ~100ms
-    assert.ok(delays[1] >= 180 && delays[1] <= 250); // ~200ms
-    assert.ok(delays[2] >= 380 && delays[2] <= 450); // ~400ms
-
-    global.fetch = originalFetch;
   });
 
   await t.test("does not retry on 4xx errors", async () => {
