@@ -8,6 +8,10 @@ import type {
 } from "../types.js";
 import { EventType } from "../types.js";
 
+function id1(event: ContractEvent): string {
+  return String(event.topic[1] ?? "0");
+}
+
 function meta(event: ContractEvent) {
   return {
     id: event.id,
@@ -19,13 +23,11 @@ function meta(event: ContractEvent) {
 
 export class RecoveryNormalizer {
   static normalizeRecoveryProposed(event: ContractEvent): NormalizedEvent<RecoveryProposedData> {
-    const d = event.value;
     return {
       type: EventType.RECOVERY_PROPOSED,
       data: {
-        newOwner: String(d[0] ?? ""),
-        proposer: String(d[1] ?? ""),
-        proposalId: String(d[2] ?? ""),
+        proposalId: id1(event),
+        newThreshold: Number(event.value ?? 0),
       },
       metadata: meta(event),
     };
@@ -36,22 +38,18 @@ export class RecoveryNormalizer {
     return {
       type: EventType.RECOVERY_APPROVED,
       data: {
-        newOwner: String(d[0] ?? ""),
-        approver: String(d[1] ?? ""),
-        approvalCount: Number(d[2] ?? 0),
+        proposalId: id1(event),
+        guardian: String(d ?? ""),
       },
       metadata: meta(event),
     };
   }
 
   static normalizeRecoveryExecuted(event: ContractEvent): NormalizedEvent<RecoveryExecutedData> {
-    const d = event.value;
     return {
       type: EventType.RECOVERY_EXECUTED,
       data: {
-        oldOwner: String(d[0] ?? ""),
-        newOwner: String(d[1] ?? ""),
-        executedBy: String(d[2] ?? ""),
+        proposalId: id1(event),
       },
       metadata: meta(event),
     };
@@ -62,8 +60,8 @@ export class RecoveryNormalizer {
     return {
       type: EventType.RECOVERY_CANCELLED,
       data: {
-        newOwner: String(d[0] ?? ""),
-        cancelledBy: String(d[1] ?? ""),
+        proposalId: id1(event),
+        cancelledBy: String(d ?? ""),
       },
       metadata: meta(event),
     };

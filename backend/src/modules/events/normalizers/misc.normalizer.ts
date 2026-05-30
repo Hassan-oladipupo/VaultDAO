@@ -226,39 +226,35 @@ export class MiscNormalizer {
   }
 
   static normalizeFundingRoundApproved(event: ContractEvent): NormalizedEvent<FundingRoundApprovedData> {
-    const d = event.value;
     return {
       type: EventType.FUNDING_ROUND_APPROVED,
       data: {
         roundId: id1(event),
-        proposalId: String(d[0] ?? ""),
-        approver: String(d[1] ?? ""),
+        proposalId: "",
+        approver: String(event.value ?? ""),
       },
       metadata: meta(event),
     };
   }
 
   static normalizeFundingRoundCancelled(event: ContractEvent): NormalizedEvent<FundingRoundCancelledData> {
-    const d = event.value;
     return {
       type: EventType.FUNDING_ROUND_CANCELLED,
       data: {
         roundId: id1(event),
-        cancelledBy: String(d[0] ?? ""),
-        reason: String(d[1] ?? ""),
+        cancelledBy: String(event.value ?? ""),
+        reason: "",
       },
       metadata: meta(event),
     };
   }
 
   static normalizeFundingRoundCompleted(event: ContractEvent): NormalizedEvent<FundingRoundCompletedData> {
-    const d = event.value;
     return {
       type: EventType.FUNDING_ROUND_COMPLETED,
       data: {
         roundId: id1(event),
-        recipient: String(d[0] ?? ""),
-        totalReleased: String(d[1] ?? "0"),
+        totalReleased: String(event.value ?? "0"),
       },
       metadata: meta(event),
     };

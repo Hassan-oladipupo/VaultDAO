@@ -136,6 +136,7 @@ export function getDueWithLookaheadController(
   };
 }
 
+export function getDueRecurringController(
   service: RecurringIndexerService,
 ): RequestHandler {
   return async (request, response) => {

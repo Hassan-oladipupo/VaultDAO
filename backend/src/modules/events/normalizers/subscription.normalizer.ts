@@ -3,6 +3,7 @@ import type {
   NormalizedEvent,
   StreamStatusData,
   StreamClaimedData,
+  StreamRateAdjustedData,
   SubscriptionCreatedData,
   SubscriptionRenewedData,
   SubscriptionCancelledData,
@@ -25,6 +26,20 @@ function meta(event: ContractEvent) {
 }
 
 export class SubscriptionNormalizer {
+  static normalizeStreamRateAdjusted(event: ContractEvent): NormalizedEvent<StreamRateAdjustedData> {
+    const d = event.value;
+    return {
+      type: EventType.STREAM_RATE_ADJUSTED,
+      data: {
+        streamId: id1(event),
+        oldRate: String(d[0] ?? "0"),
+        newRate: String(d[1] ?? "0"),
+        adjustedBy: String(d[2] ?? ""),
+      },
+      metadata: meta(event),
+    };
+  }
+
   static normalizeStreamStatus(event: ContractEvent): NormalizedEvent<StreamStatusData> {
     const d = event.value;
     return {
@@ -58,10 +73,8 @@ export class SubscriptionNormalizer {
       data: {
         subscriptionId: id1(event),
         subscriber: String(d[0] ?? ""),
-        service: String(d[1] ?? ""),
+        tier: Number(d[1] ?? 0),
         amount: String(d[2] ?? "0"),
-        token: String(d[3] ?? ""),
-        intervalLedgers: Number(d[4] ?? 0),
       },
       metadata: meta(event),
     };
@@ -73,8 +86,8 @@ export class SubscriptionNormalizer {
       type: EventType.SUBSCRIPTION_RENEWED,
       data: {
         subscriptionId: id1(event),
-        subscriber: String(d[0] ?? ""),
-        renewedUntil: Number(d[1] ?? 0),
+        paymentNumber: Number(d[0] ?? 0),
+        amount: String(d[1] ?? "0"),
       },
       metadata: meta(event),
     };
@@ -111,8 +124,7 @@ export class SubscriptionNormalizer {
     return {
       type: EventType.SUBSCRIPTION_EXPIRED,
       data: {
-        subscriptionId: id1(event),
-        subscriber: String(d[0] ?? ""),
+        subscriptionId: String(event.topic[1] ?? d ?? "0"),
       },
       metadata: meta(event),
     };

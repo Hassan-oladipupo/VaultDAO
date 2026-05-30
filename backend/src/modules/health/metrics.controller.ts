@@ -17,6 +17,13 @@ export function getMetricsController(runtime: BackendRuntime): RequestHandler {
       (Date.now() - new Date(runtime.startedAt).getTime()) / 1000,
     );
     runtime.metricsRegistry.setGauge("vaultdao_uptime_seconds", uptimeSeconds);
+    if (runtime.cacheManager) {
+      const cacheStats = runtime.cacheManager.stats();
+      runtime.metricsRegistry.setGauge("vaultdao_cache_hits_total", cacheStats.hits);
+      runtime.metricsRegistry.setGauge("vaultdao_cache_misses_total", cacheStats.misses);
+      runtime.metricsRegistry.setGauge("vaultdao_cache_hit_rate", (cacheStats as any).hitRate ?? cacheStats.hitRatio);
+      runtime.metricsRegistry.setGauge("vaultdao_cache_miss_rate", (cacheStats as any).missRate ?? 0);
+    }
 
     const acceptsPlain = (_request.get("Accept") ?? "").includes("text/plain");
 
@@ -36,7 +43,7 @@ export function getMetricsController(runtime: BackendRuntime): RequestHandler {
         success: true,
         timestamp: new Date().toISOString(),
         uptimeSeconds,
-        // We could expose the raw registry values here if desired
+        cache: runtime.cacheManager?.stats(),
       });
   };
 }
