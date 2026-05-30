@@ -9,6 +9,8 @@ import { InsuranceNormalizer } from "./insurance.normalizer.js";
 import { RecoveryNormalizer } from "./recovery.normalizer.js";
 import { SubscriptionNormalizer } from "./subscription.normalizer.js";
 import { MiscNormalizer } from "./misc.normalizer.js";
+import { GenericEventNormalizer } from "./generic.normalizer.js";
+import { UnknownEventNormalizer } from "./unknown.normalizer.js";
 import { SnapshotNormalizer } from "../../snapshots/normalizer.js";
 
 export class EventNormalizer {
@@ -121,6 +123,8 @@ export class EventNormalizer {
       // ── Recurring / streaming ───────────────────────────────────────────
       case EventType.STREAM_CREATED:
         return RecurringNormalizer.normalizeStreamCreated(event);
+      case EventType.STREAM_RATE_ADJUSTED:
+        return SubscriptionNormalizer.normalizeStreamRateAdjusted(event);
       case EventType.STREAM_STATUS:
         return SubscriptionNormalizer.normalizeStreamStatus(event);
       case EventType.STREAM_CLAIMED:
@@ -179,21 +183,17 @@ export class EventNormalizer {
         return EventNormalizer.unknown(event, "Unmapped topic");
 
       default:
-        return EventNormalizer.unknown(event, "Unhandled event type");
+        return GenericEventNormalizer.normalize(event, type);
     }
   }
 
   private static unknown(event: ContractEvent, reason: string): NormalizedEvent {
-    console.warn(`[event-normalizer] unknown event topic "${event.topic[0]}" — ${reason}`);
-    return {
-      type: EventType.UNKNOWN,
-      data: { rawTopic: event.topic, rawValue: event.value, reason },
-      metadata: {
-        id: event.id,
-        contractId: event.contractId,
-        ledger: event.ledger,
-        ledgerClosedAt: event.ledgerClosedAt,
-      },
-    };
+    return UnknownEventNormalizer.normalize(event, reason);
+  }
+
+  public static registeredTypes(): Array<{ topic: string; type: EventType }> {
+    return Object.entries(CONTRACT_EVENT_MAP)
+      .map(([topic, type]) => ({ topic, type }))
+      .sort((a, b) => a.topic.localeCompare(b.topic));
   }
 }

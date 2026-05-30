@@ -4,7 +4,6 @@ import type { RecurringIndexerService } from "./recurring.service.js";
 import {
   getAllRecurringController,
   getRecurringByIdController,
-  getDueRecurringController,
   getDueWithLookaheadController,
   triggerSyncController,
 } from "./recurring.controller.js";

@@ -18,6 +18,7 @@ import { createWebhookRouter } from "./modules/notifications/webhook.routes.js";
 import { createCacheRouter } from "./shared/cache/cache.routes.js";
 import { createVaultRouter } from "./modules/vault/vault.routes.js";
 import { createCursorsRouter } from "./modules/events/cursor/cursors.routes.js";
+import { createEventsRouter } from "./modules/events/events.routes.js";
 import { error } from "./shared/http/response.js";
 import { createRateLimitMiddleware } from "./shared/http/rateLimit.js";
 import { createAuthMiddleware, requireApiKey } from "./shared/http/auth.js";
@@ -213,6 +214,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   v1Router.use("/status", createStatusRouter(env, runtime));
   v1Router.use("/metrics", createMetricsRouter(runtime, adminAuthMiddleware));
   v1Router.use("/health", createDetailedHealthRouter(env, runtime));
+  v1Router.use("/events", authMiddleware, createEventsRouter());
 
   // Contracts listing
   const registry = new (
@@ -283,7 +285,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
     v1Router.use(
       "/cache",
       authMiddleware,
-      createCacheRouter(runtime.cacheManager),
+      createCacheRouter(runtime.cacheManager, adminAuthMiddleware),
     );
   }
 
