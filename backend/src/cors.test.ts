@@ -341,3 +341,141 @@ test("CORS Credentials and Vary", async (t) => {
     });
   });
 });
+
+test("CORS Runtime Allowlist Admin Endpoints", async (t) => {
+  const env = {
+    port: 0,
+    host: "127.0.0.1",
+    nodeEnv: "production",
+    corsOrigin: ["https://allowed.com"],
+    requestBodyLimit: "1mb",
+    apiKey: "test-api-key",
+  };
+
+  await t.test("dynamic add allows the newly-added origin", async () => {
+    const app = await createApp(env as any, mockRuntime as any);
+    await new Promise<void>((resolve) => {
+      const server = app.listen(0, "127.0.0.1", async () => {
+        const address = server.address() as any;
+        const port = address.port;
+
+        try {
+          const addResponse = await fetch(
+            `http://127.0.0.1:${port}/api/v1/admin/cors/origins`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-API-Key": "test-api-key",
+              },
+              body: JSON.stringify({ origin: "https://dynamic.com" }),
+            },
+          );
+
+          assert.strictEqual(addResponse.status, 200);
+
+          const response = await fetch(`http://127.0.0.1:${port}/health`, {
+            headers: { Origin: "https://dynamic.com" },
+          });
+
+          assert.strictEqual(response.status, 200);
+          assert.strictEqual(
+            response.headers.get("Access-Control-Allow-Origin"),
+            "https://dynamic.com",
+          );
+        } finally {
+          if (typeof (server as any).closeAllConnections === "function") {
+            (server as any).closeAllConnections();
+          }
+          await new Promise<void>((closeResolve) =>
+            server.close(() => closeResolve()),
+          );
+          resolve();
+        }
+      });
+    });
+  });
+
+  await t.test("dynamic remove blocks the removed origin", async () => {
+    const app = await createApp(env as any, mockRuntime as any);
+    await new Promise<void>((resolve) => {
+      const server = app.listen(0, "127.0.0.1", async () => {
+        const address = server.address() as any;
+        const port = address.port;
+
+        try {
+          await fetch(`http://127.0.0.1:${port}/api/v1/admin/cors/origins`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-API-Key": "test-api-key",
+            },
+            body: JSON.stringify({ origin: "https://remove-me.com" }),
+          });
+
+          const removeResponse = await fetch(
+            `http://127.0.0.1:${port}/api/v1/admin/cors/origins`,
+            {
+              method: "DELETE",
+              headers: {
+                "Content-Type": "application/json",
+                "X-API-Key": "test-api-key",
+              },
+              body: JSON.stringify({ origin: "https://remove-me.com" }),
+            },
+          );
+
+          assert.strictEqual(removeResponse.status, 200);
+
+          const response = await fetch(`http://127.0.0.1:${port}/health`, {
+            headers: { Origin: "https://remove-me.com" },
+          });
+
+          assert.strictEqual(response.status, 403);
+        } finally {
+          if (typeof (server as any).closeAllConnections === "function") {
+            (server as any).closeAllConnections();
+          }
+          await new Promise<void>((closeResolve) =>
+            server.close(() => closeResolve()),
+          );
+          resolve();
+        }
+      });
+    });
+  });
+
+  await t.test("dynamic add rejects invalid origin", async () => {
+    const app = await createApp(env as any, mockRuntime as any);
+    await new Promise<void>((resolve) => {
+      const server = app.listen(0, "127.0.0.1", async () => {
+        const address = server.address() as any;
+        const port = address.port;
+
+        try {
+          const addResponse = await fetch(
+            `http://127.0.0.1:${port}/api/v1/admin/cors/origins`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-API-Key": "test-api-key",
+              },
+              body: JSON.stringify({ origin: "localhost" }),
+            },
+          );
+
+          assert.strictEqual(addResponse.status, 400);
+        } finally {
+          if (typeof (server as any).closeAllConnections === "function") {
+            (server as any).closeAllConnections();
+          }
+          await new Promise<void>((closeResolve) =>
+            server.close(() => closeResolve()),
+          );
+          resolve();
+        }
+      });
+    });
+  });
+});

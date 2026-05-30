@@ -45,6 +45,76 @@ const ALLOWED_STELLAR_NETWORKS = new Set([
 const ALLOWED_CURSOR_STORAGE_TYPES = new Set(["file", "database"]);
 const MIN_POLLING_INTERVAL_MS = 1000;
 
+function validateCorsOriginValue(
+  value: string,
+  nodeEnv: string,
+  issues: string[],
+): void {
+  if (value === "*") {
+    return;
+  }
+
+  try {
+    const parsed = new URL(value);
+
+    if (value.endsWith("/")) {
+      issues.push(
+        `CORS_ORIGIN entries must not include a trailing slash. Received "${value}".`,
+      );
+      return;
+    }
+
+    if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      issues.push(
+        `CORS_ORIGIN entries must be origin-only URLs (no path, query, or hash). Received "${value}".`,
+      );
+      return;
+    }
+
+    if (parsed.protocol === "https:") {
+      return;
+    }
+
+    if (parsed.protocol === "http:" && nodeEnv !== "production") {
+      return;
+    }
+
+    if (parsed.protocol === "http:" && nodeEnv === "production") {
+      issues.push(
+        `CORS_ORIGIN entry "${value}" uses http:// which is not allowed in production.`,
+      );
+      return;
+    }
+
+    issues.push(
+      `CORS_ORIGIN entry "${value}" must use https:// (or http:// in non-production).`,
+    );
+  } catch {
+    issues.push(`CORS_ORIGIN entry "${value}" must be a valid URL or "*".`);
+  }
+}
+
+function validateCorsOrigins(
+  origins: string[],
+  nodeEnv: string,
+  issues: string[],
+): void {
+  if (origins.length === 0) {
+    return;
+  }
+
+  const hasWildcard = origins.includes("*");
+  if (hasWildcard && origins.length > 1) {
+    issues.push(
+      'CORS_ORIGIN cannot combine "*" with specific origins. Use either "*" or explicit origins.',
+    );
+  }
+
+  for (const origin of origins) {
+    validateCorsOriginValue(origin, nodeEnv, issues);
+  }
+}
+
 function readValue(name: string): string | undefined {
   const value = process.env[name]?.trim();
   return value ? value : undefined;
@@ -246,6 +316,8 @@ export function loadEnv(): BackendEnv {
   if (nodeEnv === "production" && corsOrigin.length === 0) {
     issues.push("CORS_ORIGIN is required in production environment.");
   }
+
+  validateCorsOrigins(corsOrigin, nodeEnv, issues);
 
   if (nodeEnv === "production" && !apiKey) {
     issues.push("API_KEY is required in production environment.");

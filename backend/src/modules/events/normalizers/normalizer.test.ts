@@ -168,55 +168,55 @@ describe("EventNormalizer", () => {
     test("should normalize recovery_proposed event", () => {
       const rawEvent: ContractEvent = {
         ...mockMetadata,
-        topic: ["recovery_proposed"],
-        value: ["new-owner-addr", "proposer-addr", "rec-prop-1"],
+        topic: ["recovery_proposed", "rec-prop-1"],
+        value: 3,
       };
 
       const normalized = EventNormalizer.normalize(rawEvent);
 
       assert.strictEqual(normalized.type, EventType.RECOVERY_PROPOSED);
-      assert.strictEqual(normalized.data.newOwner, "new-owner-addr");
-      assert.strictEqual(normalized.data.proposer, "proposer-addr");
       assert.strictEqual(normalized.data.proposalId, "rec-prop-1");
+      assert.strictEqual(normalized.data.newThreshold, 3);
     });
 
     test("should normalize recovery_approved event", () => {
       const rawEvent: ContractEvent = {
         ...mockMetadata,
-        topic: ["recovery_approved"],
-        value: ["new-owner-addr", "approver-addr", 2],
+        topic: ["recovery_approved", "rec-prop-2"],
+        value: "guardian-addr",
       };
 
       const normalized = EventNormalizer.normalize(rawEvent);
 
       assert.strictEqual(normalized.type, EventType.RECOVERY_APPROVED);
-      assert.strictEqual(normalized.data.approvalCount, 2);
+      assert.strictEqual(normalized.data.proposalId, "rec-prop-2");
+      assert.strictEqual(normalized.data.guardian, "guardian-addr");
     });
 
     test("should normalize recovery_executed event", () => {
       const rawEvent: ContractEvent = {
         ...mockMetadata,
-        topic: ["recovery_executed"],
-        value: ["old-owner-addr", "new-owner-addr", "executor-addr"],
+        topic: ["recovery_executed", "rec-prop-3"],
+        value: [],
       };
 
       const normalized = EventNormalizer.normalize(rawEvent);
 
       assert.strictEqual(normalized.type, EventType.RECOVERY_EXECUTED);
-      assert.strictEqual(normalized.data.oldOwner, "old-owner-addr");
-      assert.strictEqual(normalized.data.newOwner, "new-owner-addr");
+      assert.strictEqual(normalized.data.proposalId, "rec-prop-3");
     });
 
     test("should normalize recovery_cancelled event", () => {
       const rawEvent: ContractEvent = {
         ...mockMetadata,
-        topic: ["recovery_cancelled"],
-        value: ["new-owner-addr", "canceller-addr"],
+        topic: ["recovery_cancelled", "rec-prop-4"],
+        value: "canceller-addr",
       };
 
       const normalized = EventNormalizer.normalize(rawEvent);
 
       assert.strictEqual(normalized.type, EventType.RECOVERY_CANCELLED);
+      assert.strictEqual(normalized.data.proposalId, "rec-prop-4");
       assert.strictEqual(normalized.data.cancelledBy, "canceller-addr");
     });
   });
@@ -254,7 +254,7 @@ describe("EventNormalizer", () => {
       const rawEvent: ContractEvent = {
         ...mockMetadata,
         topic: ["subscription_created", "sub-1"],
-        value: ["subscriber-addr", "service-addr", "100", "USDC", 720],
+        value: ["subscriber-addr", 2, "100"],
       };
 
       const normalized = EventNormalizer.normalize(rawEvent);
@@ -262,7 +262,22 @@ describe("EventNormalizer", () => {
       assert.strictEqual(normalized.type, EventType.SUBSCRIPTION_CREATED);
       assert.strictEqual(normalized.data.subscriptionId, "sub-1");
       assert.strictEqual(normalized.data.subscriber, "subscriber-addr");
-      assert.strictEqual(normalized.data.intervalLedgers, 720);
+      assert.strictEqual(normalized.data.tier, 2);
+      assert.strictEqual(normalized.data.amount, "100");
+    });
+
+    test("should normalize subscription_renewed event", () => {
+      const rawEvent: ContractEvent = {
+        ...mockMetadata,
+        topic: ["subscription_renewed", "sub-1"],
+        value: [3, "100"],
+      };
+
+      const normalized = EventNormalizer.normalize(rawEvent);
+
+      assert.strictEqual(normalized.type, EventType.SUBSCRIPTION_RENEWED);
+      assert.strictEqual(normalized.data.paymentNumber, 3);
+      assert.strictEqual(normalized.data.amount, "100");
     });
 
     test("should normalize subscription_cancelled event", () => {
@@ -281,14 +296,14 @@ describe("EventNormalizer", () => {
     test("should normalize subscription_expired event", () => {
       const rawEvent: ContractEvent = {
         ...mockMetadata,
-        topic: ["subscription_expired", "sub-3"],
-        value: ["subscriber-addr"],
+        topic: ["subscription_expired"],
+        value: "sub-3",
       };
 
       const normalized = EventNormalizer.normalize(rawEvent);
 
       assert.strictEqual(normalized.type, EventType.SUBSCRIPTION_EXPIRED);
-      assert.strictEqual(normalized.data.subscriber, "subscriber-addr");
+      assert.strictEqual(normalized.data.subscriptionId, "sub-3");
     });
   });
 
@@ -376,28 +391,40 @@ describe("EventNormalizer", () => {
       const rawEvent: ContractEvent = {
         ...mockMetadata,
         topic: ["funding_round_approved", "round-1"],
-        value: ["prop-1", "approver-addr"],
+        value: "approver-addr",
       };
 
       const normalized = EventNormalizer.normalize(rawEvent);
 
       assert.strictEqual(normalized.type, EventType.FUNDING_ROUND_APPROVED);
       assert.strictEqual(normalized.data.roundId, "round-1");
-      assert.strictEqual(normalized.data.proposalId, "prop-1");
+      assert.strictEqual(normalized.data.approver, "approver-addr");
     });
 
     test("should normalize funding_round_completed event", () => {
       const rawEvent: ContractEvent = {
         ...mockMetadata,
         topic: ["funding_round_completed", "round-2"],
-        value: ["recipient-addr", "10000"],
+        value: "10000",
       };
 
       const normalized = EventNormalizer.normalize(rawEvent);
 
       assert.strictEqual(normalized.type, EventType.FUNDING_ROUND_COMPLETED);
-      assert.strictEqual(normalized.data.recipient, "recipient-addr");
       assert.strictEqual(normalized.data.totalReleased, "10000");
+    });
+
+    test("should normalize funding_round_cancelled event", () => {
+      const rawEvent: ContractEvent = {
+        ...mockMetadata,
+        topic: ["funding_round_cancelled", "round-3"],
+        value: "canceller-addr",
+      };
+
+      const normalized = EventNormalizer.normalize(rawEvent);
+
+      assert.strictEqual(normalized.type, EventType.FUNDING_ROUND_CANCELLED);
+      assert.strictEqual(normalized.data.cancelledBy, "canceller-addr");
     });
   });
 });

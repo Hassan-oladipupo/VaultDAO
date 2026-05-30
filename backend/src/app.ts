@@ -18,6 +18,7 @@ import { createWebhookRouter } from "./modules/notifications/webhook.routes.js";
 import { createCacheRouter } from "./shared/cache/cache.routes.js";
 import { createVaultRouter } from "./modules/vault/vault.routes.js";
 import { createCursorsRouter } from "./modules/events/cursor/cursors.routes.js";
+import { createEventsRouter } from "./modules/events/events.routes.js";
 import { error } from "./shared/http/response.js";
 import { createRateLimitMiddleware } from "./shared/http/rateLimit.js";
 import { createAuthMiddleware, requireApiKey } from "./shared/http/auth.js";
@@ -29,9 +30,11 @@ import {
 } from "./shared/http/requestId.js";
 import { createRequestLogger } from "./shared/http/requestLogger.js";
 import { createErrorMiddleware } from "./shared/errors/handleError.js";
+import { CorsAllowlist } from "./shared/http/corsAllowlist.js";
 
 export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   const app = express();
+  const corsAllowlist = new CorsAllowlist(env.nodeEnv, env.corsOrigin);
 
   // Remove X-Powered-By header
   app.disable("x-powered-by");
@@ -54,9 +57,8 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   app.use((req: Request, res: Response, next: NextFunction) => {
     const origin = req.get("Origin");
 
-    const isAllowed =
-      env.corsOrigin.includes("*") ||
-      (origin && env.corsOrigin.includes(origin));
+    const hasWildcard = corsAllowlist.hasWildcard();
+    const isAllowed = origin ? corsAllowlist.isAllowed(origin) : false;
 
     // In production, actively reject disallowed origins with a 403.
     // Requests with no Origin header (server-to-server, curl) are allowed.
@@ -72,7 +74,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
     if (isAllowed && origin) {
       res.set("Access-Control-Allow-Origin", origin);
       res.set("Vary", "Origin");
-    } else if (env.corsOrigin.includes("*")) {
+    } else if (hasWildcard) {
       res.set("Access-Control-Allow-Origin", "*");
     }
 
@@ -147,9 +149,72 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
 
   const v1Router = express.Router();
 
+  v1Router.get("/admin/cors/origins", adminAuthMiddleware, (_req, res) => {
+    res.status(200).json({
+      success: true,
+      data: {
+        origins: corsAllowlist.list(),
+      },
+    });
+  });
+
+  v1Router.post("/admin/cors/origins", adminAuthMiddleware, (req, res) => {
+    const origin = String(req.body?.origin ?? "").trim();
+
+    if (!origin) {
+      error(res, {
+        message: "Bad Request: origin is required",
+        status: 400,
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    const added = corsAllowlist.add(origin);
+    if (added.reason) {
+      error(res, {
+        message: `Bad Request: ${added.reason}`,
+        status: 400,
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        changed: added.changed,
+        origins: corsAllowlist.list(),
+      },
+    });
+  });
+
+  v1Router.delete("/admin/cors/origins", adminAuthMiddleware, (req, res) => {
+    const origin = String(req.body?.origin ?? "").trim();
+
+    if (!origin) {
+      error(res, {
+        message: "Bad Request: origin is required",
+        status: 400,
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    const removed = corsAllowlist.remove(origin);
+    res.status(200).json({
+      success: true,
+      data: {
+        changed: removed,
+        origins: corsAllowlist.list(),
+      },
+    });
+  });
+
   v1Router.use("/status", createStatusRouter(env, runtime));
   v1Router.use("/metrics", createMetricsRouter(runtime, adminAuthMiddleware));
   v1Router.use("/health", createDetailedHealthRouter(env, runtime));
+  v1Router.use("/events", authMiddleware, createEventsRouter());
 
   // Contracts listing
   const registry = new (
@@ -220,7 +285,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
     v1Router.use(
       "/cache",
       authMiddleware,
-      createCacheRouter(runtime.cacheManager),
+      createCacheRouter(runtime.cacheManager, adminAuthMiddleware),
     );
   }
 

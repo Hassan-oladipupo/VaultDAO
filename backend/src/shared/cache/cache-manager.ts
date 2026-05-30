@@ -1,6 +1,7 @@
 import { createLogger } from "../logging/logger.js";
 import type { CacheStats, TaggedCacheAdapter } from "./cache.adapter.js";
 import { InMemoryCacheAdapter } from "./cache.adapter.js";
+import { LRUCacheManager, type LRUCacheOptions } from "./lru-cache.manager.js";
 
 const logger = createLogger("cache-manager");
 
@@ -25,9 +26,21 @@ export class CacheManager {
   private readonly primary: TaggedCacheAdapter;
   private readonly fallback: InMemoryCacheAdapter<unknown>;
 
-  constructor(primary?: TaggedCacheAdapter) {
+  constructor(primary?: TaggedCacheAdapter, lruOptions?: LRUCacheOptions) {
     this.fallback = new InMemoryCacheAdapter();
-    this.primary = primary ?? (this.fallback as unknown as TaggedCacheAdapter);
+    this.primary = primary ?? new LRUCacheManager(lruOptions);
+  }
+
+  get<T>(key: string): T | null {
+    return this.primary.get(key) as T | null;
+  }
+
+  set<T>(key: string, value: T, ttlMs?: number): void {
+    (this.primary as TaggedCacheAdapter<T>).set(key, value, ttlMs);
+  }
+
+  invalidate(pattern: string): number {
+    return this.invalidatePattern(pattern);
   }
 
   // ── Cache-aside ─────────────────────────────────────────────────────────────
@@ -61,13 +74,15 @@ export class CacheManager {
     this.fallback.deleteByPrefix(tag);
   }
 
-  invalidatePattern(pattern: string): void {
+  invalidatePattern(pattern: string): number {
+    let deleted = 0;
     try {
-      this.primary.invalidatePattern(pattern);
+      deleted = this.primary.invalidatePattern(pattern);
     } catch (err) {
       logger.warn("pattern invalidation error", { pattern, error: String(err) });
     }
     this.fallback.deleteByPrefix(pattern.replace(/\*/g, ""));
+    return deleted;
   }
 
   // ── Event-driven invalidation hooks ─────────────────────────────────────────
@@ -92,7 +107,15 @@ export class CacheManager {
     };
   }
 
+  resetMetrics(): void {
+    this.primary.resetStats?.();
+    this.fallback.resetStats();
+  }
+
   destroy(): void {
+    if ("destroy" in this.primary && typeof this.primary.destroy === "function") {
+      this.primary.destroy();
+    }
     this.fallback.destroy();
   }
 }

@@ -172,11 +172,7 @@ export function getDueWithLookaheadController(
   };
 }
 
-/**
- * Get overdue recurring payments sorted by most-overdue first
- * GET /api/v1/recurring/overdue?limit=10&offset=0
- */
-export function getOverdueRecurringController(
+export function getDueRecurringController(
   service: RecurringIndexerService,
   cache?: CacheAdapter<unknown>,
 ): RequestHandler {

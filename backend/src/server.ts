@@ -97,6 +97,26 @@ export async function startServer(
     "Total background job executions",
     "counter",
   );
+  metricsRegistry.register(
+    "vaultdao_cache_hits_total",
+    "Total cache hits",
+    "gauge",
+  );
+  metricsRegistry.register(
+    "vaultdao_cache_misses_total",
+    "Total cache misses",
+    "gauge",
+  );
+  metricsRegistry.register(
+    "vaultdao_cache_hit_rate",
+    "Cache hit rate as a ratio from 0 to 1",
+    "gauge",
+  );
+  metricsRegistry.register(
+    "vaultdao_cache_miss_rate",
+    "Cache miss rate as a ratio from 0 to 1",
+    "gauge",
+  );
 
   const jobManager = new JobManager(metricsRegistry);
 
