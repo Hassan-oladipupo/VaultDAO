@@ -132,8 +132,6 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   // Request logging middleware (after request ID so requestId is available)
   app.use(createRequestLogger());
 
-  app.use(express.json({ limit: env.requestBodyLimit }));
-
   const authMiddleware = createAuthMiddleware(env.apiKey);
   const adminAuthMiddleware = requireApiKey(env.apiKey);
 
@@ -220,6 +218,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   const registry = new (
     await import("./modules/contracts/contract-registry.js")
   ).default(env);
+
   // Sync lastIndexedLedger from running pollers
   if (runtime.eventPollingServices) {
     const ids =
@@ -234,13 +233,77 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
       }
     }
   }
-  v1Router.use("/contracts", createContractsRouter(registry, adminAuthMiddleware));
+
+  const v1Router = express.Router();
+
+  v1Router.use("/status", createStatusRouter(env, runtime));
+  v1Router.use("/metrics", createMetricsRouter(runtime, adminAuthMiddleware));
+  v1Router.use("/health", createDetailedHealthRouter(env, runtime));
+
+  v1Router.get("/admin/config", adminAuthMiddleware, (_req, res) => {
+    success(res, {
+      nodeEnv: env.nodeEnv,
+      stellarNetwork: env.stellarNetwork,
+      sorobanRpcUrl: env.sorobanRpcUrl,
+      horizonUrl: env.horizonUrl,
+      websocketUrl: env.websocketUrl,
+      contractId: env.contractId,
+      contractIds: env.contractIds,
+      indexingParallelism: env.indexingParallelism,
+      eventPollingEnabled: env.eventPollingEnabled,
+      eventPollingIntervalMs: env.eventPollingIntervalMs,
+      duePaymentsJobEnabled: env.duePaymentsJobEnabled,
+      duePaymentsJobIntervalMs: env.duePaymentsJobIntervalMs,
+      cursorCleanupJobEnabled: env.cursorCleanupJobEnabled,
+      cursorCleanupJobIntervalMs: env.cursorCleanupJobIntervalMs,
+      cursorRetentionDays: env.cursorRetentionDays,
+      corsOrigin: env.corsOrigin,
+      requestBodyLimit: env.requestBodyLimit,
+      notificationsRequestBodyLimit: env.NOTIFICATIONS_REQUEST_BODY_LIMIT,
+      snapshotsRequestBodyLimit: env.SNAPSHOTS_REQUEST_BODY_LIMIT,
+      webhooksRequestBodyLimit: env.WEBHOOKS_REQUEST_BODY_LIMIT,
+      rateLimitEnabled: env.rateLimitEnabled,
+      rateLimitProposalsPerMin: env.rateLimitProposalsPerMin,
+      rateLimitExecutePerMin: env.rateLimitExecutePerMin,
+      rateLimitDefaultPerMin: env.rateLimitDefaultPerMin,
+    });
+  });
+
+  v1Router.use(
+    "/contracts",
+    createContractsRouter(registry, adminAuthMiddleware),
+  );
+
+  if (runtime.notificationQueue) {
+    v1Router.use(
+      "/notifications",
+      authMiddleware,
+      express.json({ limit: env.NOTIFICATIONS_REQUEST_BODY_LIMIT }),
+      createNotificationsRouter(runtime.notificationQueue),
+    );
+  }
+
+  if (runtime.webhookDeliveryService) {
+    v1Router.use(
+      "/webhooks",
+      authMiddleware,
+      express.json({ limit: env.WEBHOOKS_REQUEST_BODY_LIMIT }),
+      createWebhookRouter(runtime.webhookDeliveryService),
+    );
+  }
 
   v1Router.use(
     "/snapshots",
     authMiddleware,
-    createSnapshotRouter(runtime.snapshotService, adminAuthMiddleware, runtime.snapshotDiffService),
+    express.json({ limit: env.SNAPSHOTS_REQUEST_BODY_LIMIT }),
+    createSnapshotRouter(
+      runtime.snapshotService,
+      adminAuthMiddleware,
+      runtime.snapshotDiffService,
+    ),
   );
+
+  v1Router.use(express.json({ limit: env.requestBodyLimit }));
 
   v1Router.use(
     "/proposals",
@@ -263,23 +326,11 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
     createTransactionsRouter(runtime.transactionsService, env.contractId),
   );
 
-  v1Router.use("/audit", authMiddleware, createAuditRouter(env.sorobanRpcUrl, adminAuthMiddleware));
-
-  if (runtime.notificationQueue) {
-    v1Router.use(
-      "/notifications",
-      authMiddleware,
-      createNotificationsRouter(runtime.notificationQueue),
-    );
-  }
-
-  if (runtime.webhookDeliveryService) {
-    v1Router.use(
-      "/webhooks",
-      authMiddleware,
-      createWebhookRouter(runtime.webhookDeliveryService),
-    );
-  }
+  v1Router.use(
+    "/audit",
+    authMiddleware,
+    createAuditRouter(env.sorobanRpcUrl, adminAuthMiddleware),
+  );
 
   if (runtime.cacheManager) {
     v1Router.use(
@@ -302,7 +353,9 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
     futurenet: "Test SDF Future Network ; October 2022",
     standalone: "Standalone Network ; Latitude 0",
   };
-  const passphrase = networkPassphrases[env.stellarNetwork?.toLowerCase() ?? "testnet"] ?? networkPassphrases.testnet;
+  const passphrase =
+    networkPassphrases[env.stellarNetwork?.toLowerCase() ?? "testnet"] ??
+    networkPassphrases.testnet;
 
   v1Router.use(
     "/vault",
