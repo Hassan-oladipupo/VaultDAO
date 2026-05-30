@@ -50,6 +50,59 @@ test("transformRawRecurringPayment sets CANCELLED when is_active is false", () =
   assert(normalized.events.includes(RecurringEvent.CANCELLED));
 });
 
+// Tests for computed status fields
+
+test("transformRawRecurringPayment computes overdue status correctly", () => {
+  const normalized = transformRawRecurringPayment(
+    { ...baseRaw, next_payment_ledger: "3" },
+    "C1",
+    5, // current ledger is 5, so 3 < 5 means overdue
+  );
+
+  assert.equal(normalized.computedStatus, "overdue");
+  assert.equal(normalized.ledgersUntilDue, -2); // 3 - 5 = -2
+  assert.equal(normalized.missedPayments, 0); // (5-3) / 1000 = 0.002 -> floor = 0
+});
+
+// Test with larger interval and more missed payments
+test("transformRawRecurringPayment computes missed payments correctly", () => {
+  const normalized = transformRawRecurringPayment(
+    { ...baseRaw, next_payment_ledger: "1", interval: "2" },
+    "C1",
+    7, // current ledger is 7, next is 1, interval is 2
+  );
+
+  assert.equal(normalized.computedStatus, "overdue");
+  assert.equal(normalized.ledgersUntilDue, -6); // 1 - 7 = -6
+  assert.equal(normalized.missedPayments, 3); // (7-1) / 2 = 3
+});
+
+// Test active status
+test("transformRawRecurringPayment computes active status correctly", () => {
+  const normalized = transformRawRecurringPayment(
+    { ...baseRaw, next_payment_ledger: "10" },
+    "C1",
+    5, // current ledger is 5, next is 10, so active
+  );
+
+  assert.equal(normalized.computedStatus, "active");
+  assert.equal(normalized.ledgersUntilDue, 5); // 10 - 5 = 5
+  assert.equal(normalized.missedPayments, 0);
+});
+
+// Test stopped status
+test("transformRawRecurringPayment computes stopped status correctly", () => {
+  const normalized = transformRawRecurringPayment(
+    { ...baseRaw, is_active: false },
+    "C1",
+    5,
+  );
+
+  assert.equal(normalized.computedStatus, "stopped");
+  assert.equal(normalized.ledgersUntilDue, 0);
+  assert.equal(normalized.missedPayments, 0);
+});
+
 test("transformRawRecurringPayment adds EXECUTED event when payment_count increases", () => {
   const existing = transformRawRecurringPayment(baseRaw, "C1", 1);
   const raw = { ...baseRaw, payment_count: "1", next_payment_ledger: "1" };
@@ -178,6 +231,9 @@ test("getPayments supports combined filters and returns pagination metadata", as
       lastUpdatedAt: now,
       ledger: 50,
     },
+    computedStatus: "active",
+    ledgersUntilDue: 0,
+    missedPayments: 0,
   });
   await storage.save({
     paymentId: "p-2",
@@ -198,6 +254,9 @@ test("getPayments supports combined filters and returns pagination metadata", as
       lastUpdatedAt: now,
       ledger: 51,
     },
+    computedStatus: "active",
+    ledgersUntilDue: 0,
+    missedPayments: 0,
   });
   await storage.save({
     paymentId: "p-3",
@@ -218,6 +277,9 @@ test("getPayments supports combined filters and returns pagination metadata", as
       lastUpdatedAt: now,
       ledger: 52,
     },
+    computedStatus: "active",
+    ledgersUntilDue: 0,
+    missedPayments: 0,
   });
 
   const filtered = await service.getPayments(
@@ -260,6 +322,9 @@ test("getDuePaymentsAtLedger returns only payments ready for execution", async (
       lastUpdatedAt: now,
       ledger: 10,
     },
+    computedStatus: "active",
+    ledgersUntilDue: 0,
+    missedPayments: 0,
   });
   await storage.save({
     paymentId: "due-status",
@@ -280,6 +345,9 @@ test("getDuePaymentsAtLedger returns only payments ready for execution", async (
       lastUpdatedAt: now,
       ledger: 11,
     },
+    computedStatus: "active",
+    ledgersUntilDue: 0,
+    missedPayments: 0,
   });
   await storage.save({
     paymentId: "not-due",
@@ -300,6 +368,9 @@ test("getDuePaymentsAtLedger returns only payments ready for execution", async (
       lastUpdatedAt: now,
       ledger: 30,
     },
+    computedStatus: "active",
+    ledgersUntilDue: 0,
+    missedPayments: 0,
   });
   await storage.save({
     paymentId: "cancelled",
@@ -320,6 +391,9 @@ test("getDuePaymentsAtLedger returns only payments ready for execution", async (
       lastUpdatedAt: now,
       ledger: 5,
     },
+    computedStatus: "stopped",
+    ledgersUntilDue: 0,
+    missedPayments: 0,
   });
 
   const due = await service.getDuePaymentsAtLedger(12);

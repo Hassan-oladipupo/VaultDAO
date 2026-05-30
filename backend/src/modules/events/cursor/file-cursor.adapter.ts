@@ -57,10 +57,21 @@ export class FileCursorAdapter implements CursorStorage {
    */
   public async saveCursor(cursor: EventCursor): Promise<void> {
     const tempPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}`;
+    const content = JSON.stringify(cursor, null, 2);
     try {
-      const content = JSON.stringify(cursor, null, 2);
       writeFileSync(tempPath, content, "utf8");
-      renameSync(tempPath, this.filePath);
+      try {
+        renameSync(tempPath, this.filePath);
+      } catch (renameError) {
+        const code = (renameError as NodeJS.ErrnoException).code;
+        // On Windows, antivirus or indexers can transiently lock target files.
+        if (code === "EPERM" || code === "EACCES" || code === "EXDEV") {
+          writeFileSync(this.filePath, content, "utf8");
+          rmSync(tempPath, { force: true });
+        } else {
+          throw renameError;
+        }
+      }
     } catch (error) {
       try {
         rmSync(tempPath, { force: true });

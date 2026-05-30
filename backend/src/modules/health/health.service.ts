@@ -46,6 +46,7 @@ export interface ReadinessPayload {
     readonly app: DependencyReadiness;
     readonly rpc: DependencyReadiness;
     readonly websocket: DependencyReadiness;
+    readonly redis: DependencyReadiness;
     readonly storage: DependencyReadiness;
   };
 }
@@ -125,6 +126,16 @@ function buildDependencyChecks(env: BackendEnv): ReadinessPayload["checks"] {
       details: hasWebsocketUrl
         ? "Websocket endpoint URL is configured for future realtime features, but no live connectivity check is performed yet."
         : "Websocket endpoint URL is not configured yet, so realtime features remain optional and inactive.",
+    },
+    redis: {
+      name: "redis",
+      required: false,
+      status: env.rateLimitRedisUrl ? "ready" : "not_ready",
+      configured: !!env.rateLimitRedisUrl,
+      checked: false,
+      details: env.rateLimitRedisUrl
+        ? "Redis URL is configured for rate limiting, but no live connectivity check is performed yet."
+        : "Redis URL is not configured, so distributed rate limiting is disabled.",
     },
     storage: {
       name: "storage",

@@ -152,7 +152,7 @@ test("verifyAuditChain: broken prev_hash link detected", () => {
   const e1 = makeEntry(1, "0");
   const e2 = makeEntry(2, e1.hash);
   // e3 claims wrong prev_hash
-  const e3bad: AuditEntry = { ...makeEntry(3, "wrong_prev"), prev_hash: "wrong_prev" };
+  const e3bad: AuditEntry = { ...makeEntry(3, "999999"), prev_hash: "999999" };
   e3bad.hash = computeTestHash(e3bad);
 
   const result = verifyAuditChain([e1, e2, e3bad]);

@@ -139,6 +139,27 @@ export function transformRawRecurringPayment(
     events.push(RecurringEvent.EXECUTED);
   }
 
+  // Calculate computed fields
+  const nextPaymentLedger = Number(raw.next_payment_ledger);
+  const currentLedger = ledger;
+  const interval = Number(raw.interval);
+  
+  let computedStatus: "active" | "paused" | "stopped" | "overdue" = "active";
+  let ledgersUntilDue = nextPaymentLedger - currentLedger;
+  let missedPayments = 0;
+  
+  if (!raw.is_active) {
+    computedStatus = "stopped";
+  } else if (nextPaymentLedger < currentLedger) {
+    computedStatus = "overdue";
+    // Calculate missed payments: floor((currentLedger - nextPaymentLedger) / interval)
+    missedPayments = Math.floor((currentLedger - nextPaymentLedger) / interval);
+  } else if (nextPaymentLedger === currentLedger) {
+    computedStatus = "active";
+  } else {
+    computedStatus = "active";
+  }
+
   return {
     paymentId: raw.id,
     proposer: raw.proposer,
@@ -158,6 +179,9 @@ export function transformRawRecurringPayment(
       lastUpdatedAt: now,
       ledger,
     },
+    computedStatus,
+    ledgersUntilDue,
+    missedPayments,
   };
 }
 
@@ -368,17 +392,52 @@ export class RecurringIndexerService {
 
   /**
    * Get paginated indexed payments with optional filtering.
+   * Enriches payments with computed status fields using current ledger.
    */
   public async getPayments(
     filter?: RecurringFilter,
     pagination?: { offset: number; limit: number },
+    currentLedger?: number,
   ): Promise<{
     items: NormalizedRecurringPayment[];
     total: number;
     offset: number;
     limit: number;
   }> {
-    const all = await this.storage.getAll(filter);
+    let all = await this.storage.getAll(filter);
+    
+    // Enrich payments with computed status if current ledger is provided
+    if (currentLedger !== undefined) {
+      all = all.map(payment => {
+        // Calculate computed fields based on current ledger
+        const nextPaymentLedger = payment.nextPaymentLedger;
+        const interval = payment.intervalLedgers;
+        
+        let computedStatus: "active" | "paused" | "stopped" | "overdue" = "active";
+        let ledgersUntilDue = nextPaymentLedger - currentLedger;
+        let missedPayments = 0;
+        
+        if (!payment.status || payment.status === RecurringStatus.CANCELLED) {
+          computedStatus = "stopped";
+        } else if (nextPaymentLedger < currentLedger) {
+          computedStatus = "overdue";
+          // Calculate missed payments: floor((currentLedger - nextPaymentLedger) / interval)
+          missedPayments = Math.floor((currentLedger - nextPaymentLedger) / interval);
+        } else if (nextPaymentLedger === currentLedger) {
+          computedStatus = "active";
+        } else {
+          computedStatus = "active";
+        }
+        
+        return {
+          ...payment,
+          computedStatus,
+          ledgersUntilDue,
+          missedPayments,
+        };
+      });
+    }
+    
     const offset = pagination?.offset ?? 0;
     const limit = pagination?.limit ?? 50;
     return {

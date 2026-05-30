@@ -42,6 +42,16 @@ export function getReadinessController(
   runtime: BackendRuntime,
 ): RequestHandler {
   return (_request, response) => {
+    // During shutdown, always return 503
+    if (runtime.lifecycleManager?.isShuttingDown()) {
+      error(
+        response,
+        { message: "Service is shutting down", status: 503 },
+        { exposeDetails: false },
+      );
+      return;
+    }
+    
     const payload = buildReadinessPayload(env, runtime);
     if (payload.ready) {
       success(response, payload);

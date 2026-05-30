@@ -12,11 +12,12 @@ export interface ApiErrorResponse {
   error: {
     message: string;
     code: ErrorCode;
-    details?: any;
+    details?: unknown;
     requestId?: string;
   };
-  meta?: {
-    requestId?: string;
+  meta: {
+    requestId: string;
+    timestamp: string;
   };
 }
 
@@ -65,10 +66,14 @@ export function error(
     console.error("[API Error]", err);
   }
 
-  const body: ApiErrorResponse = { success: false, error: safeError };
-  if (requestId) {
-    body.meta = { requestId };
-  }
+  const body: ApiErrorResponse = { 
+    success: false, 
+    error: safeError,
+    meta: {
+      requestId: requestId ?? "",
+      timestamp: new Date().toISOString(),
+    }
+  };
 
   res.status(status)
     .set("Content-Type", "application/json")

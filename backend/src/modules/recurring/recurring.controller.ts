@@ -13,8 +13,11 @@ import { RecurringStatus } from "./types.js";
 /**
  * Get all recurring payments with optional status filter and pagination
  */
+import type { CacheAdapter } from "../../shared/cache/cache.adapter.js";
+
 export function getAllRecurringController(
   service: RecurringIndexerService,
+  cache?: CacheAdapter<unknown>,
 ): RequestHandler {
   return async (request, response) => {
     const pagination = validatePagination(request, response);
@@ -32,7 +35,18 @@ export function getAllRecurringController(
     const proposer = validateOptionalString(request, "proposer");
     const recipient = validateOptionalString(request, "recipient");
 
+    // Create cache key
+    const cacheKey = `recurring:${contractId || 'all'}:${status || 'all'}:${pagination.offset}:${pagination.limit}`;
+
     try {
+      if (cache) {
+        const cached = cache.get(cacheKey);
+        if (cached !== null) {
+          success(response, cached);
+          return;
+        }
+      }
+
       const result = await service.getPayments(
         {
           contractId,
@@ -43,12 +57,18 @@ export function getAllRecurringController(
         pagination,
       );
 
-      success(response, {
+      const payload = {
         data: result.items,
         total: result.total,
         offset: result.offset,
         limit: result.limit,
-      });
+      };
+
+      if (cache) {
+        cache.set(cacheKey, payload, 30_000); // 30 seconds TTL
+      }
+
+      success(response, payload);
     } catch (err) {
       error(response, {
         message: "Failed to fetch recurring payments",
@@ -65,10 +85,22 @@ export function getAllRecurringController(
  */
 export function getRecurringByIdController(
   service: RecurringIndexerService,
+  cache?: CacheAdapter<unknown>,
 ): RequestHandler {
   return async (request, response) => {
     try {
       const paymentId = String(request.params.paymentId);
+
+      // Create cache key
+      const cacheKey = `recurring:${paymentId}`;
+
+      if (cache) {
+        const cached = cache.get(cacheKey);
+        if (cached !== null) {
+          success(response, cached);
+          return;
+        }
+      }
 
       const payment = await service.getPayment(paymentId);
       if (!payment) {
@@ -78,6 +110,10 @@ export function getRecurringByIdController(
           code: ErrorCode.NOT_FOUND,
         });
         return;
+      }
+
+      if (cache) {
+        cache.set(cacheKey, payment, 30_000); // 30 seconds TTL
       }
 
       success(response, payment);
@@ -136,34 +172,52 @@ export function getDueWithLookaheadController(
   };
 }
 
+export function getDueRecurringController(
   service: RecurringIndexerService,
+  cache?: CacheAdapter<unknown>,
 ): RequestHandler {
   return async (request, response) => {
     const pagination = validatePagination(request, response);
     if (!pagination) return;
 
-    const currentLedger = validateOptionalInteger(request, response, "currentLedger", { min: 0 });
-    if (currentLedger === null) return;
-
+    // Get current ledger from indexer status
+    const { lastLedgerProcessed } = service.getStatus();
+    
+    // Create cache key
+    const cacheKey = `recurring:overdue:${pagination.offset}:${pagination.limit}`;
+    
     try {
-      const payments =
-        currentLedger === undefined
-          ? await service.getDuePayments()
-          : await service.getDuePaymentsAtLedger(currentLedger);
-      const data = payments.slice(
-        pagination.offset,
-        pagination.offset + pagination.limit,
-      );
+      if (cache) {
+        const cached = cache.get(cacheKey);
+        if (cached !== null) {
+          success(response, cached);
+          return;
+        }
+      }
 
-      success(response, {
+      // Get all payments and filter for overdue ones
+      const all = await service.getPayments(undefined, undefined, lastLedgerProcessed);
+      const overduePayments = all.items.filter(payment => 
+        payment.computedStatus === "overdue"
+      ).sort((a, b) => a.ledgersUntilDue - b.ledgersUntilDue); // Most overdue first (most negative)
+      
+      const data = overduePayments.slice(pagination.offset, pagination.offset + pagination.limit);
+      
+      const payload = {
         data,
-        total: payments.length,
+        total: overduePayments.length,
         offset: pagination.offset,
         limit: pagination.limit,
-      });
+      };
+      
+      if (cache) {
+        cache.set(cacheKey, payload, 30_000); // 30 seconds TTL
+      }
+      
+      success(response, payload);
     } catch (err) {
       error(response, {
-        message: "Failed to fetch due payments",
+        message: "Failed to fetch overdue payments",
         status: 500,
         code: ErrorCode.INTERNAL_ERROR,
         details: err instanceof Error ? err.message : undefined,
@@ -171,6 +225,62 @@ export function getDueWithLookaheadController(
     }
   };
 }
+
+/**
+ * Get recurring payment execution history
+ * GET /api/v1/recurring/:id/history
+ */
+export function getRecurringHistoryController(
+  service: RecurringIndexerService,
+  cache?: CacheAdapter<unknown>,
+): RequestHandler {
+  return async (request, response) => {
+    try {
+      const paymentId = String(request.params.paymentId);
+
+      // Create cache key
+      const cacheKey = `recurring:${paymentId}:history`;
+
+      if (cache) {
+        const cached = cache.get(cacheKey);
+        if (cached !== null) {
+          success(response, cached);
+          return;
+        }
+      }
+
+      const payment = await service.getPayment(paymentId);
+      if (!payment) {
+        error(response, {
+          message: "Payment not found",
+          status: 404,
+          code: ErrorCode.NOT_FOUND,
+        });
+        return;
+      }
+
+      // Return the events array as history
+      const payload = {
+        data: payment.events,
+        total: payment.events.length,
+      };
+
+      if (cache) {
+        cache.set(cacheKey, payload, 30_000); // 30 seconds TTL
+      }
+
+      success(response, payload);
+    } catch (err) {
+      error(response, {
+        message: "Failed to fetch payment history",
+        status: 500,
+        code: ErrorCode.INTERNAL_ERROR,
+        details: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+}
+
 
 /**
  * Trigger a manual sync cycle.

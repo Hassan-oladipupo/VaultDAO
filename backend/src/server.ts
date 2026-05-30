@@ -34,6 +34,8 @@ import { SqliteStorageAdapter } from "./shared/storage/index.js";
 import { TransactionsService } from "./modules/transactions/transactions.service.js";
 import type { Server } from "node:http";
 
+import { LifecycleManager } from "./app/lifecycle/lifecycle-manager.js";
+
 export interface BackendRuntime {
   readonly startedAt: string;
   readonly eventPollingService: EventPollingService | EventPollingService[];
@@ -54,6 +56,7 @@ export interface BackendRuntime {
   readonly dbCursorAdapter?: DatabaseCursorAdapter;
   readonly snapshotDiffService?: SnapshotDiffService;
   readonly webhookDeliveryService?: WebhookDeliveryService;
+  readonly lifecycleManager: LifecycleManager;
 }
 
 export interface BackendServer {
@@ -64,6 +67,7 @@ export interface BackendServer {
 export async function startServer(
   env: BackendEnv = loadEnv(),
   notificationQueue?: NotificationQueue,
+  lifecycleManager?: LifecycleManager,
 ): Promise<BackendServer> {
   const metricsRegistry = new MetricsRegistry();
 
@@ -92,6 +96,26 @@ export async function startServer(
     "vaultdao_job_executions_total",
     "Total background job executions",
     "counter",
+  );
+  metricsRegistry.register(
+    "vaultdao_cache_hits_total",
+    "Total cache hits",
+    "gauge",
+  );
+  metricsRegistry.register(
+    "vaultdao_cache_misses_total",
+    "Total cache misses",
+    "gauge",
+  );
+  metricsRegistry.register(
+    "vaultdao_cache_hit_rate",
+    "Cache hit rate as a ratio from 0 to 1",
+    "gauge",
+  );
+  metricsRegistry.register(
+    "vaultdao_cache_miss_rate",
+    "Cache miss rate as a ratio from 0 to 1",
+    "gauge",
   );
 
   const jobManager = new JobManager(metricsRegistry);
@@ -128,6 +152,44 @@ export async function startServer(
     proposalActivityPersistence,
   );
 
+  // Create LifecycleManager if not provided
+  if (!lifecycleManager) {
+    lifecycleManager = new LifecycleManager(server, 10_000); // 10s shutdown timeout
+    
+    // Register shutdown hooks
+    lifecycleManager.onShutdown({
+      // "job-manager" hook stops all background jobs (EventPollingService,
+      // RecurringIndexerService, ProposalActivityConsumer) before cache teardown.
+      // Must be registered before lifecycle.initialize() — LifecycleManager
+      // executes hooks in LIFO order so this runs first.
+      name: "job-manager",
+      handler: async () => {
+        await jobManager.stopAll();
+      },
+    });
+    
+    lifecycleManager.onShutdown({
+      name: "scheduled-job-runner",
+      handler: () => {
+        // No scheduled job runner in server.ts context
+      },
+    });
+    
+    lifecycleManager.onShutdown({
+      name: "notification-queue",
+      handler: () => {
+        // No notification queue in server.ts context
+      },
+    });
+    
+    lifecycleManager.onShutdown({
+      name: "realtime-server",
+      handler: () => {
+        // No realtime server in server.ts context
+      },
+    });
+  }
+  
   const runtime: any = {
     startedAt: new Date().toISOString(),
     recurringIndexerService,
@@ -142,6 +204,7 @@ export async function startServer(
     notificationQueue: priorityNotificationQueue,
     webhookDeliveryService,
     cacheManager,
+    lifecycleManager,
   };
 
   const app = await createApp(env, runtime);
@@ -152,6 +215,23 @@ export async function startServer(
       `listening on http://${env.host}:${env.port} for ${env.stellarNetwork}`,
     );
   });
+
+  // Create LifecycleManager if not provided
+  if (!lifecycleManager) {
+    lifecycleManager = new LifecycleManager(server, 10_000); // 10s shutdown timeout
+    
+    // Register shutdown hooks
+    lifecycleManager.onShutdown({
+      // "job-manager" hook stops all background jobs (EventPollingService,
+      // RecurringIndexerService, ProposalActivityConsumer) before cache teardown.
+      // Must be registered before lifecycle.initialize() — LifecycleManager
+      // executes hooks in LIFO order so this runs first.
+      name: "job-manager",
+      handler: async () => {
+        await jobManager.stopAll();
+      },
+    });
+  }
 
   const wsServer = new EventWebSocketServer(server);
   runtime.wsServer = wsServer;

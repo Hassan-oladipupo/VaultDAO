@@ -1,14 +1,115 @@
-import { z } from "zod";
+export interface BackendEnv {
+  readonly port: number;
+  readonly host: string;
+  readonly nodeEnv: string;
+  readonly stellarNetwork: string;
+  readonly sorobanRpcUrl: string;
+  readonly horizonUrl: string;
+  readonly contractId: string;
+  readonly contractIds: string[];
+  readonly indexingParallelism: number;
+  readonly websocketUrl: string;
+  readonly eventPollingIntervalMs: number;
+  readonly eventPollingEnabled: boolean;
+  readonly duePaymentsJobEnabled: boolean;
+  readonly duePaymentsJobIntervalMs: number;
+  readonly cursorCleanupJobEnabled: boolean;
+  readonly cursorCleanupJobIntervalMs: number;
+  readonly cursorRetentionDays: number;
+  readonly corsOrigin: string[];
+  readonly requestBodyLimit: string;
+  readonly apiKey?: string;
+  readonly cursorStorageType: "file" | "database";
+  readonly databasePath: string;
+  // Rate limiting
+  readonly rateLimitEnabled?: boolean;
+  readonly rateLimitRedisUrl?: string;
+  readonly redisTls?: boolean;
+  /** Max requests per minute for /api/v1/proposals */
+  readonly rateLimitProposalsPerMin?: number;
+  /** Max requests per minute for /api/v1/execute */
+  readonly rateLimitExecutePerMin?: number;
+  /** Default max requests per minute for all other endpoints */
+  readonly rateLimitDefaultPerMin?: number;
+}
 
 const DEFAULT_CONTRACT_ID =
   "CDXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
 const MIN_POLLING_INTERVAL_MS = 1000;
 
-function parseBoolean(value: unknown): boolean {
-  if (typeof value === "boolean") return value;
-  if (typeof value !== "string") return false;
-  const normalized = value.trim().toLowerCase();
-  return normalized === "true" || normalized === "1" || normalized === "yes";
+function validateCorsOriginValue(
+  value: string,
+  nodeEnv: string,
+  issues: string[],
+): void {
+  if (value === "*") {
+    return;
+  }
+
+  try {
+    const parsed = new URL(value);
+
+    if (value.endsWith("/")) {
+      issues.push(
+        `CORS_ORIGIN entries must not include a trailing slash. Received "${value}".`,
+      );
+      return;
+    }
+
+    if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      issues.push(
+        `CORS_ORIGIN entries must be origin-only URLs (no path, query, or hash). Received "${value}".`,
+      );
+      return;
+    }
+
+    if (parsed.protocol === "https:") {
+      return;
+    }
+
+    if (parsed.protocol === "http:" && nodeEnv !== "production") {
+      return;
+    }
+
+    if (parsed.protocol === "http:" && nodeEnv === "production") {
+      issues.push(
+        `CORS_ORIGIN entry "${value}" uses http:// which is not allowed in production.`,
+      );
+      return;
+    }
+
+    issues.push(
+      `CORS_ORIGIN entry "${value}" must use https:// (or http:// in non-production).`,
+    );
+  } catch {
+    issues.push(`CORS_ORIGIN entry "${value}" must be a valid URL or "*".`);
+  }
+}
+
+function validateCorsOrigins(
+  origins: string[],
+  nodeEnv: string,
+  issues: string[],
+): void {
+  if (origins.length === 0) {
+    return;
+  }
+
+  const hasWildcard = origins.includes("*");
+  if (hasWildcard && origins.length > 1) {
+    issues.push(
+      'CORS_ORIGIN cannot combine "*" with specific origins. Use either "*" or explicit origins.',
+    );
+  }
+
+  for (const origin of origins) {
+    validateCorsOriginValue(origin, nodeEnv, issues);
+  }
+}
+
+function readValue(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  return value ? value : undefined;
 }
 
 function parseNumber(value: unknown): number | undefined {
@@ -234,10 +335,145 @@ function formatZodErrorMessage(error: z.ZodError) {
 }
 
 export function loadEnv(): BackendEnv {
-  const parsed = BackendEnvSchema.safeParse(process.env);
-  if (!parsed.success) {
-    throw new Error(formatZodErrorMessage(parsed.error));
+  const issues: string[] = [];
+
+  const port = readPort("PORT", 8787, issues);
+  const host = readString("HOST", "0.0.0.0");
+  const nodeEnv = readString("NODE_ENV", "development");
+  const stellarNetwork = readString("STELLAR_NETWORK", "testnet");
+  const sorobanRpcUrl = readString(
+    "SOROBAN_RPC_URL",
+    "https://soroban-testnet.stellar.org",
+  );
+  const horizonUrl = readString(
+    "HORIZON_URL",
+    "https://horizon-testnet.stellar.org",
+  );
+  const contractId = readString("CONTRACT_ID", DEFAULT_CONTRACT_ID);
+  const contractIds = readCommaSeparatedString("CONTRACT_IDS", []);
+  const indexingParallelism = readPort("INDEXING_PARALLELISM", 4, issues);
+  const websocketUrl = readString("VITE_WS_URL", "ws://localhost:8080");
+  const eventPollingIntervalMs = readPort(
+    "EVENT_POLLING_INTERVAL_MS",
+    10000,
+    issues,
+  );
+  const eventPollingEnabled =
+    readString("EVENT_POLLING_ENABLED", "true") === "true";
+  const duePaymentsJobEnabled =
+    readString("DUE_PAYMENTS_JOB_ENABLED", "true") === "true";
+  const duePaymentsJobIntervalMs = readPort(
+    "DUE_PAYMENTS_JOB_INTERVAL_MS",
+    60000,
+    issues,
+  );
+  const cursorCleanupJobEnabled =
+    readString("CURSOR_CLEANUP_JOB_ENABLED", "true") === "true";
+  const cursorCleanupJobIntervalMs = readPort(
+    "CURSOR_CLEANUP_JOB_INTERVAL_MS",
+    86400000,
+    issues,
+  );
+  const cursorRetentionDays = readPort("CURSOR_RETENTION_DAYS", 30, issues);
+  const corsOrigin = readCommaSeparatedString(
+    "CORS_ORIGIN",
+    nodeEnv === "production" ? [] : ["*"],
+  );
+  const requestBodyLimit = readString("REQUEST_BODY_LIMIT", "10kb");
+  const apiKey = readValue("API_KEY");
+  const cursorStorageType = readString("CURSOR_STORAGE_TYPE", "file") as
+    | "file"
+    | "database";
+  const databasePath = readString("DATABASE_PATH", "./vaultdao.sqlite");
+  const rateLimitEnabled = readString("RATE_LIMIT_ENABLED", "true") === "true";
+  const rateLimitRedisUrl = readValue("RATE_LIMIT_REDIS_URL");
+  const redisTls = readString("REDIS_TLS", "false") === "true";
+  const rateLimitProposalsPerMin = readPort(
+    "RATE_LIMIT_PROPOSALS_PER_MIN",
+    100,
+    issues,
+  );
+  const rateLimitExecutePerMin = readPort(
+    "RATE_LIMIT_EXECUTE_PER_MIN",
+    10,
+    issues,
+  );
+  const rateLimitDefaultPerMin = readPort(
+    "RATE_LIMIT_DEFAULT_PER_MIN",
+    60,
+    issues,
+  );
+
+  validateRequiredString("HOST", host, issues);
+  validateAllowedValue("NODE_ENV", nodeEnv, ALLOWED_NODE_ENVS, issues);
+  validateAllowedValue(
+    "STELLAR_NETWORK",
+    stellarNetwork,
+    ALLOWED_STELLAR_NETWORKS,
+    issues,
+  );
+  validateUrl("SOROBAN_RPC_URL", sorobanRpcUrl, ["http:", "https:"], issues);
+  validateUrl("HORIZON_URL", horizonUrl, ["http:", "https:"], issues);
+  validateUrl("VITE_WS_URL", websocketUrl, ["ws:", "wss:"], issues);
+  
+  if (rateLimitRedisUrl) {
+    validateUrl("RATE_LIMIT_REDIS_URL", rateLimitRedisUrl, ["redis:", "rediss:", "redis://", "rediss://"], issues);
   }
 
-  return parsed.data;
+  if (eventPollingIntervalMs < MIN_POLLING_INTERVAL_MS) {
+    issues.push(
+      `EVENT_POLLING_INTERVAL_MS must be at least ${MIN_POLLING_INTERVAL_MS}ms to prevent excessive RPC load. Received "${eventPollingIntervalMs}".`,
+    );
+  }
+
+  validateContractId(contractId, nodeEnv, issues);
+  validateAllowedValue(
+    "CURSOR_STORAGE_TYPE",
+    cursorStorageType,
+    ALLOWED_CURSOR_STORAGE_TYPES,
+    issues,
+  );
+
+  if (nodeEnv === "production" && corsOrigin.length === 0) {
+    issues.push("CORS_ORIGIN is required in production environment.");
+  }
+
+  validateCorsOrigins(corsOrigin, nodeEnv, issues);
+
+  if (nodeEnv === "production" && !apiKey) {
+    issues.push("API_KEY is required in production environment.");
+  }
+
+  throwIfInvalid(issues);
+
+  return {
+    port,
+    host,
+    nodeEnv,
+    stellarNetwork,
+    sorobanRpcUrl,
+    horizonUrl,
+    contractId,
+    contractIds,
+    indexingParallelism,
+    websocketUrl,
+    eventPollingIntervalMs,
+    eventPollingEnabled,
+    duePaymentsJobEnabled,
+    duePaymentsJobIntervalMs,
+    cursorCleanupJobEnabled,
+    cursorCleanupJobIntervalMs,
+    cursorRetentionDays,
+    corsOrigin,
+    requestBodyLimit,
+    apiKey,
+    cursorStorageType,
+    databasePath,
+    rateLimitEnabled,
+    rateLimitRedisUrl,
+    redisTls,
+    rateLimitProposalsPerMin,
+    rateLimitExecutePerMin,
+    rateLimitDefaultPerMin,
+  };
 }
