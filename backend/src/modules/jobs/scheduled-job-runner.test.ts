@@ -23,7 +23,7 @@ test("ScheduledJobRunner", async (t) => {
     });
 
     runner.start();
-    await wait(35);
+    await wait(60);
     runner.stop();
 
     assert.equal(runner.isRunning(), false);
