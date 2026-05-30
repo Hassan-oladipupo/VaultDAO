@@ -63,7 +63,7 @@ test("ProposalActivityConsumer flush timer", async (t) => {
   });
 
   await t.test("exponential backoff enforcements", async () => {
-    const initialBackoffMs = 100;
+    const initialBackoffMs = 500;
     const consumer = new ProposalActivityConsumer({
       initialBackoffMs,
       flushIntervalMs: 20,
