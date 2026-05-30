@@ -478,4 +478,71 @@ test("CORS Runtime Allowlist Admin Endpoints", async (t) => {
       });
     });
   });
+
+  await t.test("GET admin allowlist returns current runtime origins", async () => {
+    const app = await createApp(env as any, mockRuntime as any);
+    await new Promise<void>((resolve) => {
+      const server = app.listen(0, "127.0.0.1", async () => {
+        const address = server.address() as any;
+        const port = address.port;
+
+        try {
+          const response = await fetch(
+            `http://127.0.0.1:${port}/api/v1/admin/cors/origins`,
+            {
+              headers: {
+                "X-API-Key": "test-api-key",
+              },
+            },
+          );
+
+          assert.strictEqual(response.status, 200);
+          const body = (await response.json()) as any;
+          assert.deepStrictEqual(body.data.origins, ["https://allowed.com"]);
+        } finally {
+          if (typeof (server as any).closeAllConnections === "function") {
+            (server as any).closeAllConnections();
+          }
+          await new Promise<void>((closeResolve) =>
+            server.close(() => closeResolve()),
+          );
+          resolve();
+        }
+      });
+    });
+  });
+
+  await t.test('dynamic add rejects wildcard when specific origins already exist', async () => {
+    const app = await createApp(env as any, mockRuntime as any);
+    await new Promise<void>((resolve) => {
+      const server = app.listen(0, "127.0.0.1", async () => {
+        const address = server.address() as any;
+        const port = address.port;
+
+        try {
+          const addResponse = await fetch(
+            `http://127.0.0.1:${port}/api/v1/admin/cors/origins`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-API-Key": "test-api-key",
+              },
+              body: JSON.stringify({ origin: "*" }),
+            },
+          );
+
+          assert.strictEqual(addResponse.status, 400);
+        } finally {
+          if (typeof (server as any).closeAllConnections === "function") {
+            (server as any).closeAllConnections();
+          }
+          await new Promise<void>((closeResolve) =>
+            server.close(() => closeResolve()),
+          );
+          resolve();
+        }
+      });
+    });
+  });
 });
