@@ -10,6 +10,7 @@ import { SnapshotNormalizer } from "../snapshots/normalizer.js";
 import { TimeoutError } from "../../shared/http/fetchWithTimeout.js";
 import { SorobanRpcClient } from "../../shared/rpc/soroban-rpc.client.js";
 import type { MetricsRegistry } from "../health/metrics.registry.js";
+import { CircuitBreaker } from "../../shared/http/circuit-breaker.js";
 
 /** Maximum backoff delay: 5 minutes */
 const MAX_BACKOFF_MS = 5 * 60 * 1000;
@@ -55,6 +56,8 @@ export class EventPollingService {
   private readonly MAX_PROCESSED_IDS = 1000;
   private readonly rpcClient: SorobanRpcClient;
 
+  private readonly circuitBreaker: CircuitBreaker;
+
   constructor(
     private readonly env: BackendEnv,
     private readonly storage: CursorStorage,
@@ -63,8 +66,10 @@ export class EventPollingService {
     private readonly snapshotService?: SnapshotService,
     rpcClient?: SorobanRpcClient,
     private readonly metrics?: MetricsRegistry,
+    circuitBreaker?: CircuitBreaker,
   ) {
     this.rpcClient = rpcClient ?? new SorobanRpcClient({ url: env.sorobanRpcUrl });
+    this.circuitBreaker = circuitBreaker ?? new CircuitBreaker();
   }
 
   /**
@@ -178,74 +183,81 @@ export class EventPollingService {
    * then advances the cursor to `latestLedger`.
    */
   private async poll(): Promise<void> {
-    const pollStartedAt = Date.now();
-    try {
-      // ── First-run initialisation ─────────────────────────────────────────────
-      if (this.lastLedgerPolled === 0) {
-        const latestLedger = await this.rpcClient.getLatestLedger();
-        this.logger.info(`initializing polling cursor at ledger ${latestLedger}`);
-        await this.storage.saveCursor({
-          lastLedger: latestLedger,
-          updatedAt: new Date().toISOString(),
+    // ── First-run initialisation ─────────────────────────────────────────────
+    if (this.lastLedgerPolled === 0) {
+      const result = await this.circuitBreaker.execute(() => this.rpcClient.getLatestLedger());
+      if (!result.success) {
+        this.logger.warn("circuit breaker prevented getLatestLedger call", {
+          state: result.state,
+          error: result.error?.message,
         });
-        this.lastLedgerPolled = latestLedger;
-        return;
+        throw result.error;
       }
-
-      // ── Paginated event fetch ────────────────────────────────────────────────
-      const startLedger = this.lastLedgerPolled + 1;
-      const allEvents: ContractEvent[] = [];
-      let cursor: string | undefined;
-      let latestLedger = this.lastLedgerPolled;
-
-      do {
-        const result = await this.rpcClient.getEventsPage({
-          startLedger,
-          filters: [
-            {
-              type: "contract",
-              contractIds: [this.env.contractId],
-            },
-          ],
-          pagination: {
-            limit: EVENTS_PAGE_LIMIT,
-            ...(cursor !== undefined ? { cursor } : {}),
-          },
-        });
-
-        latestLedger = result.latestLedger;
-
-        allEvents.push(
-          ...result.events.map((raw) => ({
-            id: raw.id,
-            contractId: raw.contractId,
-            topic: raw.topic,
-            value: raw.value,
-            ledger: raw.ledger,
-            ledgerClosedAt: raw.ledgerClosedAt,
-          })),
-        );
-
-        // Continue paginating when the page was full — there may be more events.
-        cursor =
-          result.events.length === EVENTS_PAGE_LIMIT
-            ? result.events[result.events.length - 1].pagingToken
-            : undefined;
-      } while (cursor !== undefined);
-
-      if (allEvents.length > 0) {
-        await this.handleBatch(allEvents);
-      }
-
-      // Advance cursor to the latest ledger reported by the RPC.
+      const latestLedger = result.data;
+      this.logger.info(`initializing polling cursor at ledger ${latestLedger}`);
       await this.storage.saveCursor({
         lastLedger: latestLedger,
         updatedAt: new Date().toISOString(),
       });
-      // Update polling lag metric
-      if (this.metrics) {
-        this.metrics.setGauge("vaultdao_polling_lag_ledgers", latestLedger - this.lastLedgerPolled);
+      this.lastLedgerPolled = latestLedger;
+      return;
+    }
+
+    // ── Paginated event fetch ────────────────────────────────────────────────
+    const startLedger = this.lastLedgerPolled + 1;
+    const allEvents: ContractEvent[] = [];
+    let cursor: string | undefined;
+    let latestLedger = this.lastLedgerPolled;
+
+    do {
+      const result = await this.circuitBreaker.execute(() => this.rpcClient.getEventsPage({
+        startLedger,
+        filters: [
+          {
+            type: "contract",
+            contractIds: [this.env.contractId],
+          },
+        ],
+        pagination: {
+          limit: EVENTS_PAGE_LIMIT,
+          ...(cursor !== undefined ? { cursor } : {}),
+        },
+      }));
+      if (!result.success) {
+        this.logger.warn("circuit breaker prevented getEventsPage call", {
+          state: result.state,
+          error: result.error?.message,
+        });
+        throw result.error;
       }
+      const pageResult = result.data;
+      if (!pageResult) {
+        throw new Error("getEventsPage returned null result");
+      }
+
+      latestLedger = pageResult.latestLedger;
+
+      allEvents.push(
+        ...pageResult.events.map((raw) => ({
+          id: raw.id,
+          contractId: raw.contractId,
+          topic: raw.topic,
+          value: raw.value,
+          ledger: raw.ledger,
+          ledgerClosedAt: raw.ledgerClosedAt,
+        })),
+      );
+
+      // Continue paginating when the page was full — there may be more events.
+      cursor =
+        pageResult.events.length === EVENTS_PAGE_LIMIT
+          ? pageResult.events[pageResult.events.length - 1].pagingToken
+          : undefined;
+    } while (cursor !== undefined);
+
+    if (allEvents.length > 0) {
+      await this.handleBatch(allEvents);
+    }
 
       this.lastLedgerPolled = latestLedger;
     } finally {
@@ -372,5 +384,12 @@ export class EventPollingService {
       isPolling: this.isRunning,
       errors: this.consecutiveErrors,
     };
+  }
+
+  /**
+   * Returns the circuit breaker instance used by this service.
+   */
+  public getCircuitBreaker(): CircuitBreaker | undefined {
+    return this.circuitBreaker;
   }
 }

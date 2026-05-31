@@ -417,3 +417,74 @@ test("Middleware Chain Integration Tests", async (t) => {
     },
   );
 });
+
+test("API key rotation flow", async (t) => {
+  let server: Server;
+  let baseUrl: string;
+
+  const envWithRotation = {
+    ...mockEnv,
+    apiKey: "old-primary-key",
+    apiKeyNext: "next-rotation-key",
+  };
+
+  t.before(async () => {
+    const app = await createApp(envWithRotation as any, mockRuntime as any);
+    server = app.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (typeof address === "object" && address !== null) {
+      baseUrl = `http://127.0.0.1:${address.port}`;
+    }
+  });
+
+  t.after(
+    () =>
+      new Promise<void>((resolve) => {
+        if (typeof (server as any).closeAllConnections === "function") {
+          (server as any).closeAllConnections();
+        }
+        server.close(() => resolve());
+      }),
+  );
+
+  await t.test("old key works while rotation is pending", async () => {
+    const res = await fetch(`${baseUrl}/api/v1/proposals/stats`, {
+      headers: { Authorization: "Bearer old-primary-key" },
+    });
+    assert.equal(res.status, 200);
+  });
+
+  await t.test("new key works while rotation is pending", async () => {
+    const res = await fetch(`${baseUrl}/api/v1/proposals/stats`, {
+      headers: { Authorization: "Bearer next-rotation-key" },
+    });
+    assert.equal(res.status, 200);
+  });
+
+  await t.test("after rotation old key is rejected and new key is primary", async () => {
+    const rotateRes = await fetch(`${baseUrl}/api/v1/admin/rotate-key`, {
+      method: "POST",
+      headers: { Authorization: "Bearer old-primary-key" },
+    });
+    assert.equal(rotateRes.status, 200);
+
+    const statusRes = await fetch(`${baseUrl}/api/v1/admin/key-status`, {
+      headers: { Authorization: "Bearer next-rotation-key" },
+    });
+    assert.equal(statusRes.status, 200);
+    const statusBody = (await statusRes.json()) as any;
+    assert.equal(statusBody.data.rotationPending, false);
+    assert.equal(statusBody.data.oldKeyActive, false);
+
+    const oldKeyRes = await fetch(`${baseUrl}/api/v1/proposals/stats`, {
+      headers: { Authorization: "Bearer old-primary-key" },
+    });
+    assert.equal(oldKeyRes.status, 401);
+
+    const newKeyRes = await fetch(`${baseUrl}/api/v1/proposals/stats`, {
+      headers: { Authorization: "Bearer next-rotation-key" },
+    });
+    assert.equal(newKeyRes.status, 200);
+  });
+});

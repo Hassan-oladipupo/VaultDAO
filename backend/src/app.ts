@@ -19,7 +19,7 @@ import { createCacheRouter } from "./shared/cache/cache.routes.js";
 import { createVaultRouter } from "./modules/vault/vault.routes.js";
 import { createCursorsRouter } from "./modules/events/cursor/cursors.routes.js";
 import { createEventsRouter } from "./modules/events/events.routes.js";
-import { error } from "./shared/http/response.js";
+import { error, success } from "./shared/http/response.js";
 import { createRateLimitMiddleware } from "./shared/http/rateLimit.js";
 import { createAuthMiddleware, requireApiKey } from "./shared/http/auth.js";
 import { ErrorCode } from "./shared/http/errorCodes.js";
@@ -34,6 +34,10 @@ import { CorsAllowlist } from "./shared/http/corsAllowlist.js";
 
 export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   const app = express();
+  const authKeyState = {
+    primary: env.apiKey,
+    next: env.apiKeyNext,
+  };
   const corsAllowlist = new CorsAllowlist(env.nodeEnv, env.corsOrigin);
 
   // Remove X-Powered-By header
@@ -132,8 +136,17 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   // Request logging middleware (after request ID so requestId is available)
   app.use(createRequestLogger());
 
-  const authMiddleware = createAuthMiddleware(env.apiKey);
-  const adminAuthMiddleware = requireApiKey(env.apiKey);
+  const authMiddleware = createAuthMiddleware(
+    () => ({ primaryKey: authKeyState.primary, nextKey: authKeyState.next }),
+    undefined,
+    () => {
+      // Never log key material; only emit rotation-stage usage warning.
+      console.warn(
+        "[auth] request authenticated with old API key while rotation is pending",
+      );
+    },
+  );
+  const adminAuthMiddleware = requireApiKey(() => authKeyState.primary);
 
   app.use(createHealthRouter(env, runtime));
 
@@ -146,6 +159,39 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   });
 
   const v1Router = express.Router();
+
+  v1Router.get("/admin/key-status", adminAuthMiddleware, (_req, res) => {
+    const rotationPending = Boolean(authKeyState.next);
+    res.status(200).json({
+      success: true,
+      data: {
+        rotationPending,
+        oldKeyActive: rotationPending && Boolean(authKeyState.primary),
+      },
+    });
+  });
+
+  v1Router.post("/admin/rotate-key", adminAuthMiddleware, (_req, res) => {
+    if (!authKeyState.next) {
+      error(res, {
+        message: "No pending API key rotation",
+        status: 409,
+        code: ErrorCode.BAD_REQUEST,
+      });
+      return;
+    }
+
+    authKeyState.primary = authKeyState.next;
+    authKeyState.next = undefined;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        rotationPending: false,
+        oldKeyActive: false,
+      },
+    });
+  });
 
   v1Router.get("/admin/cors/origins", adminAuthMiddleware, (_req, res) => {
     res.status(200).json({
@@ -233,12 +279,6 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
       }
     }
   }
-
-  const v1Router = express.Router();
-
-  v1Router.use("/status", createStatusRouter(env, runtime));
-  v1Router.use("/metrics", createMetricsRouter(runtime, adminAuthMiddleware));
-  v1Router.use("/health", createDetailedHealthRouter(env, runtime));
 
   v1Router.get("/admin/config", adminAuthMiddleware, (_req, res) => {
     success(res, {

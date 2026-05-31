@@ -228,6 +228,7 @@ export function getDueRecurringController(
 
 // Backward-compatible alias used by older imports/tests.
 export const getDuePaymentsController = getDueRecurringController;
+export const getOverdueRecurringController = getDueRecurringController;
 
 /**
  * Get recurring payment execution history

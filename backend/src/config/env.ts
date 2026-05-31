@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 export interface BackendEnv {
   readonly port: number;
   readonly host: string;
@@ -19,6 +21,7 @@ export interface BackendEnv {
   readonly corsOrigin: string[];
   readonly requestBodyLimit: string;
   readonly apiKey?: string;
+  readonly apiKeyNext?: string;
   readonly cursorStorageType: "file" | "database";
   readonly databasePath: string;
   // Rate limiting
@@ -380,7 +383,8 @@ export function loadEnv(): BackendEnv {
     nodeEnv === "production" ? [] : ["*"],
   );
   const requestBodyLimit = readString("REQUEST_BODY_LIMIT", "10kb");
-  const apiKey = readValue("API_KEY");
+  const apiKey = readValue("VAULT_API_KEY") ?? readValue("API_KEY");
+  const apiKeyNext = readValue("VAULT_API_KEY_NEXT");
   const cursorStorageType = readString("CURSOR_STORAGE_TYPE", "file") as
     | "file"
     | "database";
@@ -441,7 +445,9 @@ export function loadEnv(): BackendEnv {
   validateCorsOrigins(corsOrigin, nodeEnv, issues);
 
   if (nodeEnv === "production" && !apiKey) {
-    issues.push("API_KEY is required in production environment.");
+    issues.push(
+      "VAULT_API_KEY (or API_KEY) is required in production environment.",
+    );
   }
 
   throwIfInvalid(issues);
@@ -467,6 +473,7 @@ export function loadEnv(): BackendEnv {
     corsOrigin,
     requestBodyLimit,
     apiKey,
+    apiKeyNext,
     cursorStorageType,
     databasePath,
     rateLimitEnabled,

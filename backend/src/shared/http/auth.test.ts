@@ -279,4 +279,73 @@ describe("createAuthMiddleware (legacy)", () => {
     assert.equal(next.mock.calls.length, 1);
     assert.equal(res.statusCode, 200);
   });
+
+  it("accepts transition key during rotation window", () => {
+    const middleware = createAuthMiddleware("primary-key", "next-key");
+
+    const req = createMockRequest({
+      authorization: "Bearer next-key",
+    });
+    const res = createMockResponse();
+    const next = mock.fn();
+
+    middleware(req, res, next);
+
+    assert.equal(next.mock.calls.length, 1);
+    assert.equal(res.statusCode, 200);
+  });
+
+  it("calls warning hook when primary key is used during pending rotation", () => {
+    const onOldKeyUsed = mock.fn();
+    const middleware = createAuthMiddleware(
+      "primary-key",
+      "next-key",
+      onOldKeyUsed,
+    );
+
+    const req = createMockRequest({
+      authorization: "Bearer primary-key",
+    });
+    const res = createMockResponse();
+    const next = mock.fn();
+
+    middleware(req, res, next);
+
+    assert.equal(next.mock.calls.length, 1);
+    assert.equal(onOldKeyUsed.mock.calls.length, 1);
+  });
+});
+
+describe("requireApiKey with dynamic provider", () => {
+  it("accepts only current primary key and rejects transition key", () => {
+    let primary = "primary-key";
+    const middleware = requireApiKey(() => primary);
+
+    const reqWithPrimary = createMockRequest({
+      authorization: "Bearer primary-key",
+    });
+    const resWithPrimary = createMockResponse();
+    const nextWithPrimary = mock.fn();
+    middleware(reqWithPrimary, resWithPrimary, nextWithPrimary);
+    assert.equal(nextWithPrimary.mock.calls.length, 1);
+
+    const reqWithTransition = createMockRequest({
+      authorization: "Bearer transition-key",
+    });
+    const resWithTransition = createMockResponse();
+    const nextWithTransition = mock.fn();
+    middleware(reqWithTransition, resWithTransition, nextWithTransition);
+    assert.equal(nextWithTransition.mock.calls.length, 0);
+    assert.equal(resWithTransition.statusCode, 403);
+
+    // Provider updates are reflected without recreating middleware.
+    primary = "transition-key";
+    const reqAfterRotate = createMockRequest({
+      authorization: "Bearer transition-key",
+    });
+    const resAfterRotate = createMockResponse();
+    const nextAfterRotate = mock.fn();
+    middleware(reqAfterRotate, resAfterRotate, nextAfterRotate);
+    assert.equal(nextAfterRotate.mock.calls.length, 1);
+  });
 });

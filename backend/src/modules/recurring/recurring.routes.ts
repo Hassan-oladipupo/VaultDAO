@@ -53,13 +53,13 @@ export function createRecurringRouter(
   /**
    * GET /api/v1/recurring/:id
    */
-  router.get(":/paymentId", getRecurringByIdController(service, cache));
+  router.get("/:paymentId", getRecurringByIdController(service, cache));
   
   /**
    * GET /api/v1/recurring/:id/history
    * Returns execution history from indexed events
    */
-  router.get(":/paymentId/history", getRecurringHistoryController(service, cache));
+  router.get("/:paymentId/history", getRecurringHistoryController(service, cache));
 
   return router;
 }
