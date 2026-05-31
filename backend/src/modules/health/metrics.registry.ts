@@ -3,22 +3,57 @@
  * Supports basic counters and gauges with labels.
  */
 
-export type MetricType = "counter" | "gauge";
+import { PrometheusFormatter } from "./metrics.formatter.js";
+
+export type MetricType = "counter" | "gauge" | "histogram";
 
 interface MetricMetadata {
   help: string;
   type: MetricType;
+  buckets?: number[];
+}
+
+interface HistogramState {
+  readonly buckets: number[];
+  readonly counts: number[];
+  sum: number;
+  count: number;
+}
+
+export interface MetricsSnapshot {
+  readonly metadata: Map<string, MetricMetadata>;
+  readonly values: Map<string, number>;
+  readonly histograms: Map<string, HistogramState>;
 }
 
 export class MetricsRegistry {
   private values = new Map<string, number>();
   private metadata = new Map<string, MetricMetadata>();
+  private histograms = new Map<string, HistogramState>();
 
   /**
    * Register a metric with help text and type.
    */
   public register(name: string, help: string, type: MetricType): void {
     this.metadata.set(name, { help, type });
+  }
+
+  /**
+   * Register a histogram metric with explicit buckets.
+   */
+  public registerHistogram(name: string, help: string, buckets: number[]): void {
+    const normalizedBuckets = [...buckets].sort((a, b) => a - b);
+    this.metadata.set(name, {
+      help,
+      type: "histogram",
+      buckets: normalizedBuckets,
+    });
+    this.histograms.set(name, {
+      buckets: normalizedBuckets,
+      counts: new Array(normalizedBuckets.length).fill(0),
+      sum: 0,
+      count: 0,
+    });
   }
 
   /**
@@ -38,6 +73,53 @@ export class MetricsRegistry {
   }
 
   /**
+   * Observe a histogram value.
+   */
+  public observeHistogram(name: string, value: number): void {
+    const histogram = this.histograms.get(name);
+    if (!histogram) {
+      return;
+    }
+
+    histogram.count += 1;
+    histogram.sum += value;
+
+    for (let i = 0; i < histogram.buckets.length; i++) {
+      if (value <= histogram.buckets[i]!) {
+        histogram.counts[i] = (histogram.counts[i] ?? 0) + 1;
+      }
+    }
+  }
+
+  /**
+   * Snapshot current registry state in one pass for scrape consistency.
+   */
+  public snapshot(): MetricsSnapshot {
+    const metadata = new Map<string, MetricMetadata>();
+    for (const [name, meta] of this.metadata) {
+      metadata.set(name, {
+        help: meta.help,
+        type: meta.type,
+        buckets: meta.buckets ? [...meta.buckets] : undefined,
+      });
+    }
+
+    const values = new Map(this.values);
+
+    const histograms = new Map<string, HistogramState>();
+    for (const [name, histogram] of this.histograms) {
+      histograms.set(name, {
+        buckets: [...histogram.buckets],
+        counts: [...histogram.counts],
+        sum: histogram.sum,
+        count: histogram.count,
+      });
+    }
+
+    return { metadata, values, histograms };
+  }
+
+  /**
    * Formats a metric name and optional labels into a Prometheus key string.
    */
   private formatKey(name: string, labels?: Record<string, string>): string {
@@ -54,36 +136,6 @@ export class MetricsRegistry {
    * Renders the current state of the registry in Prometheus text format.
    */
   public render(): string {
-    const lines: string[] = [];
-    
-    // Group registered keys by base name to output values together
-    const keysByBaseName = new Map<string, string[]>();
-    for (const key of this.values.keys()) {
-      const baseName = key.split("{")[0];
-      if (!keysByBaseName.has(baseName)) {
-        keysByBaseName.set(baseName, []);
-      }
-      keysByBaseName.get(baseName)!.push(key);
-    }
-
-    // Iterate through registered metadata to ensure HELP/TYPE lines are present
-    for (const [baseName, meta] of this.metadata.entries()) {
-      lines.push(`# HELP ${baseName} ${meta.help}`);
-      lines.push(`# TYPE ${baseName} ${meta.type}`);
-      
-      const keys = keysByBaseName.get(baseName) ?? [];
-      
-      // If no values exist yet for this base metric name, and it has no labels,
-      // output it with 0 to help scrapers discover the metric.
-      if (keys.length === 0) {
-        lines.push(`${baseName} 0`);
-      } else {
-        for (const key of keys) {
-          lines.push(`${key} ${this.values.get(key)}`);
-        }
-      }
-    }
-
-    return lines.join("\n") + "\n";
+    return PrometheusFormatter.format(this.snapshot());
   }
 }

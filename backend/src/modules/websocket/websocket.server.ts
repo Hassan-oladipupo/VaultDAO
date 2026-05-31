@@ -269,4 +269,8 @@ export class EventWebSocketServer {
   public stop() {
     this.wss.close();
   }
+
+  public getActiveConnectionCount(): number {
+    return this.clients.size;
+  }
 }

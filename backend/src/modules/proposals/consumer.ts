@@ -261,6 +261,9 @@ export class ProposalActivityConsumer {
       this.metrics.incrementCounter("vaultdao_proposals_total", {
         status: statusLabel,
       });
+      this.metrics.incrementCounter("vaultdao_proposals_indexed_total", {
+        status: statusLabel,
+      });
     }
 
     return {
@@ -332,6 +335,7 @@ export class ProposalActivityConsumer {
           createdAt: new Date().toISOString(),
           payload,
         });
+        this.metrics?.incrementCounter("vaultdao_notifications_published_total");
       } catch (err) {
         console.error(
           "[proposal-consumer] failed to publish notification:",

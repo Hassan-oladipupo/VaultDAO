@@ -122,6 +122,31 @@ export async function startServer(
     "Cache miss rate as a ratio from 0 to 1",
     "gauge",
   );
+  metricsRegistry.register(
+    "vaultdao_events_polled_total",
+    "Total polled and processed events",
+    "counter",
+  );
+  metricsRegistry.register(
+    "vaultdao_proposals_indexed_total",
+    "Total indexed proposal activity records",
+    "counter",
+  );
+  metricsRegistry.register(
+    "vaultdao_notifications_published_total",
+    "Total notifications successfully published",
+    "counter",
+  );
+  metricsRegistry.registerHistogram(
+    "vaultdao_rpc_latency_ms",
+    "RPC latency in milliseconds",
+    [10, 50, 100, 250, 500, 1000, 2500],
+  );
+  metricsRegistry.register(
+    "vaultdao_active_websocket_connections",
+    "Current active websocket connections",
+    "gauge",
+  );
 
   const jobManager = new JobManager(metricsRegistry);
 

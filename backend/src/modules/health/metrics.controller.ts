@@ -11,12 +11,16 @@ import type { BackendRuntime } from "../../server.js";
  * This endpoint is intentionally unauthenticated for scraper compatibility.
  */
 export function getMetricsController(runtime: BackendRuntime): RequestHandler {
-  return (_request, response) => {
+  return (request, response) => {
     // Update dynamic metrics before rendering
     const uptimeSeconds = Math.floor(
       (Date.now() - new Date(runtime.startedAt).getTime()) / 1000,
     );
     runtime.metricsRegistry.setGauge("vaultdao_uptime_seconds", uptimeSeconds);
+    runtime.metricsRegistry.setGauge(
+      "vaultdao_active_websocket_connections",
+      runtime.wsServer?.getActiveConnectionCount() ?? 0,
+    );
     if (runtime.cacheManager) {
       const cacheStats = runtime.cacheManager.stats();
       runtime.metricsRegistry.setGauge("vaultdao_cache_hits_total", cacheStats.hits);
@@ -25,12 +29,13 @@ export function getMetricsController(runtime: BackendRuntime): RequestHandler {
       runtime.metricsRegistry.setGauge("vaultdao_cache_miss_rate", (cacheStats as any).missRate ?? 0);
     }
 
-    const acceptsPlain = (_request.get("Accept") ?? "").includes("text/plain");
+    const requestedFormat = String(request.query?.format ?? "").toLowerCase();
+    const prometheusRequested = requestedFormat === "prometheus";
 
-    if (acceptsPlain) {
+    if (prometheusRequested) {
       response
         .status(200)
-        .set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        .set("Content-Type", "text/plain; version=0.0.4")
         .send(runtime.metricsRegistry.render());
       return;
     }

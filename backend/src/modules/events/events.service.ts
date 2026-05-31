@@ -259,17 +259,15 @@ export class EventPollingService {
       await this.handleBatch(allEvents);
     }
 
-    // Advance cursor to the latest ledger reported by the RPC.
-    await this.storage.saveCursor({
-      lastLedger: latestLedger,
-      updatedAt: new Date().toISOString(),
-    });
-    // Update polling lag metric
-    if (this.metrics) {
-      this.metrics.setGauge("vaultdao_polling_lag_ledgers", latestLedger - this.lastLedgerPolled);
+      this.lastLedgerPolled = latestLedger;
+    } finally {
+      if (this.metrics) {
+        this.metrics.observeHistogram(
+          "vaultdao_rpc_latency_ms",
+          Date.now() - pollStartedAt,
+        );
+      }
     }
-
-    this.lastLedgerPolled = latestLedger;
   }
 
   /**
@@ -321,6 +319,7 @@ export class EventPollingService {
       // Increment events processed metric
       if (this.metrics) {
         this.metrics.incrementCounter("vaultdao_events_processed_total");
+        this.metrics.incrementCounter("vaultdao_events_polled_total");
       }
 
       await this.processEvent(event);
