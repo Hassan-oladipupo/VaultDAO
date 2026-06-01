@@ -8,6 +8,7 @@ import type { WalletAdapter } from '../adapters';
 
 const PREFERRED_WALLET_KEY = 'vaultdao_preferred_wallet';
 const WALLET_CONNECTED_KEY = 'vaultdao_wallet_connected';
+const LAST_ACCOUNT_KEY = 'vaultdao_last_account';
 
 export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [availableWallets, setAvailableWallets] = useState<WalletAdapter[]>([]);
@@ -15,6 +16,8 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [connected, setConnected] = useState(false);
   const [address, setAddress] = useState<string | null>(null);
   const [network, setNetwork] = useState<string | null>(null);
+  const [availableAccounts, setAvailableAccounts] = useState<string[]>([]);
+  const [accountRole, setAccountRole] = useState<string | null>(null);
   const activeAdapterRef = useRef<WalletAdapter | null>(null);
   const { showToast } = useToast();
 
@@ -57,12 +60,28 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
           setConnected(true);
           activeAdapterRef.current = adapter;
           await validateNetwork(adapter);
+          // Persist last-used account
+          try { localStorage.setItem(LAST_ACCOUNT_KEY, pubkey); } catch { /* ignore */ }
+          // Fetch all accounts if adapter supports it
+          if (typeof (adapter as any).getAccounts === 'function') {
+            try {
+              const accounts: string[] = await (adapter as any).getAccounts();
+              setAvailableAccounts(accounts);
+            } catch {
+              setAvailableAccounts([pubkey]);
+            }
+          } else {
+            setAvailableAccounts([pubkey]);
+          }
           return true;
         } else {
           setAddress(null);
           setConnected(false);
           activeAdapterRef.current = null;
+          setAvailableAccounts([]);
+          setAccountRole(null);
           localStorage.removeItem(WALLET_CONNECTED_KEY);
+          localStorage.removeItem(LAST_ACCOUNT_KEY);
         }
       } catch (e) {
         console.error('Failed to update wallet state', e);
@@ -220,6 +239,24 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
   }, [connected, disconnect, savePreferredWallet]);
 
+  const switchAccount = useCallback(async (account: string) => {
+    // Clear any pending transaction state
+    const adapter = activeAdapterRef.current;
+    if (!adapter) return;
+    setAddress(account);
+    try { localStorage.setItem(LAST_ACCOUNT_KEY, account); } catch { /* ignore */ }
+    // Emit analytics event
+    try {
+      const { trackedFetch } = await import('../utils/apiTracking');
+      void trackedFetch('/api/v1/analytics/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event: 'wallet_switched', account: account.slice(0, 8) }),
+      }).catch(() => { /* non-critical */ });
+    } catch { /* ignore */ }
+    showToast(`Switched to ${account.slice(0, 6)}...${account.slice(-4)}`, 'info');
+  }, [showToast]);
+
   const signTransaction = useCallback(
     async (xdr: string, options?: { network?: string }): Promise<string> => {
       const adapter = activeAdapterRef.current;
@@ -245,6 +282,9 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         switchWallet,
         signTransaction,
         detectWallets,
+        availableAccounts,
+        switchAccount,
+        accountRole,
       }}
     >
       {children}
