@@ -11,6 +11,23 @@ import { createWebSocketClient } from '../utils/websocket';
 const STORAGE_KEY = 'vaultdao_notifications';
 const MAX_STORED_NOTIFICATIONS = 50;
 
+/** Per-wallet read-state key */
+export function notificationReadKey(walletAddress: string): string {
+  return `vaultdao_notif_read_${walletAddress}`;
+}
+
+/** Per-wallet notification type opt-out settings key */
+export function notificationSettingsKey(walletAddress: string): string {
+  return `vaultdao_notif_settings_${walletAddress}`;
+}
+
+export interface NotificationTypeSettings {
+  /** Categories the user has opted out of */
+  disabledCategories: NotificationCategory[];
+  /** Whether URGENT sound is muted */
+  muteSounds: boolean;
+}
+
 interface NotificationContextValue {
   notifications: Notification[];
   unreadCount: number;
@@ -27,6 +44,9 @@ interface NotificationContextValue {
   setPage: (page: number) => void;
   clearAll: () => void;
   connectionStatus: string;
+  /** Per-wallet notification type settings */
+  typeSettings: NotificationTypeSettings;
+  updateTypeSettings: (settings: Partial<NotificationTypeSettings>) => void;
 }
 
 const NotificationContext = createContext<NotificationContextValue | null>(null);
@@ -66,7 +86,7 @@ function saveNotificationsToStorage(notifications: Notification[]): void {
 const initialState: NotificationState = {
   notifications: [],
   filter: {
-    categories: ['proposals', 'approvals', 'system'],
+    categories: ['proposals', 'approvals', 'system', 'payments'],
     priorities: ['critical', 'high', 'normal', 'low'],
     status: undefined,
   },
@@ -136,6 +156,37 @@ function notificationReducer(
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(notificationReducer, initialState);
   const [connectionStatus, setConnectionStatus] = React.useState<string>('disconnected');
+  const [walletAddress, setWalletAddress] = React.useState<string>('');
+  const [typeSettings, setTypeSettings] = React.useState<NotificationTypeSettings>({
+    disabledCategories: [],
+    muteSounds: false,
+  });
+
+  // Detect wallet address from localStorage (set by wallet hook)
+  useEffect(() => {
+    const detectWallet = () => {
+      const stored = localStorage.getItem('vaultdao_wallet_address');
+      if (stored && stored !== walletAddress) setWalletAddress(stored);
+    };
+    detectWallet();
+    window.addEventListener('storage', detectWallet);
+    return () => window.removeEventListener('storage', detectWallet);
+  }, [walletAddress]);
+
+  // Load per-wallet type settings when wallet changes
+  useEffect(() => {
+    if (!walletAddress) return;
+    try {
+      const raw = localStorage.getItem(notificationSettingsKey(walletAddress));
+      if (raw) setTypeSettings(JSON.parse(raw) as NotificationTypeSettings);
+    } catch { /* ignore */ }
+  }, [walletAddress]);
+
+  // Persist type settings when they change
+  useEffect(() => {
+    if (!walletAddress) return;
+    localStorage.setItem(notificationSettingsKey(walletAddress), JSON.stringify(typeSettings));
+  }, [typeSettings, walletAddress]);
 
   // Load from storage on mount
   useEffect(() => {
@@ -243,6 +294,10 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     localStorage.removeItem(STORAGE_KEY);
   }, []);
 
+  const updateTypeSettings = useCallback((settings: Partial<NotificationTypeSettings>) => {
+    setTypeSettings(prev => ({ ...prev, ...settings }));
+  }, []);
+
   const unreadCount = React.useMemo(
     () => state.notifications.filter((n) => n.status === 'unread').length,
     [state.notifications]
@@ -265,6 +320,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       setPage,
       clearAll,
       connectionStatus,
+      typeSettings,
+      updateTypeSettings,
     }),
     [
       state.notifications,
@@ -282,6 +339,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       setPage,
       clearAll,
       connectionStatus,
+      typeSettings,
+      updateTypeSettings,
     ]
   );
 

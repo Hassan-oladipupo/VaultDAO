@@ -9,6 +9,7 @@ import ProposalDetailModal from '../../components/modals/ProposalDetailModal';
 import ConfirmationModal from '../../components/modals/ConfirmationModal';
 import ProposalFilters, { type FilterState } from '../../components/proposals/ProposalFilters';
 import ProposalComparison from '../../components/ProposalComparison';
+import TransactionSimulatorModal from '../../components/TransactionSimulatorModal';
 import { useToast } from '../../hooks/useToast';
 import { useVaultContract } from '../../hooks/useVaultContract';
 import { useProposals } from '../../hooks/useProposals';
@@ -20,6 +21,7 @@ import type { TokenInfo, TokenBalance } from '../../types';
 import { DEFAULT_TOKENS } from '../../constants/tokens';
 import VoiceCommands from '../../components/VoiceCommands';
 import ReadinessWarning from '../../components/ReadinessWarning';
+import { nativeToScVal, Address, xdr } from 'stellar-sdk';
 
 const CopyButton = ({ text }: { text: string }) => (
   <button
@@ -85,6 +87,16 @@ const Proposals: React.FC = () => {
   const [tokenBalances, setTokenBalances] = useState<TokenBalance[]>([]);
   const [showComparison, setShowComparison] = useState(false);
   const [selectedForComparison, setSelectedForComparison] = useState<Set<string>>(new Set());
+
+  // Simulator modal state
+  const [simulatorOpen, setSimulatorOpen] = useState(false);
+  const [simulatorConfig, setSimulatorConfig] = useState<{
+    functionName: string;
+    args: xdr.ScVal[];
+    actionLabel: string;
+    params?: Record<string, unknown>;
+    onProceed: () => Promise<void>;
+  } | null>(null);
 
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -286,33 +298,51 @@ const Proposals: React.FC = () => {
       return;
     }
 
-    setApprovingIds(prev => new Set(prev).add(proposalId));
-    try {
-      await approveProposal(Number(proposalId));
-      setLocalProposals(prev => prev.map(p => {
-        if (p.id === proposalId) {
-          const newApprovals = p.approvals + 1;
-          const newApprovedBy = [...p.approvedBy, address!];
-          return {
-            ...p,
-            approvals: newApprovals,
-            approvedBy: newApprovedBy,
-            status: newApprovals >= p.threshold ? 'Approved' : p.status
-          };
-        }
-        return p;
-      }));
-      notify('proposal_approved', `Proposal #${proposalId} approved successfully`, 'success');
-    } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to approve proposal';
-      notify('proposal_rejected', errorMessage, 'error');
-    } finally {
-      setApprovingIds(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(proposalId);
-        return newSet;
-      });
-    }
+    // Build simulator args
+    const approverAddr = address!;
+    const simArgs: xdr.ScVal[] = [
+      new Address(approverAddr).toScVal(),
+      nativeToScVal(BigInt(proposalId), { type: 'u64' }),
+    ];
+
+    const doApprove = async () => {
+      setApprovingIds(prev => new Set(prev).add(proposalId));
+      try {
+        await approveProposal(Number(proposalId));
+        setLocalProposals(prev => prev.map(p => {
+          if (p.id === proposalId) {
+            const newApprovals = p.approvals + 1;
+            const newApprovedBy = [...p.approvedBy, address!];
+            return {
+              ...p,
+              approvals: newApprovals,
+              approvedBy: newApprovedBy,
+              status: newApprovals >= p.threshold ? 'Approved' : p.status
+            };
+          }
+          return p;
+        }));
+        notify('proposal_approved', `Proposal #${proposalId} approved successfully`, 'success');
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : 'Failed to approve proposal';
+        notify('proposal_rejected', errorMessage, 'error');
+      } finally {
+        setApprovingIds(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(proposalId);
+          return newSet;
+        });
+      }
+    };
+
+    setSimulatorConfig({
+      functionName: 'approve_proposal',
+      args: simArgs,
+      actionLabel: 'Approve Proposal',
+      params: { proposalId },
+      onProceed: doApprove,
+    });
+    setSimulatorOpen(true);
   };
 
   // Initialize selected token when tokenBalances load
@@ -336,17 +366,35 @@ const Proposals: React.FC = () => {
       notify('proposal_rejected', message ?? 'Not ready', 'error');
       return;
     }
-    setExecutingIds(prev => new Set(prev).add(proposalId));
-    try {
-      await executeProposal(Number(proposalId));
-      setLocalProposals(prev => prev.map(p => p.id === proposalId ? { ...p, status: 'Executed' } : p));
-      notify('proposal_executed', `Proposal #${proposalId} executed successfully`, 'success');
-    } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to execute proposal';
-      notify('proposal_rejected', errorMessage, 'error');
-    } finally {
-      setExecutingIds(prev => { const s = new Set(prev); s.delete(proposalId); return s; });
-    }
+
+    const executorAddr = address!;
+    const simArgs: xdr.ScVal[] = [
+      new Address(executorAddr).toScVal(),
+      nativeToScVal(BigInt(proposalId), { type: 'u64' }),
+    ];
+
+    const doExecute = async () => {
+      setExecutingIds(prev => new Set(prev).add(proposalId));
+      try {
+        await executeProposal(Number(proposalId));
+        setLocalProposals(prev => prev.map(p => p.id === proposalId ? { ...p, status: 'Executed' } : p));
+        notify('proposal_executed', `Proposal #${proposalId} executed successfully`, 'success');
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : 'Failed to execute proposal';
+        notify('proposal_rejected', errorMessage, 'error');
+      } finally {
+        setExecutingIds(prev => { const s = new Set(prev); s.delete(proposalId); return s; });
+      }
+    };
+
+    setSimulatorConfig({
+      functionName: 'execute_proposal',
+      args: simArgs,
+      actionLabel: 'Execute Proposal',
+      params: { proposalId },
+      onProceed: doExecute,
+    });
+    setSimulatorOpen(true);
   };
 
   return (
@@ -634,6 +682,19 @@ const Proposals: React.FC = () => {
         />
 
       </div>
+
+      {/* Transaction Simulator Modal */}
+      {simulatorConfig && (
+        <TransactionSimulatorModal
+          isOpen={simulatorOpen}
+          functionName={simulatorConfig.functionName}
+          args={simulatorConfig.args}
+          actionLabel={simulatorConfig.actionLabel}
+          params={simulatorConfig.params}
+          onProceed={simulatorConfig.onProceed}
+          onClose={() => { setSimulatorOpen(false); setSimulatorConfig(null); }}
+        />
+      )}
     </div>
   );
 };

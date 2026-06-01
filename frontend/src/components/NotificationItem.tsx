@@ -212,6 +212,7 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
               <NotificationActions
                 notificationId={notification.id}
                 actions={notification.actions}
+                metadata={notification.metadata}
                 onActionComplete={() => onMarkAsRead(notification.id)}
               />
             )}
