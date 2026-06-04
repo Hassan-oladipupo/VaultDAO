@@ -16,18 +16,29 @@ import { SnapshotNormalizer } from "../../snapshots/normalizer.js";
 export class EventNormalizer {
   public static normalize(event: ContractEvent): NormalizedEvent {
     const topic = event.topic[0] ?? "";
-    const type = CONTRACT_EVENT_MAP[topic] ?? EventType.UNKNOWN;
+    const type = Object.hasOwn(CONTRACT_EVENT_MAP, topic)
+      ? CONTRACT_EVENT_MAP[topic]
+      : EventType.UNKNOWN;
 
     try {
       return EventNormalizer.dispatch(event, type);
     } catch (error) {
-      console.error(`[event-normalizer] normalization failed for "${topic}":`, error);
-      return EventNormalizer.unknown(event, `Normalization error: ${String(error)}`);
+      console.error(
+        `[event-normalizer] normalization failed for "${topic}":`,
+        error,
+      );
+      return EventNormalizer.unknown(
+        event,
+        `Normalization error: ${String(error)}`,
+      );
     }
   }
 
   // eslint-disable-next-line complexity
-  private static dispatch(event: ContractEvent, type: EventType): NormalizedEvent {
+  private static dispatch(
+    event: ContractEvent,
+    type: EventType,
+  ): NormalizedEvent {
     switch (type) {
       // ── Proposal lifecycle ──────────────────────────────────────────────
       case EventType.PROPOSAL_CREATED:
@@ -102,13 +113,25 @@ export class EventNormalizer {
       case EventType.ESCROW_RESOLVED:
         return EscrowNormalizer.normalizeEscrowResolved(event);
       case EventType.MILESTONE_COMPLETE:
-        return EscrowNormalizer.normalizeMilestone(event, EventType.MILESTONE_COMPLETE);
+        return EscrowNormalizer.normalizeMilestone(
+          event,
+          EventType.MILESTONE_COMPLETE,
+        );
       case EventType.MILESTONE_SUBMITTED:
-        return EscrowNormalizer.normalizeMilestone(event, EventType.MILESTONE_SUBMITTED);
+        return EscrowNormalizer.normalizeMilestone(
+          event,
+          EventType.MILESTONE_SUBMITTED,
+        );
       case EventType.MILESTONE_VERIFIED:
-        return EscrowNormalizer.normalizeMilestone(event, EventType.MILESTONE_VERIFIED);
+        return EscrowNormalizer.normalizeMilestone(
+          event,
+          EventType.MILESTONE_VERIFIED,
+        );
       case EventType.MILESTONE_REJECTED:
-        return EscrowNormalizer.normalizeMilestone(event, EventType.MILESTONE_REJECTED);
+        return EscrowNormalizer.normalizeMilestone(
+          event,
+          EventType.MILESTONE_REJECTED,
+        );
       case EventType.FUNDING_ROUND_CREATED:
         return EscrowNormalizer.normalizeFundingRoundCreated(event);
       case EventType.FUNDING_RELEASED:
@@ -187,7 +210,10 @@ export class EventNormalizer {
     }
   }
 
-  private static unknown(event: ContractEvent, reason: string): NormalizedEvent {
+  private static unknown(
+    event: ContractEvent,
+    reason: string,
+  ): NormalizedEvent {
     return UnknownEventNormalizer.normalize(event, reason);
   }
 

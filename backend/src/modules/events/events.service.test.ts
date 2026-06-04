@@ -120,7 +120,7 @@ function createSvc(
   return new EventPollingService(
     createTestEnv({
       eventPollingEnabled: true,
-      eventPollingIntervalMs: 1000,
+      eventPollingIntervalMs: 25,
       ...envOverrides,
     }),
     storage,

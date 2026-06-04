@@ -159,6 +159,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   });
 
   const v1Router = express.Router();
+  v1Router.use(express.json({ limit: env.requestBodyLimit }));
 
   v1Router.get("/admin/key-status", adminAuthMiddleware, (_req, res) => {
     const rotationPending = Boolean(authKeyState.next);
@@ -355,8 +356,6 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
       runtime.snapshotDiffService,
     ),
   );
-
-  v1Router.use(express.json({ limit: env.requestBodyLimit }));
 
   v1Router.use(
     "/proposals",

@@ -323,16 +323,6 @@ export async function startServer(
 
   jobManager.registerJob(
     {
-      name: "proposal-consumer",
-      start: () => proposalActivityConsumer.start(),
-      stop: () => proposalActivityConsumer.stop(),
-      isRunning: () => proposalActivityConsumer.getIsRunning(),
-    },
-    { replace: true, dependencies: ["event-polling"] },
-  );
-
-  jobManager.registerJob(
-    {
       name: "event-polling",
       start: () => {
         for (const p of pollers) p.start();
@@ -343,6 +333,16 @@ export async function startServer(
       isRunning: () => pollers.some((p) => p.getStatus().isPolling),
     },
     { replace: true },
+  );
+
+  jobManager.registerJob(
+    {
+      name: "proposal-consumer",
+      start: () => proposalActivityConsumer.start(),
+      stop: () => proposalActivityConsumer.stop(),
+      isRunning: () => proposalActivityConsumer.getIsRunning(),
+    },
+    { replace: true, dependencies: ["event-polling"] },
   );
 
   jobManager.registerJob(

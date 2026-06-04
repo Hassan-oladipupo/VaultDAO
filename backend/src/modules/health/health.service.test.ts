@@ -9,6 +9,7 @@ import {
   checkEventPolling,
   checkJobRunner,
   buildDetailedHealthPayload,
+  clearHealthCheckCache,
 } from "./health.service.js";
 import { createTestEnv } from "../../config/env.js";
 
@@ -22,8 +23,14 @@ const mockEnv = createTestEnv({
 const mockRuntime = {
   startedAt: "2026-03-25T00:00:00.000Z",
   eventPollingService: {
-    getStatus: () => ({ running: false, lastCheck: null }),
+    getStatus: () => ({
+      lastLedgerPolled: 0,
+      isPolling: false,
+      errors: 0,
+    }),
+    getCircuitBreaker: () => undefined,
   },
+  notificationQueue: { size: () => 0 },
   jobManager: {
     getAllJobs: () => [
       { name: "event-polling", isRunning: () => true },
@@ -348,6 +355,8 @@ test("buildDetailedHealthPayload returns status:healthy when all dependencies ar
       };
     } else if (url.includes("horizon-testnet")) {
       return {
+        ok: true,
+        status: 200,
         json: async () => ({ horizon_version: "2.0.0" }),
       };
     }
@@ -355,6 +364,7 @@ test("buildDetailedHealthPayload returns status:healthy when all dependencies ar
   };
 
   try {
+    clearHealthCheckCache();
     const payload = await buildDetailedHealthPayload(
       mockEnv as any,
       mockRuntime as any,
@@ -381,6 +391,8 @@ test("buildDetailedHealthPayload returns status:degraded when one dependency is 
       throw new Error("ECONNREFUSED");
     } else if (url.includes("horizon-testnet")) {
       return {
+        ok: true,
+        status: 200,
         json: async () => ({ horizon_version: "2.0.0" }),
       };
     }
@@ -388,6 +400,7 @@ test("buildDetailedHealthPayload returns status:degraded when one dependency is 
   };
 
   try {
+    clearHealthCheckCache();
     const payload = await buildDetailedHealthPayload(
       mockEnv as any,
       mockRuntime as any,
@@ -421,6 +434,7 @@ test("buildDetailedHealthPayload returns status:unhealthy when one dependency is
   };
 
   try {
+    clearHealthCheckCache();
     const payload = await buildDetailedHealthPayload(
       mockEnv as any,
       mockRuntime as any,
@@ -443,6 +457,8 @@ test("buildDetailedHealthPayload response includes all required fields", async (
       };
     } else if (url.includes("horizon-testnet")) {
       return {
+        ok: true,
+        status: 200,
         json: async () => ({ horizon_version: "2.0.0" }),
       };
     }
@@ -450,6 +466,7 @@ test("buildDetailedHealthPayload response includes all required fields", async (
   };
 
   try {
+    clearHealthCheckCache();
     const payload = await buildDetailedHealthPayload(
       mockEnv as any,
       mockRuntime as any,

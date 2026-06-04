@@ -4,6 +4,8 @@ import type { BackendEnv } from "../../config/env.js";
 import type { BackendRuntime } from "../../server.js";
 import {
   buildStatusPayload,
+  buildHealthPayload,
+  buildReadinessPayload,
   buildDetailedHealthPayload,
 } from "./health.service.js";
 import { success, error } from "../../shared/http/response.js";
@@ -12,30 +14,8 @@ export function getHealthController(
   env: BackendEnv,
   runtime: BackendRuntime,
 ): RequestHandler {
-  return async (_request, response) => {
-    try {
-      const payload = await buildDetailedHealthPayload(env, runtime);
-      // GET /health returns 200 if status != "unhealthy", 503 if unhealthy
-      if (payload.status !== "unhealthy") {
-        success(response, payload);
-      } else {
-        error(
-          response,
-          { message: "Service unhealthy", status: 503, details: payload },
-          { exposeDetails: true },
-        );
-      }
-    } catch (err) {
-      error(
-        response,
-        {
-          message: "Health check failed",
-          status: 500,
-          details: err instanceof Error ? err.message : String(err),
-        },
-        { exposeDetails: true },
-      );
-    }
+  return (_request, response) => {
+    success(response, buildHealthPayload(env, runtime));
   };
 }
 
@@ -63,26 +43,13 @@ export function getReadinessController(
       return;
     }
 
-    try {
-      const payload = await buildDetailedHealthPayload(env, runtime);
-      // GET /ready returns 200 only when all dependencies are healthy
-      if (payload.status === "healthy") {
-        success(response, payload);
-      } else {
-        error(
-          response,
-          { message: "Service not ready", status: 503, details: payload },
-          { exposeDetails: true },
-        );
-      }
-    } catch (err) {
+    const payload = buildReadinessPayload(env, runtime);
+    if (payload.ready) {
+      success(response, payload);
+    } else {
       error(
         response,
-        {
-          message: "Readiness check failed",
-          status: 500,
-          details: err instanceof Error ? err.message : String(err),
-        },
+        { message: "Service not ready", status: 503, details: payload },
         { exposeDetails: true },
       );
     }

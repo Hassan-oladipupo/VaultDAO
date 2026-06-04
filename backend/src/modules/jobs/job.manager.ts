@@ -128,37 +128,27 @@ export class JobManager {
    * @param timeoutMs timeout for each job stop in milliseconds (default 5s)
    */
   public async stopAll(timeoutMs: number = 5000): Promise<void> {
-    // Overall timeout for the whole shutdown sequence
-    const deadline = Date.now() + timeoutMs;
+    const hasRegisteredDeps = Array.from(this.deps.values()).some((deps) =>
+      Array.from(deps).some((d) => this.jobs.has(d)),
+    );
 
-    // Build topological order (dependencies before dependents)
-    const topo = this.topologicalSort();
-    // If topo doesn't include all jobs, log and fallback to registration order
-    const orderNames =
-      topo.length === this.jobs.size ? topo : Array.from(this.jobs.keys());
-
-    // Reverse for shutdown: dependents first
-    const shutdownOrder = [...orderNames].reverse();
+    const shutdownOrder = hasRegisteredDeps
+      ? [...this.topologicalSort()].reverse()
+      : [...this.jobs.keys()].reverse();
 
     const errors: Array<{ job: string; error: string }> = [];
 
-    // Process jobs in order, honoring overall timeout
     for (const name of shutdownOrder) {
       const job = this.jobs.get(name);
       if (!job) continue;
 
       try {
-        const timeLeft = Math.max(0, deadline - Date.now());
-        if (timeLeft === 0)
-          throw new Error(`Stop timeout after ${timeoutMs}ms`);
-
-        // Await stop with remaining deadline
         await Promise.race([
           Promise.resolve(job.stop()),
           new Promise<never>((_, reject) =>
             setTimeout(
               () => reject(new Error(`Stop timeout after ${timeoutMs}ms`)),
-              timeLeft,
+              timeoutMs,
             ),
           ),
         ]);
@@ -208,6 +198,7 @@ export class JobManager {
 
     for (const [name, deps] of this.deps.entries()) {
       for (const d of deps) {
+        if (!this.jobs.has(d)) continue;
         if (!adj.has(d)) adj.set(d, new Set());
         adj.get(d)!.add(name);
         indegree.set(name, (indegree.get(name) ?? 0) + 1);

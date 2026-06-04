@@ -12,6 +12,11 @@ import { fetchWithTimeout } from "../../shared/http/fetchWithTimeout.js";
 const healthCheckCache = new Map<string, { data: any; timestamp: number }>();
 const CACHE_TTL_MS = 10_000; // 10 seconds
 
+/** Clears cached dependency probe results (for tests). */
+export function clearHealthCheckCache(): void {
+  healthCheckCache.clear();
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = join(__filename, "..");
 
@@ -466,9 +471,9 @@ export async function buildDetailedHealthPayload(
   let circuitBreaker;
   if (runtime.eventPollingService) {
     if (Array.isArray(runtime.eventPollingService)) {
-      circuitBreaker = runtime.eventPollingService[0]?.getCircuitBreaker();
+      circuitBreaker = runtime.eventPollingService[0]?.getCircuitBreaker?.();
     } else {
-      circuitBreaker = runtime.eventPollingService.getCircuitBreaker();
+      circuitBreaker = runtime.eventPollingService.getCircuitBreaker?.();
     }
   }
 
