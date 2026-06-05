@@ -9,6 +9,7 @@ interface UseCollaborationOptions {
   draftId: string;
   userId: string;
   userName: string;
+  enabled?: boolean;
   onSync?: (draft: Partial<ProposalDraft>) => void;
   onError?: (error: Error) => void;
 }
@@ -25,6 +26,7 @@ export function useCollaboration({
   draftId,
   userId,
   userName,
+  enabled = false,
   onSync,
   onError,
 }: UseCollaborationOptions) {
@@ -37,8 +39,25 @@ export function useCollaboration({
   const providerRef = useRef<WebsocketProvider | null>(null);
   const sharedRef = useRef<SharedDraft | null>(null);
 
+  // Load from localStorage initially
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(`draft-${draftId}`);
+      if (saved && onSync) {
+        onSync(JSON.parse(saved));
+      }
+    } catch (e) {
+      // ignore error
+    }
+  }, [draftId]); // Only run once on draftId change
+
   // Initialize Yjs document and WebSocket provider
   useEffect(() => {
+    if (!enabled) {
+      setIsConnected(false);
+      return;
+    }
+
     try {
       const ydoc = new Y.Doc();
       ydocRef.current = ydoc;
@@ -60,7 +79,7 @@ export function useCollaboration({
 
       // Initialize WebSocket provider
       const provider = new WebsocketProvider(WEBSOCKET_URL, `draft-${draftId}`, ydoc, {
-        connect: true,
+        connect: false,
       });
       providerRef.current = provider;
 
@@ -71,6 +90,8 @@ export function useCollaboration({
         color: generateUserColor(userId),
         lastActive: Date.now(),
       });
+
+      provider.connect();
 
       // Connection status handlers
       provider.on('status', (event: { status: string }) => {
@@ -129,16 +150,28 @@ export function useCollaboration({
       return () => {
         provider.disconnect();
         ydoc.destroy();
+        ydocRef.current = null;
+        providerRef.current = null;
+        sharedRef.current = null;
       };
     } catch (error) {
       if (onError && error instanceof Error) {
         onError(error);
       }
     }
-  }, [draftId, userId, userName, onSync, onError]);
+  }, [draftId, userId, userName, enabled, onSync, onError]);
 
   // Update field value with transaction
   const updateField = useCallback((field: 'recipient' | 'token' | 'amount' | 'memo', value: string) => {
+    // Local fallback
+    try {
+      const saved = JSON.parse(localStorage.getItem(`draft-${draftId}`) || '{}');
+      saved[field] = value;
+      localStorage.setItem(`draft-${draftId}`, JSON.stringify(saved));
+    } catch (e) {
+      // ignore error
+    }
+
     if (!ydocRef.current || !sharedRef.current) return;
 
     const yText = sharedRef.current[field];
@@ -161,21 +194,28 @@ export function useCollaboration({
         yMetadata.set('recentChanges', recentChanges.slice(-20));
       });
     }
-  }, [userId]);
+  }, [draftId, userId]);
 
   // Update cursor position for awareness
-  const updateCursor = useCallback((field: string, position: number) => {
+  const updateCursor = useCallback((field: string, position: number, isTyping: boolean = false) => {
     if (!providerRef.current) return;
     providerRef.current.awareness.setLocalStateField('cursor', { 
       field, 
       position,
       timestamp: Date.now(),
+      isTyping
     });
   }, []);
 
   // Get current draft state
   const getDraftState = useCallback((): Partial<ProposalDraft> | null => {
-    if (!sharedRef.current) return null;
+    if (!sharedRef.current) {
+      try {
+        return JSON.parse(localStorage.getItem(`draft-${draftId}`) || '{}');
+      } catch(e) {
+        return null;
+      }
+    }
     return {
       recipient: sharedRef.current.recipient.toString(),
       token: sharedRef.current.token.toString(),
@@ -198,6 +238,24 @@ export function useCollaboration({
     }
   }, []);
 
+  // Resolve conflict explicitly
+  const resolveConflict = useCallback((resolvedState: Partial<ProposalDraft>) => {
+    if (!ydocRef.current || !sharedRef.current) return;
+    ydocRef.current.transact(() => {
+      const yMetadata = sharedRef.current!.metadata;
+      yMetadata.set('recentChanges', []); // Clear conflicts
+      
+      for (const [key, value] of Object.entries(resolvedState)) {
+        if (key === 'recipient' || key === 'token' || key === 'amount' || key === 'memo') {
+          const yText = sharedRef.current![key];
+          yText.delete(0, yText.length);
+          yText.insert(0, value as string);
+        }
+      }
+    });
+    setHasConflict(false);
+  }, []);
+
   return {
     isConnected,
     collaborators,
@@ -208,6 +266,7 @@ export function useCollaboration({
     getDraftState,
     undo,
     redo,
+    resolveConflict,
   };
 }
 
