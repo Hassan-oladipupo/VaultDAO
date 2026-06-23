@@ -23,12 +23,12 @@ use soroban_sdk::{contracttype, Address, Env, String, Vec};
 use crate::errors::VaultError;
 use crate::types::{
     AuditEntry, BatchExecutionResult, BatchTransaction, Comment, Config, CumulativeVolume,
-    DelegatedPermission, DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot, FeeStructure,
-    FeeTier, FundingRound, FundingRoundConfig, GasConfig, InsuranceConfig, ListMode,
-    NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalTemplate,
-    RecoveryProposal, Reputation, RetryState, Role, RoleAssignment, StakeRecord, StakingConfig,
-    SwapProposal, SwapResult, TierFeeConfig, TimeWeightedConfig, TokenLock, VaultMetrics,
-    VelocityConfig, VotingStrategy,
+    DelegatedPermission, DexConfig, Escrow, EscrowCondition, ExecutionFeeEstimate,
+    ExecutionSnapshot, FeeStructure, FeeTier, FundingRound, FundingRoundConfig, GasConfig,
+    InsuranceConfig, ListMode, NotificationPreferences, PermissionGrant, Proposal,
+    ProposalAmendment, ProposalTemplate, RecoveryProposal, Reputation, RetryState, Role,
+    RoleAssignment, StakeRecord, StakingConfig, SwapProposal, SwapResult, TierFeeConfig,
+    TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy,
 };
 
 /// Core storage key definitions (kept minimal to avoid size limits)
@@ -206,6 +206,8 @@ pub enum FeatureKey {
     TierFeeConfig,
     /// Per-payer cumulative volume within the current fee window (Temporary) -> CumulativeVolume
     CumulativeVolume(Address),
+    /// Price-gate condition for an escrow (Persistent) -> EscrowCondition
+    EscrowConditionKey(u64),
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -1858,6 +1860,28 @@ pub fn set_cumulative_volume(env: &Env, payer: &Address, cv: &CumulativeVolume, 
     env.storage()
         .temporary()
         .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+}
+
+// ============================================================================
+// Price-Gated Escrow Condition Storage
+// ============================================================================
+
+/// Returns the `EscrowCondition` stored for `escrow_id`, or `None` if no
+/// condition was attached (i.e. the escrow was created via `create_escrow`).
+pub fn get_escrow_condition(env: &Env, escrow_id: u64) -> Option<EscrowCondition> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::EscrowConditionKey(escrow_id))
+}
+
+/// Persists an `EscrowCondition` for `escrow_id`.  The TTL matches the
+/// escrow's own persistent storage lifetime.
+pub fn set_escrow_condition(env: &Env, escrow_id: u64, condition: &EscrowCondition) {
+    let key = FeatureKey::EscrowConditionKey(escrow_id);
+    env.storage().persistent().set(&key, condition);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
 }
 
 // ============================================================================

@@ -25,15 +25,15 @@ use soroban_sdk::{contract, contractimpl, Address, Env, IntoVal, Map, String, Sy
 use types::{
     AuditAction, AuditEntry, BatchExecutionResult, BatchOperation, BatchStatus, BatchTransaction,
     CancellationRecord, Comment, Condition, ConditionLogic, Config, DexConfig, Escrow,
-    EscrowStatus, ExecutionFeeEstimate, FeeTier, FundingMilestone, FundingMilestoneStatus,
-    FundingRound, FundingRoundConfig, FundingRoundStatus, GasConfig, InitConfig, InsuranceConfig,
-    ListMode, Milestone, NotificationPreferences, OptionalVaultOracleConfig, Priority, Proposal,
-    ProposalAmendment, ProposalStatus, ProposalTemplate, RecoveryConfig, RecoveryProposal,
-    RecoveryStatus, RecurringPayment, Reputation, RetryConfig, RetryState, Role, RoleAssignment,
-    StreamStatus, StreamingPayment, Subscription, SubscriptionPayment, SubscriptionStatus,
-    SubscriptionTier, SwapProposal, SwapResult, TemplateOverrides, ThresholdStrategy,
-    TierFeeConfig, TransferDetails, VaultMetrics, VaultOracleConfig, VaultPriceData,
-    VotingStrategy,
+    EscrowCondition, EscrowStatus, ExecutionFeeEstimate, FeeTier, FundingMilestone,
+    FundingMilestoneStatus, FundingRound, FundingRoundConfig, FundingRoundStatus, GasConfig,
+    InitConfig, InsuranceConfig, ListMode, Milestone, NotificationPreferences,
+    OptionalVaultOracleConfig, PriceOracleClient, Priority, Proposal, ProposalAmendment,
+    ProposalStatus, ProposalTemplate, RecoveryConfig, RecoveryProposal, RecoveryStatus,
+    RecurringPayment, Reputation, RetryConfig, RetryState, Role, RoleAssignment, StreamStatus,
+    StreamingPayment, Subscription, SubscriptionPayment, SubscriptionStatus, SubscriptionTier,
+    SwapProposal, SwapResult, TemplateOverrides, ThresholdStrategy, TierFeeConfig, TransferDetails,
+    VaultMetrics, VaultOracleConfig, VaultPriceData, VotingStrategy,
 };
 
 /// The main contract structure for VaultDAO.
@@ -92,6 +92,8 @@ fn calculate_expiration_ledger(config: &Config, priority: &Priority, current_led
 mod test;
 #[cfg(test)]
 mod test_audit;
+#[cfg(test)]
+mod test_escrow_oracle;
 #[cfg(test)]
 mod test_fees;
 #[cfg(test)]
@@ -5026,6 +5028,208 @@ impl VaultDAO {
     /// Get all escrows for a recipient
     pub fn get_recipient_escrows(env: Env, recipient: Address) -> Vec<u64> {
         storage::get_recipient_escrows(&env, &recipient)
+    }
+
+    // ============================================================================
+    // Price-Gated Escrow Conditions (Issue: feature/escrow-oracle)
+    // ============================================================================
+
+    /// Create an escrow with an attached price condition.
+    ///
+    /// This is identical to `create_escrow` except it additionally stores an
+    /// `EscrowCondition` that will be evaluated by `attempt_escrow_release`.
+    /// Use `EscrowCondition::Manual` when you want standard manual-release
+    /// behaviour while still using the unified `attempt_escrow_release` path.
+    ///
+    /// # Errors
+    /// Returns `InvalidAmount` if a price condition carries a non-positive threshold.
+    /// (XDR spec limits VaultError to 50 variants; dedicated error reuses InvalidAmount.)
+    pub fn create_escrow_with_condition(
+        env: Env,
+        funder: Address,
+        recipient: Address,
+        token_addr: Address,
+        amount: i128,
+        milestones: Vec<Milestone>,
+        duration_ledgers: u64,
+        arbitrator: Address,
+        condition: EscrowCondition,
+    ) -> Result<u64, VaultError> {
+        // Validate the condition before locking any funds
+        match &condition {
+            EscrowCondition::Manual => {}
+            EscrowCondition::PriceAbove(args) | EscrowCondition::PriceBelow(args) => {
+                if args.threshold <= 0 {
+                    return Err(VaultError::InvalidAmount);
+                }
+            }
+        }
+
+        // Delegate escrow creation to the existing function (DRY)
+        let escrow_id = Self::create_escrow(
+            env.clone(),
+            funder,
+            recipient,
+            token_addr,
+            amount,
+            milestones,
+            duration_ledgers,
+            arbitrator,
+        )?;
+
+        // Persist the condition alongside the escrow
+        storage::set_escrow_condition(&env, escrow_id, &condition);
+
+        Ok(escrow_id)
+    }
+
+    /// Attempt to release an escrow that has a price-gated condition.
+    ///
+    /// Workflow:
+    /// 1. Load the escrow; fail if not found or already finalized.
+    /// 2. Confirm the escrow is in a releasable state (MilestonesComplete *or* expired).
+    /// 3. Load the attached `EscrowCondition`:
+    ///    - `Manual`     → proceed without an oracle call.
+    ///    - `PriceAbove` → call oracle; release only if `price > threshold`.
+    ///    - `PriceBelow` → call oracle; release only if `price < threshold`.
+    /// 4. If the oracle call fails → return `DexError` without modifying state.
+    /// 5. If the price is stale   → return `RetryError` without modifying state.
+    /// 6. If the condition is not met → return `ConditionsNotMet`.
+    /// 7. Otherwise release funds using the same logic as `release_escrow_funds`.
+    ///
+    /// # Idempotency
+    /// Returns `ProposalAlreadyExecuted` if the escrow is already `Released` or `Refunded`.
+    /// (XDR spec limits VaultError to 50 variants; dedicated errors reuse existing codes.)
+    pub fn attempt_escrow_release(env: Env, escrow_id: u64) -> Result<i128, VaultError> {
+        let mut escrow = storage::get_escrow(&env, escrow_id)?;
+
+        // Idempotency guard — reuses ProposalAlreadyExecuted (XDR 50-variant cap)
+        if escrow.status == EscrowStatus::Released || escrow.status == EscrowStatus::Refunded {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let is_expired = current_ledger >= escrow.expires_at;
+        let milestones_done = escrow.status == EscrowStatus::MilestonesComplete;
+
+        if !milestones_done && !is_expired {
+            return Err(VaultError::ConditionsNotMet);
+        }
+
+        // Evaluate the oracle condition (if any)
+        if let Some(condition) = storage::get_escrow_condition(&env, escrow_id) {
+            match condition {
+                EscrowCondition::Manual => {
+                    // No oracle check required
+                }
+                EscrowCondition::PriceAbove(ref args) => {
+                    let price = Self::fetch_oracle_price(&env, &args.oracle, &args.asset_pair)?;
+                    Self::check_price_staleness(&env, &price)?;
+                    let met = price.price > args.threshold;
+                    events::emit_oracle_release_attempted(
+                        &env,
+                        escrow_id,
+                        &args.asset_pair,
+                        price.price,
+                        args.threshold,
+                        met,
+                    );
+                    if !met {
+                        return Err(VaultError::ConditionsNotMet);
+                    }
+                }
+                EscrowCondition::PriceBelow(ref args) => {
+                    let price = Self::fetch_oracle_price(&env, &args.oracle, &args.asset_pair)?;
+                    Self::check_price_staleness(&env, &price)?;
+                    let met = price.price < args.threshold;
+                    events::emit_oracle_release_attempted(
+                        &env,
+                        escrow_id,
+                        &args.asset_pair,
+                        price.price,
+                        args.threshold,
+                        met,
+                    );
+                    if !met {
+                        return Err(VaultError::ConditionsNotMet);
+                    }
+                }
+            }
+        }
+        // No condition stored → treat as Manual (standard release)
+
+        // ── Release logic (mirrors release_escrow_funds) ──────────────────────
+        let amount_to_release = if is_expired {
+            escrow.total_amount - escrow.released_amount
+        } else {
+            escrow.amount_to_release()
+        };
+
+        if amount_to_release <= 0 {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        let release_to = if is_expired {
+            escrow.funder.clone()
+        } else {
+            escrow.recipient.clone()
+        };
+
+        token::transfer(&env, &escrow.token, &release_to, amount_to_release);
+
+        escrow.released_amount += amount_to_release;
+        if escrow.released_amount >= escrow.total_amount {
+            escrow.status = if is_expired {
+                EscrowStatus::Refunded
+            } else {
+                EscrowStatus::Released
+            };
+            escrow.finalized_at = current_ledger;
+        }
+
+        storage::set_escrow(&env, &escrow);
+
+        events::emit_escrow_released(&env, escrow_id, &release_to, amount_to_release, is_expired);
+
+        Ok(amount_to_release)
+    }
+
+    /// Query the release condition attached to an escrow.
+    /// Returns `None` when the escrow was created via `create_escrow` (no condition set).
+    pub fn get_escrow_condition(env: Env, escrow_id: u64) -> Option<EscrowCondition> {
+        storage::get_escrow_condition(&env, escrow_id)
+    }
+
+    // ── Private oracle helpers ────────────────────────────────────────────────
+
+    /// Call the oracle and return the price data, or `DexError` on failure.
+    /// Reuses `DexError` — both are cross-contract call failures (XDR 50-variant cap).
+    fn fetch_oracle_price(
+        env: &Env,
+        oracle: &Address,
+        asset_pair: &Symbol,
+    ) -> Result<VaultPriceData, VaultError> {
+        let client = PriceOracleClient::new(env, oracle);
+        // try_get_price returns Result<Result<T, ConversionError>, InvokeError> — flatten both
+        match client.try_get_price(asset_pair) {
+            Ok(Ok(price)) => Ok(price),
+            _ => Err(VaultError::DexError),
+        }
+    }
+
+    /// Verify the oracle price was published recently enough.
+    /// Returns `RetryError` on staleness — consistent with the existing oracle staleness
+    /// handling elsewhere in the contract (see fetch_oracle_update ~line 3600).
+    fn check_price_staleness(env: &Env, price: &VaultPriceData) -> Result<(), VaultError> {
+        let max_staleness = match storage::get_oracle_config(env) {
+            OptionalVaultOracleConfig::Some(cfg) => cfg.max_staleness as u64,
+            OptionalVaultOracleConfig::None => 100,
+        };
+        let age = (env.ledger().sequence() as u64).saturating_sub(price.timestamp);
+        if age > max_staleness {
+            return Err(VaultError::RetryError);
+        }
+        Ok(())
     }
 
     // ============================================================================

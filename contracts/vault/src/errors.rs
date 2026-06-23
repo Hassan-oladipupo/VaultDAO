@@ -62,5 +62,11 @@ pub enum VaultError {
     MetadataValueInvalid = 233,
 }
 
+// Escrow oracle-condition errors reuse existing codes (XDR spec caps #[contracterror] at 50 variants):
+//   OracleUnavailable   → DexError           (cross-contract call failure)
+//   OraclePriceStale    → RetryError         (consistent with oracle staleness handling at lib.rs ~line 3600)
+//   EscrowConditionInvalid → InvalidAmount   (zero / negative threshold is an invalid amount)
+//   EscrowAlreadyFinalized → ProposalAlreadyExecuted  (operation already completed)
+
 // Compatibility markers for CI source checks:
 // DelegationError, DelegationChainTooLong, CircularDelegation

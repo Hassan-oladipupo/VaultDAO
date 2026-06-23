@@ -996,3 +996,24 @@ pub fn emit_stream_claimed(env: &Env, stream_id: u64, recipient: &Address, amoun
         (recipient.clone(), amount),
     );
 }
+
+// ============================================================================
+// Price-Gated Escrow Oracle Events (Issue: feature/escrow-oracle)
+// ============================================================================
+
+/// Emit when attempt_escrow_release evaluates a price condition.
+/// `condition_met` indicates whether the oracle check passed and funds were released.
+/// `oracle_price` is the price returned by the oracle (0 if oracle was unavailable).
+pub fn emit_oracle_release_attempted(
+    env: &Env,
+    escrow_id: u64,
+    asset_pair: &Symbol,
+    oracle_price: i128,
+    threshold: i128,
+    condition_met: bool,
+) {
+    env.events().publish(
+        (Symbol::new(env, "oracle_release"), escrow_id),
+        (asset_pair.clone(), oracle_price, threshold, condition_met),
+    );
+}

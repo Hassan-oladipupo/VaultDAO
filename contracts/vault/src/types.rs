@@ -1337,6 +1337,51 @@ impl Escrow {
         (self.total_amount * completed_percentage as i128) / 100 - self.released_amount
     }
 }
+
+// ============================================================================
+// Price-Gated Escrow Conditions (Issue: feature/escrow-oracle)
+// ============================================================================
+
+/// Oracle + asset information shared by both price-condition variants.
+/// Stored as a tuple variant payload because `#[contracttype]` enums require
+/// tuple or unit variants (not named/struct variants).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PriceConditionArgs {
+    /// Address of the oracle contract exposing `get_price(asset_pair) -> VaultPriceData`.
+    pub oracle: Address,
+    /// The asset-pair symbol the oracle understands (e.g. `"XLM_USD"`).
+    pub asset_pair: Symbol,
+    /// Price threshold in oracle-native units; must be strictly positive.
+    pub threshold: i128,
+}
+
+/// Release condition attached to an escrow.
+///
+/// `Manual`     — original behaviour; only `release_escrow_funds` can release.
+/// `PriceAbove` — release when oracle reports `price > threshold`.
+/// `PriceBelow` — release when oracle reports `price < threshold`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum EscrowCondition {
+    /// No programmatic condition — release is triggered manually.
+    Manual,
+    /// Release when the oracle price is strictly above the threshold.
+    PriceAbove(PriceConditionArgs),
+    /// Release when the oracle price is strictly below the threshold.
+    PriceBelow(PriceConditionArgs),
+}
+
+/// Thin client interface for an external oracle contract.
+///
+/// The oracle must expose a single `get_price(asset_pair: Symbol) -> VaultPriceData`
+/// method.  Any contract that satisfies this ABI (including the in-test MockOracle)
+/// can be used as the `oracle` address inside an `EscrowCondition`.
+#[soroban_sdk::contractclient(name = "PriceOracleClient")]
+pub trait PriceOracleInterface {
+    fn get_price(env: soroban_sdk::Env, asset_pair: soroban_sdk::Symbol) -> VaultPriceData;
+}
+
 // ============================================================================
 // Dynamic Fee Structure (Issue: feature/dynamic-fees)
 // ============================================================================
