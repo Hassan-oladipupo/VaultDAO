@@ -1,160 +1,135 @@
-/**
- * Tests for NotificationCenter component
- * 
- * Note: These are example tests showing expected behavior.
- * In a real project, you would use Jest or Vitest with @testing-library/react.
- */
-
+import React from 'react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import NotificationCenter from '../NotificationCenter';
 import type { Notification } from '../../types/notification';
 
-// Mock localStorage
-const localStorageMock = (() => {
-  let store: Record<string, string> = {};
-  return {
-    getItem: (key: string) => store[key] || null,
-    setItem: (key: string, value: string) => {
-      store[key] = value;
-    },
-    removeItem: (key: string) => {
-      delete store[key];
-    },
-    clear: () => {
-      store = {};
-    },
-  };
-})();
+// ── Mocks ──────────────────────────────────────────────────────────────────────
 
-Object.defineProperty(window, 'localStorage', {
-  value: localStorageMock,
+const mockMarkAsRead = vi.fn();
+const mockMarkAllAsRead = vi.fn();
+const mockDismiss = vi.fn();
+const mockSetFilter = vi.fn();
+const mockSetSort = vi.fn();
+const mockClearAll = vi.fn();
+const mockUpdateTypeSettings = vi.fn();
+
+const makeNotification = (overrides: Partial<Notification> = {}): Notification => ({
+  id: `notif-${Math.random()}`,
+  category: 'proposals',
+  priority: 'normal',
+  status: 'unread',
+  title: 'Test notification',
+  message: 'Test message',
+  timestamp: Date.now(),
+  ...overrides,
 });
 
-const mockNotifications: Notification[] = [
-  {
-    id: '1',
-    category: 'proposals',
-    priority: 'high',
-    status: 'unread',
-    title: 'New Proposal',
-    message: 'A new proposal has been submitted',
-    timestamp: Date.now() - 3600000,
-    actions: [
-      { id: 'view', label: 'View', type: 'view' },
-      { id: 'dismiss', label: 'Dismiss', type: 'dismiss' },
-    ],
-  },
-  {
-    id: '2',
-    category: 'approvals',
-    priority: 'critical',
-    status: 'unread',
-    title: 'Approval Required',
-    message: 'Your approval is needed for transaction',
-    timestamp: Date.now() - 7200000,
-  },
-  {
-    id: '3',
-    category: 'system',
-    priority: 'normal',
-    status: 'read',
-    title: 'System Update',
-    message: 'System has been updated',
-    timestamp: Date.now() - 86400000,
-  },
-];
+let mockNotifications: Notification[] = [];
+
+vi.mock('../../context/NotificationContext', () => ({
+  useNotifications: () => ({
+    notifications: mockNotifications,
+    unreadCount: mockNotifications.filter(n => n.status === 'unread').length,
+    filter: { categories: ['proposals', 'approvals', 'system', 'payments'], priorities: ['critical', 'high', 'normal', 'low'] },
+    sort: { by: 'timestamp', order: 'desc' },
+    page: 1,
+    pageSize: 20,
+    markAsRead: mockMarkAsRead,
+    markAllAsRead: mockMarkAllAsRead,
+    dismissNotification: mockDismiss,
+    setFilter: mockSetFilter,
+    setSort: mockSetSort,
+    setPage: vi.fn(),
+    clearAll: mockClearAll,
+    connectionStatus: 'connected',
+    typeSettings: { disabledCategories: [], muteSounds: false },
+    updateTypeSettings: mockUpdateTypeSettings,
+  }),
+}));
+
+vi.mock('react-infinite-scroll-component', () => ({
+  default: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+}));
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
 
 describe('NotificationCenter', () => {
   beforeEach(() => {
-    localStorageMock.clear();
     vi.clearAllMocks();
+    mockNotifications = [];
   });
 
-  const renderWithProvider = (isOpen = true, onClose = vi.fn()) => {
-    return render(
-      <NotificationProvider>
-        <NotificationCenter isOpen={isOpen} onClose={onClose} />
-      </NotificationProvider>
-    );
-  };
-
-  it('renders when open', () => {
-    renderWithProvider(true);
+  it('renders when isOpen is true', () => {
+    render(<NotificationCenter isOpen onClose={vi.fn()} />);
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(screen.getByText('Notifications')).toBeInTheDocument();
   });
 
-  it('does not render when closed', () => {
-    renderWithProvider(false);
+  it('does not render when isOpen is false', () => {
+    render(<NotificationCenter isOpen={false} onClose={vi.fn()} />);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('calls onClose when close button is clicked', () => {
-    const onClose = vi.fn();
-    renderWithProvider(true, onClose);
-    
-    const closeButton = screen.getByLabelText('Close notification center');
-    fireEvent.click(closeButton);
-    
-    expect(onClose).toHaveBeenCalledTimes(1);
+  it('shows unread count badge', () => {
+    mockNotifications = [makeNotification({ status: 'unread' }), makeNotification({ status: 'unread' })];
+    render(<NotificationCenter isOpen onClose={vi.fn()} />);
+    expect(screen.getByText('2')).toBeInTheDocument();
+  });
+
+  it('groups notifications by priority — urgent section appears first', () => {
+    mockNotifications = [
+      makeNotification({ priority: 'critical', title: 'Critical alert' }),
+      makeNotification({ priority: 'normal', title: 'Normal info' }),
+    ];
+    render(<NotificationCenter isOpen onClose={vi.fn()} />);
+    const sections = screen.getAllByRole('button', { name: /urgent|normal/i });
+    // Urgent section header should appear before Normal
+    expect(sections[0].textContent).toMatch(/urgent/i);
+  });
+
+  it('collapses normal and low priority sections by default', () => {
+    mockNotifications = [makeNotification({ priority: 'normal', title: 'Normal notification' })];
+    render(<NotificationCenter isOpen onClose={vi.fn()} />);
+    // Normal section header exists but items are collapsed
+    expect(screen.getByText(/normal/i)).toBeInTheDocument();
+    expect(screen.queryByText('Normal notification')).not.toBeInTheDocument();
+  });
+
+  it('expands a collapsed section on click', () => {
+    mockNotifications = [makeNotification({ priority: 'normal', title: 'Normal notification' })];
+    render(<NotificationCenter isOpen onClose={vi.fn()} />);
+    const normalHeader = screen.getByRole('button', { name: /normal/i });
+    fireEvent.click(normalHeader);
+    expect(screen.getByText('Normal notification')).toBeInTheDocument();
+  });
+
+  it('calls markAllAsRead when "Mark all read" is clicked', () => {
+    mockNotifications = [makeNotification()];
+    render(<NotificationCenter isOpen onClose={vi.fn()} />);
+    fireEvent.click(screen.getByText('Mark all read'));
+    expect(mockMarkAllAsRead).toHaveBeenCalledOnce();
+  });
+
+  it('calls clearAll when "Clear all" is clicked', () => {
+    mockNotifications = [makeNotification()];
+    render(<NotificationCenter isOpen onClose={vi.fn()} />);
+    fireEvent.click(screen.getByText('Clear all'));
+    expect(mockClearAll).toHaveBeenCalledOnce();
   });
 
   it('calls onClose when backdrop is clicked', () => {
     const onClose = vi.fn();
-    renderWithProvider(true, onClose);
-    
-    const backdrop = document.querySelector('.fixed.inset-0.bg-black\\/60');
-    if (backdrop) {
-      fireEvent.click(backdrop);
-      expect(onClose).toHaveBeenCalledTimes(1);
-    }
+    render(<NotificationCenter isOpen onClose={onClose} />);
+    // Click the backdrop (first div with aria-hidden)
+    const backdrop = document.querySelector('[aria-hidden="true"]') as HTMLElement;
+    fireEvent.click(backdrop);
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it('calls onClose when Escape key is pressed', () => {
-    const onClose = vi.fn();
-    renderWithProvider(true, onClose);
-    
-    fireEvent.keyDown(document, { key: 'Escape' });
-    
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('displays empty state when no notifications', () => {
-    renderWithProvider(true);
-    expect(screen.getByText('No notifications')).toBeInTheDocument();
-    expect(screen.getByText("You're all caught up!")).toBeInTheDocument();
-  });
-
-  it('toggles filter panel', () => {
-    renderWithProvider(true);
-    
-    const filterButton = screen.getByText('Filter');
-    expect(screen.queryByRole('region', { name: 'Notification filters' })).not.toBeInTheDocument();
-    
-    fireEvent.click(filterButton);
-    expect(screen.getByRole('region', { name: 'Notification filters' })).toBeInTheDocument();
-    
-    fireEvent.click(filterButton);
-    expect(screen.queryByRole('region', { name: 'Notification filters' })).not.toBeInTheDocument();
-  });
-
-  it('has accessible ARIA attributes', () => {
-    renderWithProvider(true);
-    
-    const dialog = screen.getByRole('dialog');
-    expect(dialog).toHaveAttribute('aria-modal', 'true');
-    expect(dialog).toHaveAttribute('aria-labelledby', 'notification-center-title');
-  });
-
-  it('disables mark all read button when no unread notifications', () => {
-    renderWithProvider(true);
-    
-    const markAllButton = screen.getByLabelText('Mark all as read');
-    expect(markAllButton).toBeDisabled();
-  });
-
-  it('disables clear all button when no notifications', () => {
-    renderWithProvider(true);
-    
-    const clearAllButton = screen.getByLabelText('Clear all notifications');
-    expect(clearAllButton).toBeDisabled();
+  it('toggles mute via the mute button', () => {
+    render(<NotificationCenter isOpen onClose={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText('Mute notification sounds'));
+    expect(mockUpdateTypeSettings).toHaveBeenCalledWith({ muteSounds: true });
   });
 });

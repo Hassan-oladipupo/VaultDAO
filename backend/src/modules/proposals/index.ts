@@ -35,7 +35,13 @@ export * from "./types.js";
 // Core components
 export { ProposalActivityConsumer, createProposalConsumer } from "./consumer.js";
 export { ProposalActivityAggregator, createProposalAggregator } from "./aggregator.js";
-export type { ProposalActivityStats, ActivityBucket } from "./aggregator.js";
+export type {
+  ProposalActivityStats,
+  ActivityBucket,
+  GetAllProposalsParams,
+  GetAllProposalsResult,
+} from "./aggregator.js";
+export { GET_ALL_PROPOSALS_MAX_LIMIT } from "./aggregator.js";
 
 // Transforms
 export { ProposalEventTransformer, transformEventBatch, isProposalEvent } from "./transforms.js";

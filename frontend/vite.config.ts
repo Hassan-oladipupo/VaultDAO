@@ -93,8 +93,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),
-      // is-lite ships without its ESM build — point to the CJS entry instead
-      'is-lite': resolve(__dirname, 'node_modules/is-lite/dist/index.js'),
     },
   },
   optimizeDeps: {

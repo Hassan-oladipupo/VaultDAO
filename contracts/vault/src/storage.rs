@@ -22,13 +22,14 @@ use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::errors::VaultError;
 use crate::types::{
-    AuditEntry, BatchExecutionResult, BatchTransaction, Comment, Config, CumulativeVolume,
-    DelegatedPermission, DexConfig, Escrow, EscrowCondition, ExecutionFeeEstimate,
-    ExecutionSnapshot, FeeStructure, FeeTier, FundingRound, FundingRoundConfig, GasConfig,
-    InsuranceConfig, ListMode, NotificationPreferences, NotificationPrefs, PendingAdminRotation,
-    PermissionGrant, Proposal, ProposalAmendment, ProposalTemplate, RecoveryProposal, Reputation,
-    RetryState, Role, RoleAssignment, StakeRecord, StakingConfig, SwapProposal, SwapResult,
-    TierFeeConfig, TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy,
+    AuditEntry, BatchExecutionResult, BatchTransaction, Comment, Config, DelegatedPermission,
+    Delegation, DelegationHistory, DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot,
+    FeeStructure, FundingRound, FundingRoundConfig, GasConfig, InsuranceConfig, ListMode,
+    NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalStatus,
+    ProposalTemplate, RecoveryProposal, Reputation, ReputationConfig, RetryState, Role,
+    RoleAssignment, StakeRecord, StakingConfig, Subscription, SwapProposal, SwapResult,
+    TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy, BridgeConfig,
+    CrossChainProposal,
 };
 
 /// Core storage key definitions (kept minimal to avoid size limits)
@@ -99,14 +100,36 @@ pub enum DataKey {
     ExecutionSnapshot(u64),
     /// Execution fee estimate
     ExecutionFeeEstimate(u64),
-    /// Index of all addresses that have set NotificationPrefs -> Vec<Address>
-    NotificationPrefsIndex,
+    /// Voting power delegation (delegator) -> Delegation
+    Delegation(Address),
+    /// Delegation history for an address -> Vec<DelegationHistory>
+    DelegationHistory(Address),
+    /// Next delegation history ID counter -> u64
+    NextDelegationId,
+    /// Reverse delegation index: delegate -> Vec<delegators>
+    DelegatorsFor(Address),
+    /// Per-proposer per-token velocity history -> Vec<u64>
+    VelocityHistoryByToken(Address, Address),
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CounterKey {
+    Template = 1,
+    Escrow = 2,
+    Dispute = 3,
+    Subscription = 4,
+    Recovery = 5,
+    FundingRound = 6,
+    Batch = 7,
 }
 
 /// Feature-specific storage keys (split to avoid enum size limits)
 #[contracttype]
 #[derive(Clone)]
 pub enum FeatureKey {
+    /// Generic counter key
+    Counter(CounterKey),
     /// Insurance configuration -> InsuranceConfig
     InsuranceConfig,
     /// Per-user notification preferences -> NotificationPreferences
@@ -125,16 +148,12 @@ pub enum FeatureKey {
     Metrics,
     /// Proposal template by ID -> ProposalTemplate
     Template(u64),
-    /// Next template ID counter -> u64
-    NextTemplateId,
     /// Template name to ID mapping -> u64
     TemplateName(soroban_sdk::Symbol),
     /// Retry state for a proposal -> RetryState
     RetryState(u64),
     /// Escrow agreement by ID -> Escrow
     Escrow(u64),
-    /// Next escrow ID counter -> u64
-    NextEscrowId,
     /// Escrow IDs by funder address -> Vec<u64>
     FunderEscrows(Address),
     /// Escrow IDs by recipient address -> Vec<u64>
@@ -165,28 +184,21 @@ pub enum FeatureKey {
     CrossVaultConfig,
     /// Dispute by ID -> Dispute
     Dispute(u64),
-    /// Next dispute ID counter -> u64
-    NextDisputeId,
     /// Disputes for a proposal -> Vec<u64>
     ProposalDisputes(u64),
     /// Batch transaction by ID -> BatchTransaction
     Batch(u64),
-    /// Batch ID counter -> u64
-    BatchIdCounter,
     /// Batch execution result -> BatchExecutionResult
     BatchResult(u64),
     /// Batch rollback state -> Vec<(Address, i128)>
     BatchRollback(u64),
-    /// Next batch ID counter -> u64
+    /// Threshold reduction flag for a proposal -> bool
+    ThresholdReduced(u64),
     /// Recovery proposal by ID -> RecoveryProposal
     RecoveryProposal(u64),
-    /// Next recovery ID counter -> u64
-    NextRecoveryId,
     /// Insurance pool accumulated slashed funds (Token Address) -> i128
     /// Funding round by ID -> FundingRound
     FundingRound(u64),
-    /// Next funding round ID counter -> u64
-    NextFundingRoundId,
     /// Funding round IDs by proposal ID -> Vec<u64>
     ProposalFundingRounds(u64),
     /// Funding round configuration -> FundingRoundConfig
@@ -202,17 +214,24 @@ pub enum FeatureKey {
     Permissions(Address),
     /// Delegated permissions (delegatee, delegator, permission as u32) -> DelegatedPermission
     DelegatedPermission(Address, Address, u32),
-    // Stream payment storage (nested with StreamKey)
-    // Stream(StreamKey), // Feature incomplete
-    /// Tiered recurring-payment fee configuration -> TierFeeConfig
-    TierFeeConfig,
-    /// Per-payer cumulative volume within the current fee window (Temporary) -> CumulativeVolume
-    CumulativeVolume(Address),
-    /// Price-gate condition for an escrow (Persistent) -> EscrowCondition
-    EscrowConditionKey(u64),
-    /// In-flight admin rotation request (Persistent) -> PendingAdminRotation
-    /// Exactly one may exist at a time; absent means no rotation is pending.
-    PendingAdminRotation,
+    /// Subscription by ID -> Subscription
+    Subscription(u64),
+    /// Subscription IDs indexed by subscriber address -> Vec<u64>
+    SubscriberIndex(Address),
+    /// Reputation decay configuration -> ReputationConfig
+    ReputationConfig,
+    /// Bridge configuration -> BridgeConfig
+    BridgeConfig,
+    /// Cross-chain proposal -> CrossChainProposal
+    CrossChainProposal(u64),
+    /// Re-entrancy guard for bridge execution (proposal_id) -> bool
+    BridgeLock(u64),
+    /// Time-bucketed metrics snapshot keyed by week number -> VaultMetrics
+    MetricsBucket(u64),
+    /// Ordered list of stored bucket week numbers (for pruning) -> Vec<u64>
+    MetricsBucketIndex,
+    /// Pending config change proposal ID -> u64
+    PendingConfig,
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -273,6 +292,7 @@ pub fn set_approval_ledger(env: &Env, proposal_id: u64, voter: &Address, ledger:
         .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
 }
 
+#[allow(dead_code)]
 pub fn get_approval_ledger(env: &Env, proposal_id: u64, voter: &Address) -> Option<u64> {
     let key = DataKey::ApprovalLedger(proposal_id, voter.clone());
     env.storage().persistent().get(&key)
@@ -358,13 +378,36 @@ pub fn set_proposal(env: &Env, proposal: &Proposal) {
     env.storage()
         .persistent()
         .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+    // Maintain StatusIndex
+    let status_u32 = proposal.status.clone() as u32;
+    let idx_key = DataKey::StatusIndex(status_u32);
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&idx_key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !ids.contains(proposal.id) {
+        ids.push_back(proposal.id);
+        env.storage().persistent().set(&idx_key, &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&idx_key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+    }
 }
 
 pub fn get_next_proposal_id(env: &Env) -> u64 {
     env.storage()
         .instance()
         .get(&DataKey::NextProposalId)
-        .unwrap_or(1)
+        .unwrap_or_else(|| {
+            // Start from prefix + 1 if prefix is set
+            let cfg: Option<crate::types::Config> = env.storage().instance().get(&DataKey::Config);
+            if let Some(c) = cfg {
+                if c.proposal_id_prefix > 0 { c.proposal_id_prefix + 1 } else { 1 }
+            } else {
+                1
+            }
+        })
 }
 
 pub fn increment_proposal_id(env: &Env) -> u64 {
@@ -420,6 +463,25 @@ pub fn get_priority_queue(env: &Env, priority: u32) -> Vec<u64> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
+pub fn get_active_priority_queue(env: &Env, priority: u32) -> Vec<u64> {
+    let queue = get_priority_queue(env, priority);
+    let mut active_queue = Vec::new(env);
+
+    for proposal_id in queue.iter() {
+        let status = env
+            .storage()
+            .persistent()
+            .get::<_, Proposal>(&DataKey::Proposal(proposal_id))
+            .map(|proposal| proposal.status);
+
+        if status == Some(ProposalStatus::Pending) {
+            active_queue.push_back(proposal_id);
+        }
+    }
+
+    active_queue
+}
+
 pub fn add_to_priority_queue(env: &Env, priority: u32, proposal_id: u64) {
     let mut queue = get_priority_queue(env, priority);
     queue.push_back(proposal_id);
@@ -446,6 +508,16 @@ pub fn remove_from_priority_queue(env: &Env, priority: u32, proposal_id: u64) {
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
 }
 
+pub fn compact_priority_queue(env: &Env, priority: u32) -> Vec<u64> {
+    let active_queue = get_active_priority_queue(env, priority);
+    let key = DataKey::PriorityQueue(priority);
+    env.storage().persistent().set(&key, &active_queue);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    active_queue
+}
+
 // ============================================================================
 // Daily Spending
 // ============================================================================
@@ -463,12 +535,38 @@ pub fn get_daily_spent(env: &Env, day: u64) -> i128 {
 }
 
 pub fn add_daily_spent(env: &Env, day: u64, amount: i128) {
+    // Soroban ledger execution is single-writer per transaction; reading and
+    // writing in the same invocation is atomic with respect to other transactions.
     let current = get_daily_spent(env, day);
     let key = DataKey::DailySpent(day);
     env.storage().temporary().set(&key, &(current + amount));
     env.storage()
         .temporary()
         .extend_ttl(&key, DAY_IN_LEDGERS * 2, DAY_IN_LEDGERS * 2);
+}
+
+/// Atomically deduct `amount` from the daily spent counter.
+///
+/// Reads the current value, validates the deduction won't go negative, then
+/// writes the result in the same storage call. Returns `true` on success,
+/// `false` if the deduction would underflow (counter already at zero).
+///
+/// # Soroban single-writer guarantee
+/// Soroban executes each transaction sequentially within a ledger. A read
+/// followed by a write in the same contract invocation is therefore atomic:
+/// no other transaction can interleave between the read and the write.
+/// This prevents the double-refund race described in issue #904.
+pub fn try_deduct_daily_spent(env: &Env, day: u64, amount: i128) -> bool {
+    let current = get_daily_spent(env, day);
+    if amount > current {
+        return false;
+    }
+    let key = DataKey::DailySpent(day);
+    env.storage().temporary().set(&key, &(current - amount));
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS * 2, DAY_IN_LEDGERS * 2);
+    true
 }
 
 // ============================================================================
@@ -488,12 +586,31 @@ pub fn get_weekly_spent(env: &Env, week: u64) -> i128 {
 }
 
 pub fn add_weekly_spent(env: &Env, week: u64, amount: i128) {
+    // Soroban ledger execution is single-writer per transaction; reading and
+    // writing in the same invocation is atomic with respect to other transactions.
     let current = get_weekly_spent(env, week);
     let key = DataKey::WeeklySpent(week);
     env.storage().temporary().set(&key, &(current + amount));
     env.storage()
         .temporary()
         .extend_ttl(&key, DAY_IN_LEDGERS * 14, DAY_IN_LEDGERS * 14);
+}
+
+/// Atomically deduct `amount` from the weekly spent counter.
+///
+/// See `try_deduct_daily_spent` for the atomicity guarantee.
+/// Returns `true` on success, `false` if the deduction would underflow.
+pub fn try_deduct_weekly_spent(env: &Env, week: u64, amount: i128) -> bool {
+    let current = get_weekly_spent(env, week);
+    if amount > current {
+        return false;
+    }
+    let key = DataKey::WeeklySpent(week);
+    env.storage().temporary().set(&key, &(current - amount));
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS * 14, DAY_IN_LEDGERS * 14);
+    true
 }
 
 // ============================================================================
@@ -600,42 +717,39 @@ pub fn get_recurring_payments_paginated(
 // Streaming Payments
 // ============================================================================
 
-// pub fn get_next_stream_id(env: &Env) -> u64 {
-//     env.storage()
-//         .instance()
-//         .get::<DataKey, u64>(&DataKey::Stream(StreamKey::Counter))
-//         .unwrap_or(1)
-// }
+pub fn get_next_stream_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::NextStreamId)
+        .unwrap_or(1u64)
+}
 
-// pub fn increment_stream_id(env: &Env) -> u64 {
-//     let id = get_next_stream_id(env);
-//     env.storage()
-//         .instance()
-//         .set(&DataKey::Stream(StreamKey::Counter), &(id + 1));
-//     extend_instance_ttl(env);
-//     id
-// }
+pub fn increment_stream_id(env: &Env) -> u64 {
+    let id = get_next_stream_id(env);
+    env.storage()
+        .instance()
+        .set(&DataKey::NextStreamId, &(id + 1));
+    extend_instance_ttl(env);
+    id
+}
 
-// pub fn set_streaming_payment(env: &Env, stream: &crate::types::StreamingPayment) {
-//     let key = DataKey::Stream(StreamKey::Payment(stream.id));
-//     env.storage().persistent().set(&key, stream);
-//     env.storage()
-//         .persistent()
-//         .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
-// }
+pub fn set_streaming_payment(env: &Env, stream: &crate::types::StreamingPayment) {
+    let key = DataKey::Stream(stream.id);
+    env.storage().persistent().set(&key, stream);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
 
-// #[allow(dead_code)]
-// pub fn get_streaming_payment(
-//     env: &Env,
-//     id: u64,
-// ) -> Result<crate::types::StreamingPayment, VaultError> {
-//     let key = DataKey::Stream(StreamKey::Payment(id));
-//     env.storage()
-//         .persistent()
-//         .get(&key)
-//         .flatten()
-//         .ok_or(VaultError::ProposalNotFound)
-// }
+pub fn get_streaming_payment(
+    env: &Env,
+    id: u64,
+) -> Result<crate::types::StreamingPayment, VaultError> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Stream(id))
+        .ok_or(VaultError::ProposalNotFound)
+}
 
 // ============================================================================
 // TTL Management
@@ -675,12 +789,36 @@ pub fn add_to_whitelist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    // Maintain index
+    let mut index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::WhitelistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    if !index.contains(addr) {
+        index.push_back(addr.clone());
+        env.storage().persistent().set(&DataKey::WhitelistIndex, &index);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::WhitelistIndex, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    }
 }
 
 pub fn remove_from_whitelist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .remove(&DataKey::Whitelist(addr.clone()));
+    // Remove from index
+    let index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::WhitelistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut new_index: Vec<Address> = Vec::new(env);
+    for a in index.iter() {
+        if a != *addr { new_index.push_back(a); }
+    }
+    env.storage().persistent().set(&DataKey::WhitelistIndex, &new_index);
 }
 
 pub fn is_blacklisted(env: &Env, addr: &Address) -> bool {
@@ -696,21 +834,150 @@ pub fn add_to_blacklist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    // Maintain index
+    let mut index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::BlacklistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    if !index.contains(addr) {
+        index.push_back(addr.clone());
+        env.storage().persistent().set(&DataKey::BlacklistIndex, &index);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::BlacklistIndex, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    }
 }
 
 pub fn remove_from_blacklist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .remove(&DataKey::Blacklist(addr.clone()));
+    // Remove from index
+    let index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::BlacklistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut new_index: Vec<Address> = Vec::new(env);
+    for a in index.iter() {
+        if a != *addr { new_index.push_back(a); }
+    }
+    env.storage().persistent().set(&DataKey::BlacklistIndex, &new_index);
 }
 
+pub fn get_whitelist_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::WhitelistIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn get_blacklist_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::BlacklistIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn get_whitelist_paginated(env: &Env, offset: u64, limit: u64) -> Vec<Address> {
+    let cap: u64 = if limit > 100 { 100 } else { limit };
+    let index = get_whitelist_index(env);
+    let mut result: Vec<Address> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    for i in 0..index.len() {
+        if let Some(addr) = index.get(i) {
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(addr);
+            if result.len() as u64 >= cap { break; }
+        }
+    }
+    result
+}
+
+pub fn get_blacklist_paginated(env: &Env, offset: u64, limit: u64) -> Vec<Address> {
+    let cap: u64 = if limit > 100 { 100 } else { limit };
+    let index = get_blacklist_index(env);
+    let mut result: Vec<Address> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    for i in 0..index.len() {
+        if let Some(addr) = index.get(i) {
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(addr);
+            if result.len() as u64 >= cap { break; }
+        }
+    }
+    result
+}
+
+pub fn get_proposals_by_status(env: &Env, status: u32, offset: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit > 50 { 50 } else { limit };
+    let key = DataKey::StatusIndex(status);
+    let ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut result: Vec<u64> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    for i in 0..ids.len() {
+        if let Some(id) = ids.get(i) {
+            if !env.storage().persistent().has(&DataKey::Proposal(id)) { continue; }
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(id);
+            if result.len() as u64 >= cap { break; }
+        }
+    }
+    result
+}
+
+pub fn get_proposals_by_ledger_range(env: &Env, from_ledger: u64, to_ledger: u64, offset: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit > 50 { 50 } else { limit };
+    let next_id = get_next_proposal_id(env);
+    let mut result: Vec<u64> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    // Determine start ID: for prefixed vaults, scan from prefix+1
+    let cfg: Option<crate::types::Config> = env.storage().instance().get(&DataKey::Config);
+    let start_id = if let Some(c) = cfg {
+        if c.proposal_id_prefix > 0 { c.proposal_id_prefix + 1 } else { 1 }
+    } else { 1 };
+    for id in start_id..next_id {
+        if result.len() as u64 >= cap { break; }
+        if !env.storage().persistent().has(&DataKey::Proposal(id)) { continue; }
+        let proposal: crate::types::Proposal = match env.storage().persistent().get(&DataKey::Proposal(id)) {
+            Some(p) => p,
+            None => continue,
+        };
+        if proposal.created_at >= from_ledger && proposal.created_at <= to_ledger {
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(id);
+        }
+    }
+    result
+}
+
+pub fn prune_status_index_for_proposal(env: &Env, proposal_id: u64) {
+    // Remove proposal_id from all status index entries
+    for status_u32 in 0u32..8u32 {
+        let key = DataKey::StatusIndex(status_u32);
+        if let Some(ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) {
+            let mut new_ids: Vec<u64> = Vec::new(env);
+            for id in ids.iter() {
+                if id != proposal_id { new_ids.push_back(id); }
+            }
+            env.storage().persistent().set(&key, &new_ids);
+        }
+    }
+}
+
+#[allow(dead_code)]
 pub fn validate_recipient_list(env: &Env, recipient: &Address) -> Result<(), VaultError> {
     let mode = get_list_mode(env);
     match mode {
         ListMode::Disabled => Ok(()),
         ListMode::Whitelist => {
             if !is_whitelisted(env, recipient) {
-                return Err(VaultError::RecipientNotWhitelisted);
+                return Err(VaultError::RecipientBlacklisted);
             }
             Ok(())
         }
@@ -727,34 +994,67 @@ pub fn validate_recipient_list(env: &Env, recipient: &Address) -> Result<(), Vau
 // Velocity Checking (Sliding Window)
 // ============================================================================
 
-pub fn check_and_update_velocity(env: &Env, addr: &Address, config: &VelocityConfig) -> bool {
+pub fn check_and_update_velocity(
+    env: &Env,
+    addr: &Address,
+    token: &Address,
+    config: &VelocityConfig,
+) -> bool {
     let now = env.ledger().timestamp();
-    let key = DataKey::VelocityHistory(addr.clone());
-
-    let history: Vec<u64> = env
-        .storage()
-        .temporary()
-        .get(&key)
-        .unwrap_or_else(|| Vec::new(env));
-
     let window_start = now.saturating_sub(config.window);
 
-    let mut updated_history: Vec<u64> = Vec::new(env);
-    for ts in history.iter() {
+    // --- Global per-proposer check ---
+    let global_key = DataKey::VelocityHistory(addr.clone());
+    let global_history: Vec<u64> = env
+        .storage()
+        .temporary()
+        .get(&global_key)
+        .unwrap_or_else(|| Vec::new(env));
+
+    let mut updated_global: Vec<u64> = Vec::new(env);
+    for ts in global_history.iter() {
         if ts > window_start {
-            updated_history.push_back(ts);
+            updated_global.push_back(ts);
         }
     }
 
-    if updated_history.len() >= config.limit {
+    if updated_global.len() >= config.limit {
         return false;
     }
 
-    updated_history.push_back(now);
-    env.storage().temporary().set(&key, &updated_history);
+    // --- Per-token per-proposer check (if per_token_limit > 0) ---
+    if config.per_token_limit > 0 {
+        let token_key = DataKey::VelocityHistoryByToken(addr.clone(), token.clone());
+        let token_history: Vec<u64> = env
+            .storage()
+            .temporary()
+            .get(&token_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        let mut updated_token: Vec<u64> = Vec::new(env);
+        for ts in token_history.iter() {
+            if ts > window_start {
+                updated_token.push_back(ts);
+            }
+        }
+
+        if updated_token.len() >= config.per_token_limit {
+            return false;
+        }
+
+        updated_token.push_back(now);
+        env.storage().temporary().set(&token_key, &updated_token);
+        env.storage()
+            .temporary()
+            .extend_ttl(&token_key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
+    }
+
+    // Commit global history
+    updated_global.push_back(now);
+    env.storage().temporary().set(&global_key, &updated_global);
     env.storage()
         .temporary()
-        .extend_ttl(&key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
+        .extend_ttl(&global_key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
 
     true
 }
@@ -819,25 +1119,14 @@ pub fn add_amendment_record(env: &Env, record: &ProposalAmendment) {
 
 /// Refund spending limits when a proposal is cancelled
 pub fn refund_spending_limits(env: &Env, amount: i128) {
-    // Refund daily
+    // Use atomic try_deduct helpers to ensure counters never go negative.
+    // Each helper reads, validates, and writes in a single storage call,
+    // preventing double-refund if two cancellations land in the same ledger.
     let today = get_day_number(env);
-    let spent_today = get_daily_spent(env, today);
-    let refunded_daily = spent_today.saturating_sub(amount).max(0);
-    let key_daily = DataKey::DailySpent(today);
-    env.storage().temporary().set(&key_daily, &refunded_daily);
-    env.storage()
-        .temporary()
-        .extend_ttl(&key_daily, DAY_IN_LEDGERS * 2, DAY_IN_LEDGERS * 2);
+    try_deduct_daily_spent(env, today, amount);
 
-    // Refund weekly
     let week = get_week_number(env);
-    let spent_week = get_weekly_spent(env, week);
-    let refunded_weekly = spent_week.saturating_sub(amount).max(0);
-    let key_weekly = DataKey::WeeklySpent(week);
-    env.storage().temporary().set(&key_weekly, &refunded_weekly);
-    env.storage()
-        .temporary()
-        .extend_ttl(&key_weekly, DAY_IN_LEDGERS * 14, DAY_IN_LEDGERS * 14);
+    try_deduct_weekly_spent(env, week, amount);
 }
 // ============================================================================
 // Comments
@@ -890,6 +1179,7 @@ pub fn add_comment_to_proposal(env: &Env, proposal_id: u64, comment_id: u64) {
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
 }
 
+#[allow(dead_code)]
 pub fn is_in_priority_queue(env: &Env, priority: u32, proposal_id: u64) -> bool {
     get_priority_queue(env, priority).contains(proposal_id)
 }
@@ -898,6 +1188,7 @@ pub fn is_in_priority_queue(env: &Env, priority: u32, proposal_id: u64) -> bool 
 // Execution Snapshot Management
 // ============================================================================
 
+#[allow(dead_code)]
 pub fn set_execution_snapshot(env: &Env, proposal_id: u64, snapshot: &ExecutionSnapshot) {
     let key = DataKey::ExecutionSnapshot(proposal_id);
     env.storage().temporary().set(&key, snapshot);
@@ -984,36 +1275,65 @@ pub fn set_reputation(env: &Env, addr: &Address, rep: &Reputation) {
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
 }
 
-/// Apply time-based decay to a reputation score.
-/// Every 30 days without activity, score drifts toward the neutral 500 by 5%.
+/// Apply time-based decay to a reputation score using the admin-configured
+/// `ReputationConfig`.
+///
+/// Decay formula (integer approximation of exponential half-life):
+///   For each complete half-life period elapsed:
+///     distance = score - decay_min_score
+///     score    = decay_min_score + (distance / 2)
+///
+/// This is equivalent to `score ≈ decay_min_score + (score - decay_min_score) * 0.5^periods`.
+///
+/// The function is deterministic: given the same `last_decay_ledger` and
+/// current ledger sequence it always produces the same result.
+/// `decay_min_score` is never breached.
 pub fn apply_reputation_decay(env: &Env, rep: &mut Reputation) {
     let current_ledger = env.ledger().sequence() as u64;
-    // ~30 days in ledgers
-    const DECAY_INTERVAL: u64 = 17_280 * 30;
-    if rep.last_decay_ledger == 0 {
+    let cfg = get_reputation_config(env);
+
+    // A half-life of 0 means decay is disabled.
+    if cfg.decay_half_life_ledgers == 0 {
         rep.last_decay_ledger = current_ledger;
         return;
     }
+
     let elapsed = current_ledger.saturating_sub(rep.last_decay_ledger);
-    let periods = elapsed / DECAY_INTERVAL;
+    let periods = elapsed / cfg.decay_half_life_ledgers;
     if periods == 0 {
+        rep.last_decay_ledger = current_ledger;
         return;
     }
-    // Move score toward neutral (500) by 5% per period
+
+    // Apply one halving per period, clamped to decay_min_score.
     for _ in 0..periods {
-        match rep.score.cmp(&500) {
-            core::cmp::Ordering::Greater => {
-                let diff = rep.score - 500;
-                rep.score = rep.score.saturating_sub(diff / 20 + 1);
-            }
-            core::cmp::Ordering::Less => {
-                let diff = 500 - rep.score;
-                rep.score = rep.score.saturating_add(diff / 20 + 1);
-            }
-            core::cmp::Ordering::Equal => {}
+        if rep.score <= cfg.decay_min_score {
+            rep.score = cfg.decay_min_score;
+            break;
         }
+        let distance = rep.score - cfg.decay_min_score;
+        // Integer halving: distance / 2 (rounds down, so score drifts toward floor)
+        rep.score = cfg.decay_min_score + (distance / 2);
     }
+
     rep.last_decay_ledger = current_ledger;
+}
+
+// ============================================================================
+// Reputation Config
+// ============================================================================
+
+pub fn get_reputation_config(env: &Env) -> ReputationConfig {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::ReputationConfig)
+        .unwrap_or_else(ReputationConfig::default)
+}
+
+pub fn set_reputation_config(env: &Env, config: &ReputationConfig) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::ReputationConfig, config);
 }
 
 // ============================================================================
@@ -1158,12 +1478,14 @@ pub fn set_swap_proposal(env: &Env, proposal_id: u64, swap: &SwapProposal) {
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, PROPOSAL_TTL);
 }
 
+#[allow(dead_code)]
 pub fn get_swap_proposal(env: &Env, proposal_id: u64) -> Option<SwapProposal> {
     env.storage()
         .persistent()
         .get(&FeatureKey::SwapProposal(proposal_id))
 }
 
+#[allow(dead_code)]
 pub fn set_swap_result(env: &Env, proposal_id: u64, result: &SwapResult) {
     let key = FeatureKey::SwapResult(proposal_id);
     env.storage().persistent().set(&key, result);
@@ -1191,6 +1513,81 @@ pub fn get_gas_config(env: &Env) -> GasConfig {
 
 pub fn set_gas_config(env: &Env, config: &GasConfig) {
     env.storage().instance().set(&FeatureKey::GasConfig, config);
+}
+
+// ============================================================================
+// Batch Transaction Storage
+// ============================================================================
+
+pub fn get_batch(env: &Env, batch_id: u64) -> Result<crate::types::BatchTransaction, VaultError> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::Batch(batch_id))
+        .ok_or(VaultError::ProposalNotFound)
+}
+
+pub fn set_batch(env: &Env, batch: &crate::types::BatchTransaction) {
+    let key = FeatureKey::Batch(batch.id);
+    env.storage().persistent().set(&key, batch);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+}
+
+pub fn get_next_batch_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::Counter(CounterKey::Batch))
+        .unwrap_or(1)
+}
+
+pub fn increment_batch_id(env: &Env) -> u64 {
+    let id = get_next_batch_id(env);
+    env.storage()
+        .instance()
+        .set(&FeatureKey::Counter(CounterKey::Batch), &(id + 1));
+    id
+}
+
+pub fn set_batch_result(env: &Env, batch_id: u64, result: &crate::types::BatchExecutionResult) {
+    let key = FeatureKey::BatchResult(batch_id);
+    env.storage().persistent().set(&key, result);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+}
+
+pub fn get_batch_result(env: &Env, batch_id: u64) -> Option<crate::types::BatchExecutionResult> {
+    env.storage().persistent().get(&FeatureKey::BatchResult(batch_id))
+}
+
+pub fn set_batch_rollback(env: &Env, batch_id: u64, entries: &Vec<(Address, i128)>) {
+    let key = FeatureKey::BatchRollback(batch_id);
+    env.storage().persistent().set(&key, entries);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+}
+
+pub fn get_batch_rollback(env: &Env, batch_id: u64) -> Option<Vec<(Address, i128)>> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::BatchRollback(batch_id))
+}
+
+pub fn is_threshold_reduced(env: &Env, proposal_id: u64) -> bool {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::ThresholdReduced(proposal_id))
+        .unwrap_or(false)
+}
+
+pub fn set_threshold_reduced(env: &Env, proposal_id: u64) {
+    let key = FeatureKey::ThresholdReduced(proposal_id);
+    env.storage().persistent().set(&key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
 }
 
 pub fn get_execution_fee_estimate(env: &Env, proposal_id: u64) -> Option<ExecutionFeeEstimate> {
@@ -1231,6 +1628,7 @@ pub fn metrics_on_execution(env: &Env, gas_used: u64, execution_time_ledgers: u6
         .saturating_add(execution_time_ledgers);
     metrics.last_updated_ledger = env.ledger().sequence() as u64;
     set_metrics(env, &metrics);
+    update_metrics_bucket(env, &metrics);
 }
 
 pub fn metrics_on_rejection(env: &Env) {
@@ -1238,6 +1636,7 @@ pub fn metrics_on_rejection(env: &Env) {
     metrics.rejected_count = metrics.rejected_count.saturating_add(1);
     metrics.last_updated_ledger = env.ledger().sequence() as u64;
     set_metrics(env, &metrics);
+    update_metrics_bucket(env, &metrics);
 }
 
 pub fn metrics_on_expiry(env: &Env) {
@@ -1252,6 +1651,7 @@ pub fn metrics_on_proposal(env: &Env) {
     metrics.total_proposals = metrics.total_proposals.saturating_add(1);
     metrics.last_updated_ledger = env.ledger().sequence() as u64;
     set_metrics(env, &metrics);
+    update_metrics_bucket(env, &metrics);
 }
 
 pub fn get_staking_config(env: &Env) -> StakingConfig {
@@ -1365,22 +1765,56 @@ pub fn get_audit_entry(env: &Env, id: u64) -> Result<AuditEntry, VaultError> {
         .ok_or(VaultError::ProposalNotFound)
 }
 
+/// Compute audit hash using SHA256 over deterministic serialization
+/// 
+/// Serialization format (documented for upgrade compatibility):
+/// - id: u64 (8 bytes, little-endian)
+/// - action: u32 (4 bytes, little-endian) 
+/// - actor: Address bytes (32 bytes)
+/// - target: u64 (8 bytes, little-endian)
+/// - timestamp: u64 (8 bytes, little-endian)
+/// - prev_hash: u64 (8 bytes, little-endian)
+/// 
+/// Total: 68 bytes deterministic input to SHA256
 pub fn compute_audit_hash(
-    _env: &Env,
+    env: &Env,
+    id: u64,
     action: &crate::types::AuditAction,
     actor: &Address,
     target: u64,
     timestamp: u64,
     prev_hash: u64,
 ) -> u64 {
-    let mut hash = prev_hash;
-    hash = hash.wrapping_mul(31).wrapping_add(action.clone() as u64);
-    hash = hash
-        .wrapping_mul(31)
-        .wrapping_add(actor.to_string().len() as u64);
-    hash = hash.wrapping_mul(31).wrapping_add(target);
-    hash = hash.wrapping_mul(31).wrapping_add(timestamp);
-    hash
+    use soroban_sdk::Bytes;
+    
+    // Create deterministic serialization (68 bytes total)
+    let mut data = Bytes::new(env);
+    
+    // id: u64 (8 bytes, little-endian)
+    data.extend_from_array(&id.to_le_bytes());
+    
+    // action: u32 (4 bytes, little-endian)
+    data.extend_from_array(&(action.clone() as u32).to_le_bytes());
+    
+    // actor: Address bytes (32 bytes)
+    data.extend_from_slice(&actor.to_bytes());
+    
+    // target: u64 (8 bytes, little-endian)
+    data.extend_from_array(&target.to_le_bytes());
+    
+    // timestamp: u64 (8 bytes, little-endian)
+    data.extend_from_array(&timestamp.to_le_bytes());
+    
+    // prev_hash: u64 (8 bytes, little-endian)
+    data.extend_from_array(&prev_hash.to_le_bytes());
+    
+    // Compute SHA256 hash
+    let hash_bytes = env.crypto().sha256(&data);
+    
+    // Convert first 8 bytes of hash to u64 (little-endian)
+    let mut hash_array = [0u8; 8];
+    hash_array.copy_from_slice(&hash_bytes.slice(0..8).to_array());
+    u64::from_le_bytes(hash_array)
 }
 
 pub fn create_audit_entry(
@@ -1392,7 +1826,7 @@ pub fn create_audit_entry(
     let id = increment_audit_id(env);
     let timestamp = env.ledger().sequence() as u64;
     let prev_hash = get_last_audit_hash(env);
-    let hash = compute_audit_hash(env, &action, actor, target, timestamp, prev_hash);
+    let hash = compute_audit_hash(env, id, &action, actor, target, timestamp, prev_hash);
 
     let entry = AuditEntry {
         id,
@@ -1416,7 +1850,7 @@ pub fn create_audit_entry(
 pub fn get_next_template_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::NextTemplateId)
+        .get(&FeatureKey::Counter(CounterKey::Template))
         .unwrap_or(1)
 }
 
@@ -1425,7 +1859,7 @@ pub fn increment_template_id(env: &Env) -> u64 {
     let id = get_next_template_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::NextTemplateId, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::Template), &(id + 1));
     id
 }
 
@@ -1486,50 +1920,13 @@ pub fn set_retry_state(env: &Env, proposal_id: u64, state: &RetryState) {
 }
 
 // ============================================================================
-// Streaming Payments
-// ============================================================================
-
-pub fn get_next_stream_id(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&DataKey::NextStreamId)
-        .unwrap_or(1)
-}
-
-pub fn increment_stream_id(env: &Env) -> u64 {
-    let id = get_next_stream_id(env);
-    env.storage()
-        .instance()
-        .set(&DataKey::NextStreamId, &(id + 1));
-    id
-}
-
-pub fn set_streaming_payment(env: &Env, stream: &crate::types::StreamingPayment) {
-    let key = DataKey::Stream(stream.id);
-    env.storage().persistent().set(&key, stream);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
-}
-
-pub fn get_streaming_payment(
-    env: &Env,
-    id: u64,
-) -> Result<crate::types::StreamingPayment, VaultError> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::Stream(id))
-        .ok_or(VaultError::ProposalNotFound)
-}
-
-// ============================================================================
 // Escrow
 // ============================================================================
 
 fn get_next_escrow_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::NextEscrowId)
+        .get(&FeatureKey::Counter(CounterKey::Escrow))
         .unwrap_or(1)
 }
 
@@ -1537,7 +1934,7 @@ pub fn increment_escrow_id(env: &Env) -> u64 {
     let id = get_next_escrow_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::NextEscrowId, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::Escrow), &(id + 1));
     id
 }
 
@@ -1590,69 +1987,7 @@ pub fn add_recipient_escrow(env: &Env, recipient: &Address, escrow_id: u64) {
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, PERSISTENT_TTL);
 }
 
-// ============================================================================
-// Batch Transactions
-// ============================================================================
 
-fn get_next_batch_id(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&FeatureKey::BatchIdCounter)
-        .unwrap_or(0)
-}
-
-pub fn increment_batch_id(env: &Env) -> u64 {
-    let next = get_next_batch_id(env) + 1;
-    env.storage()
-        .instance()
-        .set(&FeatureKey::BatchIdCounter, &next);
-    next
-}
-
-pub fn set_batch(env: &Env, batch: &BatchTransaction) {
-    let key = FeatureKey::Batch(batch.id);
-    env.storage().persistent().set(&key, batch);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
-}
-
-pub fn get_batch(env: &Env, batch_id: u64) -> Result<BatchTransaction, VaultError> {
-    env.storage()
-        .persistent()
-        .get(&FeatureKey::Batch(batch_id))
-        .ok_or(VaultError::ProposalNotFound)
-}
-
-pub fn set_batch_result(env: &Env, result: &BatchExecutionResult) {
-    let key = FeatureKey::BatchResult(result.batch_id);
-    env.storage().persistent().set(&key, result);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
-}
-
-pub fn get_batch_result(env: &Env, batch_id: u64) -> Option<BatchExecutionResult> {
-    env.storage()
-        .persistent()
-        .get(&FeatureKey::BatchResult(batch_id))
-}
-
-pub fn set_rollback_state(env: &Env, batch_id: u64, state: &Vec<(Address, i128)>) {
-    let key = FeatureKey::BatchRollback(batch_id);
-    env.storage().persistent().set(&key, state);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
-}
-
-#[allow(dead_code)]
-pub fn get_rollback_state(env: &Env, batch_id: u64) -> Vec<(Address, i128)> {
-    env.storage()
-        .persistent()
-        .get(&FeatureKey::BatchRollback(batch_id))
-        .unwrap_or_else(|| Vec::new(env))
-}
 
 // ============================================================================
 // Time-weighted Voting
@@ -1723,7 +2058,7 @@ pub fn calculate_voting_power(env: &Env, addr: &Address) -> i128 {
 fn get_next_recovery_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::NextRecoveryId)
+        .get(&FeatureKey::Counter(CounterKey::Recovery))
         .unwrap_or(1)
 }
 
@@ -1731,7 +2066,7 @@ pub fn increment_recovery_id(env: &Env) -> u64 {
     let id = get_next_recovery_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::NextRecoveryId, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::Recovery), &(id + 1));
     id
 }
 
@@ -1757,7 +2092,7 @@ pub fn get_recovery_proposal(env: &Env, id: u64) -> Result<RecoveryProposal, Vau
 fn get_next_funding_round_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::NextFundingRoundId)
+        .get(&FeatureKey::Counter(CounterKey::FundingRound))
         .unwrap_or(1)
 }
 
@@ -1765,7 +2100,7 @@ pub fn bump_funding_round_id(env: &Env) -> u64 {
     let id = get_next_funding_round_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::NextFundingRoundId, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::FundingRound), &(id + 1));
     id
 }
 
@@ -1791,6 +2126,7 @@ pub fn get_proposal_funding_rounds(env: &Env, proposal_id: u64) -> Vec<u64> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
+#[allow(dead_code)]
 pub fn add_proposal_funding_round(env: &Env, proposal_id: u64, round_id: u64) {
     let mut rounds = get_proposal_funding_rounds(env, proposal_id);
     rounds.push_back(round_id);
@@ -1955,8 +2291,435 @@ pub fn clear_pending_admin_rotation(env: &Env) {
 // Delegation (compatibility helpers)
 // ============================================================================
 
-pub fn get_delegation(_env: &Env, _delegator: &Address) -> Option<crate::types::Delegation> {
-    None
+pub fn get_delegation(env: &Env, delegator: &Address) -> Option<Delegation> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Delegation(delegator.clone()))
 }
 
-pub fn set_delegation(_env: &Env, _delegation: &crate::types::Delegation) {}
+pub fn set_delegation(env: &Env, delegation: &Delegation) {
+    // If there's an existing delegation, remove from old reverse index
+    if let Some(old) = get_delegation(env, &delegation.delegator) {
+        remove_from_delegators_index(env, &old.delegate, &delegation.delegator);
+    }
+
+    let key = DataKey::Delegation(delegation.delegator.clone());
+    env.storage().persistent().set(&key, delegation);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+
+    // Update reverse index
+    add_to_delegators_index(env, &delegation.delegate, &delegation.delegator);
+}
+
+pub fn remove_delegation(env: &Env, delegator: &Address) {
+    if let Some(old) = get_delegation(env, delegator) {
+        remove_from_delegators_index(env, &old.delegate, delegator);
+    }
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Delegation(delegator.clone()));
+}
+
+fn add_to_delegators_index(env: &Env, delegate: &Address, delegator: &Address) {
+    let mut delegators = get_delegators_for(env, delegate);
+    if !delegators.contains(delegator) {
+        delegators.push_back(delegator.clone());
+        let key = DataKey::DelegatorsFor(delegate.clone());
+        env.storage().persistent().set(&key, &delegators);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+    }
+}
+
+fn remove_from_delegators_index(env: &Env, delegate: &Address, delegator: &Address) {
+    let delegators = get_delegators_for(env, delegate);
+    let mut new_delegators = Vec::new(env);
+    for d in delegators.iter() {
+        if d != *delegator {
+            new_delegators.push_back(d);
+        }
+    }
+    let key = DataKey::DelegatorsFor(delegate.clone());
+    env.storage().persistent().set(&key, &new_delegators);
+}
+
+pub fn get_delegators_for(env: &Env, delegate: &Address) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::DelegatorsFor(delegate.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn get_delegation_history(env: &Env, user: &Address) -> Vec<DelegationHistory> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::DelegationHistory(user.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn add_delegation_history(env: &Env, history: &DelegationHistory) {
+    let mut entries = get_delegation_history(env, &history.delegator);
+    entries.push_back(history.clone());
+    let key = DataKey::DelegationHistory(history.delegator.clone());
+    env.storage().persistent().set(&key, &entries);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn increment_delegation_id(env: &Env) -> u64 {
+    let key = DataKey::NextDelegationId;
+    let id: u64 = env.storage().instance().get(&key).unwrap_or(1);
+    env.storage().instance().set(&key, &(id + 1));
+    id
+}
+
+// ============================================================================
+// Cross-Vault
+// ============================================================================
+
+pub fn set_cross_vault_config(env: &Env, config: &crate::types::CrossVaultConfig) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::CrossVaultConfig, config);
+}
+
+pub fn get_cross_vault_config(env: &Env) -> Option<crate::types::CrossVaultConfig> {
+    env.storage().instance().get(&FeatureKey::CrossVaultConfig)
+}
+
+pub fn set_cross_vault_proposal(
+    env: &Env,
+    proposal_id: u64,
+    cv: &crate::types::CrossVaultProposal,
+) {
+    let key = FeatureKey::CrossVaultProposal(proposal_id);
+    env.storage().persistent().set(&key, cv);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_cross_vault_proposal(
+    env: &Env,
+    proposal_id: u64,
+) -> Option<crate::types::CrossVaultProposal> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::CrossVaultProposal(proposal_id))
+}
+
+// ============================================================================
+// Dispute Resolution
+// ============================================================================
+
+fn get_next_dispute_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::Counter(CounterKey::Dispute))
+        .unwrap_or(1)
+}
+
+pub fn increment_dispute_id(env: &Env) -> u64 {
+    let id = get_next_dispute_id(env);
+    env.storage()
+        .instance()
+        .set(&FeatureKey::Counter(CounterKey::Dispute), &(id + 1));
+    id
+}
+
+pub fn set_dispute(env: &Env, dispute: &crate::types::Dispute) {
+    let key = FeatureKey::Dispute(dispute.id);
+    env.storage().persistent().set(&key, dispute);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_dispute(env: &Env, id: u64) -> Result<crate::types::Dispute, VaultError> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::Dispute(id))
+        .ok_or(VaultError::ProposalNotFound)
+}
+
+pub fn get_proposal_disputes(env: &Env, proposal_id: u64) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::ProposalDisputes(proposal_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn add_proposal_dispute(env: &Env, proposal_id: u64, dispute_id: u64) {
+    let key = FeatureKey::ProposalDisputes(proposal_id);
+    let mut ids = get_proposal_disputes(env, proposal_id);
+    ids.push_back(dispute_id);
+    env.storage().persistent().set(&key, &ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+// ============================================================================
+// Subscriptions
+// ============================================================================
+
+pub fn get_next_subscription_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::Counter(CounterKey::Subscription))
+        .unwrap_or(1)
+}
+
+pub fn increment_subscription_id(env: &Env) -> u64 {
+    let id = get_next_subscription_id(env);
+    env.storage()
+        .instance()
+        .set(&FeatureKey::Counter(CounterKey::Subscription), &(id + 1));
+    id
+}
+
+pub fn set_subscription(env: &Env, sub: &Subscription) {
+    let key = FeatureKey::Subscription(sub.id);
+    env.storage().persistent().set(&key, sub);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_subscription(env: &Env, id: u64) -> Result<Subscription, VaultError> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::Subscription(id))
+        .ok_or(VaultError::SubscriptionNotFound)
+}
+
+// ============================================================================
+// Subscriber Index
+// ============================================================================
+
+pub fn get_subscriber_index(env: &Env, subscriber: &Address) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::SubscriberIndex(subscriber.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn add_to_subscriber_index(env: &Env, subscriber: &Address, subscription_id: u64) {
+    let mut ids = get_subscriber_index(env, subscriber);
+    ids.push_back(subscription_id);
+    let key = FeatureKey::SubscriberIndex(subscriber.clone());
+    env.storage().persistent().set(&key, &ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+// ============================================================================
+// Bridge Storage
+// ============================================================================
+
+pub fn get_bridge_config(env: &Env) -> Option<BridgeConfig> {
+    env.storage().instance().get(&FeatureKey::BridgeConfig)
+}
+
+pub fn set_bridge_config(env: &Env, config: &BridgeConfig) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::BridgeConfig, config);
+}
+
+pub fn get_cross_chain_proposal(env: &Env, proposal_id: u64) -> Option<CrossChainProposal> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::CrossChainProposal(proposal_id))
+}
+
+pub fn set_cross_chain_proposal(env: &Env, proposal_id: u64, proposal: &CrossChainProposal) {
+    let key = FeatureKey::CrossChainProposal(proposal_id);
+    env.storage().persistent().set(&key, proposal);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+/// Acquire the bridge re-entrancy lock for a proposal.
+/// Returns `true` if the lock was acquired (was not already held), `false` otherwise.
+pub fn acquire_bridge_lock(env: &Env, proposal_id: u64) -> bool {
+    let key = FeatureKey::BridgeLock(proposal_id);
+    if env.storage().temporary().get::<_, bool>(&key).unwrap_or(false) {
+        return false; // already locked
+    }
+    env.storage().temporary().set(&key, &true);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
+    true
+}
+
+/// Release the bridge re-entrancy lock for a proposal.
+pub fn release_bridge_lock(env: &Env, proposal_id: u64) {
+    env.storage()
+        .temporary()
+        .remove(&FeatureKey::BridgeLock(proposal_id));
+}
+
+// ============================================================================
+// Metrics Bucket Storage (Issue: feature/performance-metrics time-bucketed)
+// ============================================================================
+
+const MAX_METRIC_BUCKETS: u32 = 52;
+const BUCKET_TTL: u32 = DAY_IN_LEDGERS * 365;
+
+fn get_metrics_bucket_index(env: &Env) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::MetricsBucketIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+fn set_metrics_bucket_index(env: &Env, index: &Vec<u64>) {
+    let key = FeatureKey::MetricsBucketIndex;
+    env.storage().persistent().set(&key, index);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUCKET_TTL / 2, BUCKET_TTL);
+}
+
+pub fn get_metrics_bucket(env: &Env, week: u64) -> VaultMetrics {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::MetricsBucket(week))
+        .unwrap_or_else(VaultMetrics::default)
+}
+
+pub fn set_metrics_bucket(env: &Env, week: u64, metrics: &VaultMetrics) {
+    let key = FeatureKey::MetricsBucket(week);
+    env.storage().persistent().set(&key, metrics);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUCKET_TTL / 2, BUCKET_TTL);
+
+    // Update index and prune if over cap
+    let mut index = get_metrics_bucket_index(env);
+    if !index.contains(week) {
+        index.push_back(week);
+        // Prune oldest bucket if over cap
+        if index.len() > MAX_METRIC_BUCKETS {
+            let oldest = index.get(0).unwrap();
+            env.storage()
+                .persistent()
+                .remove(&FeatureKey::MetricsBucket(oldest));
+            index.remove(0);
+        }
+        set_metrics_bucket_index(env, &index);
+    }
+}
+
+/// Update the current week's metrics bucket with the latest cumulative snapshot.
+pub fn update_metrics_bucket(env: &Env, metrics: &VaultMetrics) {
+    let week = get_week_number(env);
+    set_metrics_bucket(env, week, metrics);
+    crate::events::emit_metrics_bucket_updated(
+        env,
+        week,
+        metrics.executed_count,
+        metrics.rejected_count,
+        metrics.expired_count,
+    );
+}
+
+/// Aggregate metrics buckets across a week range (inclusive).
+pub fn get_metrics_for_period(env: &Env, from_week: u64, to_week: u64) -> VaultMetrics {
+    let mut agg = VaultMetrics::default();
+    for week in from_week..=to_week {
+        let bucket = get_metrics_bucket(env, week);
+        agg.total_proposals = agg.total_proposals.saturating_add(bucket.total_proposals);
+        agg.executed_count = agg.executed_count.saturating_add(bucket.executed_count);
+        agg.rejected_count = agg.rejected_count.saturating_add(bucket.rejected_count);
+        agg.expired_count = agg.expired_count.saturating_add(bucket.expired_count);
+        agg.total_execution_time_ledgers = agg
+            .total_execution_time_ledgers
+            .saturating_add(bucket.total_execution_time_ledgers);
+        agg.total_gas_used = agg.total_gas_used.saturating_add(bucket.total_gas_used);
+        if bucket.last_updated_ledger > agg.last_updated_ledger {
+            agg.last_updated_ledger = bucket.last_updated_ledger;
+        }
+    }
+    agg
+}
+
+// ============================================================
+// Delegation Storage Helpers
+// ============================================================
+
+pub fn get_delegation(env: &Env, delegator: &Address) -> Delegation {
+    env.storage()
+        .instance()
+        .get(&DataKey::Delegation(delegator.clone()))
+        .unwrap_or(Delegation {
+            delegator: delegator.clone(),
+            delegate: delegator.clone(),
+            created_at: 0,
+            expiry_ledger: 0,
+            is_active: false,
+        })
+}
+
+pub fn set_delegation(env: &Env, delegation: &Delegation) {
+    env.storage()
+        .instance()
+        .set(&DataKey::Delegation(delegation.delegator.clone()), delegation);
+}
+
+pub fn remove_delegation(env: &Env, delegator: &Address) {
+    env.storage()
+        .instance()
+        .remove(&DataKey::Delegation(delegator.clone()));
+}
+
+pub fn get_delegators_for(env: &Env, delegate: &Address) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&DataKey::DelegatorsFor(delegate.clone()))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn add_delegator_index(env: &Env, delegate: &Address, delegator: &Address) {
+    let mut list: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::DelegatorsFor(delegate.clone()))
+        .unwrap_or(Vec::new(env));
+
+    if !list.contains(delegator) {
+        list.push_back(delegator.clone());
+    }
+
+    env.storage()
+        .instance()
+        .set(&DataKey::DelegatorsFor(delegate.clone()), &list);
+}
+
+pub fn remove_delegator_index(env: &Env, delegate: &Address, delegator: &Address) {
+    let mut list: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::DelegatorsFor(delegate.clone()))
+        .unwrap_or(Vec::new(env));
+
+    let mut updated = Vec::new(env);
+
+    for d in list.iter() {
+        if d != *delegator {
+            updated.push_back(d);
+        }
+    }
+
+    env.storage()
+        .instance()
+        .set(&DataKey::DelegatorsFor(delegate.clone()), &updated);
+}

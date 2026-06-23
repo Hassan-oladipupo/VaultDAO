@@ -907,6 +907,8 @@ Get proposal IDs filtered by priority (read-only).
 
 ## Integration Notes
 
+> For a full gap analysis between the contract API and the frontend hook, see [INTEGRATION_CHECKLIST.md](./INTEGRATION_CHECKLIST.md).
+
 ### SDK Wrapper Status
 
 The TypeScript SDK (`sdk/src/contract.ts`) wraps a subset of these contract functions. Not all contract methods are exposed through the SDK yet. For direct contract calls, use Soroban SDK directly.
@@ -998,3 +1000,150 @@ If enabled, recovery configuration allows designated addresses to recover funds 
 ### Retry Logic
 
 If retry configuration is enabled, failed executions can be retried. Use `get_retry_state()` to check retry attempts.
+
+
+---
+
+## Performance Metrics & Valuation
+
+### `get_metrics() -> VaultMetrics`
+
+Retrieve vault-wide performance metrics accumulated since initialization.
+
+**Returns:** `VaultMetrics` struct with the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `total_proposals` | u64 | Total proposals ever created |
+| `executed_count` | u64 | Successfully executed proposals |
+| `rejected_count` | u64 | Rejected proposals |
+| `expired_count` | u64 | Proposals that expired without execution |
+| `total_execution_time_ledgers` | u64 | Cumulative ledgers from creation to execution |
+| `total_gas_used` | u64 | Total gas consumed across all executions |
+| `last_updated_ledger` | u64 | Ledger sequence when metrics were last updated |
+
+**Derived Metrics (Methods):**
+
+- `success_rate_bps() -> u32` - Success rate in basis points (0-10000 = 0-100%)
+  - Formula: `(executed_count * 10_000) / (executed_count + rejected_count + expired_count)`
+  - Returns 0 if no proposals have been finalized
+
+- `avg_execution_time_ledgers() -> u64` - Average ledgers from creation to execution
+  - Formula: `total_execution_time_ledgers / executed_count`
+  - Returns 0 if no proposals have been executed
+
+**Behavior:**
+- Metrics are cumulative and never reset
+- Updated atomically on proposal creation, execution, rejection, and expiration
+- Thread-safe: uses instance storage with atomic updates
+- Returns default metrics (all zeros) if no proposals have been created
+
+**Units & Scaling:**
+- Ledger times: Soroban ledger sequence numbers (1 ledger ≈ 5 seconds)
+- Gas units: Soroban gas units (varies by operation)
+- Basis points: 0-10000 (0-100%), where 100 bps = 1%
+
+**Example:**
+```rust
+let metrics = vault.get_metrics();
+println!("Success rate: {}%", metrics.success_rate_bps() / 100);
+println!("Avg execution time: {} ledgers", metrics.avg_execution_time_ledgers());
+println!("Total proposals: {}", metrics.total_proposals);
+```
+
+---
+
+### `get_portfolio_valuation(assets: Vec<Address>) -> Result<i128, VaultError>`
+
+Calculate the total USD valuation of the vault's holdings across multiple assets.
+
+**Parameters:**
+- `assets` - Vector of token contract addresses to include in valuation
+
+**Returns:** 
+- `Ok(total_usd)` - Total portfolio value in USD (scaled by 10^7 for precision)
+- `Err(VaultError)` - If valuation cannot be determined
+
+**Behavior:**
+- Empty asset list returns `Ok(0)` without error
+- Skips assets with zero balance (no oracle query needed)
+- Uses saturating arithmetic to prevent overflow
+- Queries oracle for current price of each asset with non-zero balance
+- Returns error if any asset price cannot be determined or is stale
+
+**Units & Scaling:**
+
+| Component | Unit | Scaling | Example |
+|-----------|------|---------|---------|
+| Asset balance | stroops | 10^-7 (7 decimals) | 1,000,000 stroops = 0.1 token |
+| Oracle price | USD per token | 10^7 (scaled) | Price 1500 = $150.00 |
+| Output value | USD cents | 10^7 (scaled) | 1,500,000,000 = $150.00 |
+
+**Conversion Formula:**
+```
+usd_value = (balance * price) / 10_000_000
+```
+
+**Error Cases:**
+- `NotInitialized` - Oracle not configured
+- `InvalidAmount` - Asset price not found in oracle
+- `RetryError` - Asset price data is stale (exceeds `max_staleness`)
+
+**Example:**
+```rust
+let assets = vec![usdc_address, xlm_address, btc_address];
+match vault.get_portfolio_valuation(&assets) {
+    Ok(total_usd) => {
+        let usd_value = total_usd as f64 / 10_000_000.0;
+        println!("Portfolio value: ${:.2}", usd_value);
+    }
+    Err(e) => println!("Valuation error: {:?}", e),
+}
+```
+
+**Oracle Configuration:**
+
+Portfolio valuation requires oracle configuration via `update_oracle_config()`:
+
+```rust
+vault.update_oracle_config(&admin, &VaultOracleConfig {
+    address: oracle_contract_address,
+    max_staleness: 1000, // max ledgers before price is considered stale
+});
+```
+
+The oracle contract must implement the `lastprice(asset: Address) -> Option<VaultPriceData>` interface.
+
+---
+
+## Query Semantics & Guarantees
+
+### Metrics Query Semantics
+
+- **Consistency**: Metrics are updated atomically with proposal state changes
+- **Completeness**: All proposal lifecycle events are tracked
+- **Predictability**: Metrics only increase (never decrease)
+- **Precision**: Uses u64 for all counters (no overflow risk for reasonable vault lifetimes)
+
+### Portfolio Valuation Query Semantics
+
+- **Consistency**: Valuation reflects current vault balances and oracle prices
+- **Predictability**: Empty asset list always returns 0; zero-balance assets are skipped
+- **Precision**: Uses i128 with saturating arithmetic to prevent overflow
+- **Staleness**: Validates oracle price freshness against configured `max_staleness`
+
+### Edge Cases
+
+**Metrics:**
+- No proposals created: All counters are 0, success_rate_bps() returns 0
+- Only rejected/expired proposals: success_rate_bps() returns 0
+- Single executed proposal: success_rate_bps() returns 10000 (100%)
+
+**Portfolio Valuation:**
+- Empty asset list: Returns Ok(0) immediately
+- All assets have zero balance: Returns Ok(0) without oracle queries
+- Mixed zero/non-zero balances: Only queries oracle for non-zero assets
+- Very large balances: Saturating arithmetic prevents overflow
+- Oracle not configured: Returns NotInitialized error
+- Stale price data: Returns RetryError; client should retry after staleness window
+
