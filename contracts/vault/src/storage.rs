@@ -182,6 +182,8 @@ pub enum FeatureKey {
     CrossVaultProposal(u64),
     /// Cross-vault configuration -> CrossVaultConfig
     CrossVaultConfig,
+    /// Bridge record by bridge ID -> BridgeRecord
+    BridgeRecord(soroban_sdk::BytesN<32>),
     /// Dispute by ID -> Dispute
     Dispute(u64),
     /// Disputes for a proposal -> Vec<u64>
@@ -1666,6 +1668,20 @@ pub fn get_stake_record(env: &Env, proposal_id: u64) -> Option<StakeRecord> {
 
 pub fn set_stake_record(env: &Env, record: &StakeRecord) {
     let key = FeatureKey::StakeRecord(record.proposal_id);
+    env.storage().persistent().set(&key, record);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, PROPOSAL_TTL);
+}
+
+pub fn get_bridge_record(env: &Env, bridge_id: soroban_sdk::BytesN<32>) -> Option<crate::types::BridgeRecord> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::BridgeRecord(bridge_id))
+}
+
+pub fn set_bridge_record(env: &Env, record: &crate::types::BridgeRecord) {
+    let key = FeatureKey::BridgeRecord(record.bridge_id.clone());
     env.storage().persistent().set(&key, record);
     env.storage()
         .persistent()

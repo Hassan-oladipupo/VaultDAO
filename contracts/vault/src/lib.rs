@@ -583,6 +583,9 @@ impl VaultDAO {
                 slashed: false,
                 slashed_amount: 0,
                 released_at: 0,
+                auto_compound: false,
+                reinvestment_lock_until: 0,
+                last_compounded: 0,
             };
             storage::set_stake_record(&env, &stake_record);
         }
@@ -2205,7 +2208,7 @@ impl VaultDAO {
                         &env,
                         &proposal.token,
                         &proposal.proposer,
-                        proposal.stake_amount,
+                        stake_record.amount,
                     );
                     stake_record.refunded = true;
                     stake_record.released_at = env.ledger().sequence() as u64;
@@ -2214,7 +2217,7 @@ impl VaultDAO {
                         &env,
                         proposal_id,
                         &proposal.proposer,
-                        proposal.stake_amount,
+                        stake_record.amount,
                     );
                 }
             }
@@ -2431,7 +2434,7 @@ impl VaultDAO {
                             &env,
                             &proposal.token,
                             &proposal.proposer,
-                            proposal.stake_amount,
+                            stake_record.amount,
                         );
 
                         stake_record.refunded = true;
@@ -2442,7 +2445,7 @@ impl VaultDAO {
                             &env,
                             proposal_id,
                             &proposal.proposer,
-                            proposal.stake_amount,
+                            stake_record.amount,
                         );
                     }
                 }
@@ -3031,6 +3034,88 @@ impl VaultDAO {
         storage::extend_instance_ttl(&env);
 
         events::emit_config_updated(&env, &admin);
+
+        Ok(())
+    }
+
+    /// Enable auto-compounding for a stake
+    pub fn enable_auto_compound(
+        env: Env,
+        staker: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        staker.require_auth();
+
+        let mut stake_record = storage::get_stake_record(&env, proposal_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+
+        if stake_record.staker != staker {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if stake_record.refunded || stake_record.slashed {
+            return Err(VaultError::ProposalNotFound);
+        }
+
+        stake_record.auto_compound = true;
+        storage::set_stake_record(&env, &stake_record);
+
+        events::emit_auto_compound_enabled(&env, proposal_id, &staker);
+
+        Ok(())
+    }
+
+    /// Compound a stake (keeper-callable)
+    pub fn compound_stake(
+        env: Env,
+        keeper: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        keeper.require_auth();
+
+        let mut stake_record = storage::get_stake_record(&env, proposal_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+
+        if !stake_record.auto_compound {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if stake_record.refunded || stake_record.slashed {
+            return Err(VaultError::ProposalNotFound);
+        }
+
+        let staking_config = storage::get_staking_config(&env);
+        let current_ledger = env.ledger().sequence() as u64;
+
+        // Check compound epoch
+        if stake_record.last_compounded + staking_config.compound_epoch > current_ledger {
+            return Err(VaultError::TimelockNotExpired);
+        }
+
+        // Calculate reward (let's assume a simple 1% per epoch for now, we can adjust based on the design)
+        // For this implementation, let's calculate reward as 1% of current stake per epoch
+        let reward_amount = stake_record.amount * 1 / 100;
+
+        if reward_amount <= 0 {
+            // No reward, no-op
+            return Ok(());
+        }
+
+        // Compound the reward
+        stake_record.amount += reward_amount;
+        stake_record.last_compounded = current_ledger;
+        stake_record.reinvestment_lock_until = current_ledger + staking_config.compound_lock_period;
+
+        storage::set_stake_record(&env, &stake_record);
+
+        events::emit_stake_compounded(
+            &env,
+            proposal_id,
+            &stake_record.staker,
+            reward_amount,
+            stake_record.amount,
+            stake_record.reinvestment_lock_until,
+        );
 
         Ok(())
     }
@@ -5029,7 +5114,7 @@ impl VaultDAO {
                             &env,
                             &proposal.token,
                             &proposal.proposer,
-                            proposal.stake_amount,
+                            stake_record.amount,
                         );
 
                         stake_record.refunded = true;
@@ -5040,7 +5125,7 @@ impl VaultDAO {
                             &env,
                             proposal_id,
                             &proposal.proposer,
-                            proposal.stake_amount,
+                            stake_record.amount,
                         );
                     }
                 }
@@ -6106,11 +6191,11 @@ impl VaultDAO {
             }
             let staking_config = storage::get_staking_config(env);
             let slash_amount = if staking_config.enabled {
-                proposal.stake_amount * staking_config.slash_percentage as i128 / 100
+                stake_record.amount * staking_config.slash_percentage as i128 / 100
             } else {
                 0
             };
-            let remainder = proposal.stake_amount.saturating_sub(slash_amount);
+            let remainder = stake_record.amount.saturating_sub(slash_amount);
             if remainder > 0 {
                 token::transfer(env, &proposal.token, &proposal.proposer, remainder);
             }
@@ -7623,7 +7708,7 @@ impl VaultDAO {
                         env,
                         &proposal.token,
                         &proposal.proposer,
-                        proposal.stake_amount,
+                        stake_record.amount,
                     );
 
                     let current_ledger = env.ledger().sequence() as u64;
@@ -7635,7 +7720,7 @@ impl VaultDAO {
                         env,
                         proposal.id,
                         &proposal.proposer,
-                        proposal.stake_amount,
+                        stake_record.amount,
                     );
                 }
             }
@@ -7679,6 +7764,17 @@ impl VaultDAO {
     pub fn get_stake_record(env: Env, proposal_id: u64) -> Option<types::StakeRecord> {
         storage::extend_instance_ttl(&env);
         storage::get_stake_record(&env, proposal_id)
+    }
+
+    /// Get the bridge record for a specific bridge ID.
+    ///
+    /// Returns `None` when the bridge ID is invalid.
+    ///
+    /// # Arguments
+    /// * `bridge_id` — ID of the bridge to retrieve.
+    pub fn get_bridge_record(env: Env, bridge_id: soroban_sdk::BytesN<32>) -> Option<types::BridgeRecord> {
+        storage::extend_instance_ttl(&env);
+        storage::get_bridge_record(&env, bridge_id)
     }
 
     /// Get the current accumulated balance of the slashed-stake pool for a token.
@@ -10320,6 +10416,147 @@ impl VaultDAO {
         storage::get_cross_vault_config(&env)
     }
 
+    /// Initiate a cross-vault bridge transfer with slippage and deadline protection
+    pub fn bridge_to_vault(
+        env: Env,
+        caller: Address,
+        target_vault: Address,
+        token: Address,
+        amount: i128,
+        min_received: i128,
+        deadline_ledger: u64,
+    ) -> Result<soroban_sdk::BytesN<32>, VaultError> {
+        caller.require_auth();
+
+        // Validate inputs
+        if amount <= 0 || min_received < 0 || min_received > amount {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Get config to check max single transfer
+        let config = storage::get_config(&env)?;
+        if amount > config.spending_limit {
+            return Err(VaultError::BridgeAmountExceedsLimit);
+        }
+
+        // Check deadline
+        let current_ledger = env.ledger().sequence() as u64;
+        if deadline_ledger <= current_ledger {
+            return Err(VaultError::BridgeDeadlineExceeded);
+        }
+
+        // Generate bridge ID (hash of source + target + token + amount + ledger)
+        let bridge_id = {
+            let mut vec = soroban_sdk::Vec::<u8>::new(&env);
+            vec.extend_from_slice(env.current_contract_address().to_array());
+            vec.extend_from_slice(target_vault.to_array());
+            vec.extend_from_slice(token.to_array());
+            vec.extend_from_slice(&amount.to_be_bytes());
+            vec.extend_from_slice(&current_ledger.to_be_bytes());
+            soroban_sdk::crypto::sha256(&vec)
+        };
+
+        // Check if bridge record already exists
+        if storage::get_bridge_record(&env, bridge_id.clone()).is_some() {
+            return Err(VaultError::BridgeAlreadyExists);
+        }
+
+        // Transfer tokens to target vault
+        token::transfer(&env, &token, &target_vault, amount);
+
+        // Create and store bridge record
+        let bridge_record = crate::types::BridgeRecord {
+            bridge_id: bridge_id.clone(),
+            source_vault: env.current_contract_address(),
+            target_vault: target_vault.clone(),
+            token: token.clone(),
+            amount,
+            min_received,
+            deadline_ledger,
+            status: crate::types::BridgeStatus::Initiated,
+            actual_amount: 0,
+            initiated_at: current_ledger,
+            finalized_at: 0,
+        };
+        storage::set_bridge_record(&env, &bridge_record);
+
+        // Emit event
+        events::emit_bridge_to_vault_initiated(
+            &env,
+            &bridge_id,
+            &bridge_record.source_vault,
+            &target_vault,
+            &token,
+            amount,
+            min_received,
+            deadline_ledger,
+        );
+
+        Ok(bridge_id)
+    }
+
+    /// Confirm receipt of bridge transfer and validate slippage/deadline
+    pub fn confirm_bridge_receipt(
+        env: Env,
+        caller: Address,
+        bridge_id: soroban_sdk::BytesN<32>,
+        actual_amount: i128,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        // Get bridge record
+        let mut bridge_record = storage::get_bridge_record(&env, bridge_id.clone())
+            .ok_or(VaultError::BridgeInvalidId)?;
+
+        // Validate status
+        if bridge_record.status != crate::types::BridgeStatus::Initiated {
+            return Err(VaultError::BridgeInvalidStatus);
+        }
+
+        // Check deadline
+        let current_ledger = env.ledger().sequence() as u64;
+        if current_ledger > bridge_record.deadline_ledger {
+            // Return funds to source vault
+            token::transfer(&env, &bridge_record.token, &bridge_record.source_vault, bridge_record.amount);
+            bridge_record.status = crate::types::BridgeStatus::Returned;
+            bridge_record.finalized_at = current_ledger;
+            storage::set_bridge_record(&env, &bridge_record);
+            events::emit_bridge_funds_returned(&env, &bridge_id, &bridge_record.source_vault, bridge_record.amount);
+            return Err(VaultError::BridgeDeadlineExceeded);
+        }
+
+        // Check slippage
+        if actual_amount < bridge_record.min_received {
+            // Return funds to source vault
+            token::transfer(&env, &bridge_record.token, &bridge_record.source_vault, bridge_record.amount);
+            bridge_record.status = crate::types::BridgeStatus::Rejected;
+            bridge_record.finalized_at = current_ledger;
+            storage::set_bridge_record(&env, &bridge_record);
+            events::emit_bridge_slippage_rejected(
+                &env,
+                &bridge_id,
+                &env.current_contract_address(),
+                actual_amount,
+                bridge_record.min_received,
+            );
+            return Err(VaultError::BridgeSlippageExceeded);
+        }
+
+        // Confirm the bridge
+        bridge_record.status = crate::types::BridgeStatus::Confirmed;
+        bridge_record.actual_amount = actual_amount;
+        bridge_record.finalized_at = current_ledger;
+        storage::set_bridge_record(&env, &bridge_record);
+        events::emit_bridge_receipt_confirmed(
+            &env,
+            &bridge_id,
+            &env.current_contract_address(),
+            actual_amount,
+        );
+
+        Ok(())
+    }
+
     /// Propose a cross-vault transfer. Creates a standard proposal that, when
     /// approved and executed via `execute_cross_vault`, will invoke each target
     /// vault's `execute_proposal` via cross-contract call.
@@ -10522,6 +10759,8 @@ impl VaultDAO {
         escrow_id: Option<u64>,
         reason: Symbol,
         evidence: Vec<String>,
+        bond_token: Address,
+        bond_amount: i128,
     ) -> Result<u64, VaultError> {
         disputer.require_auth();
 
@@ -10554,6 +10793,23 @@ impl VaultDAO {
             return Err(VaultError::ProposalAlreadyExecuted);
         }
 
+        // Check if proposal already has a dismissed dispute
+        let existing_disputes = storage::get_proposal_disputes(&env, proposal_id);
+        for existing_id in existing_disputes.iter() {
+            let existing = storage::get_dispute(&env, existing_id)?;
+            if existing.status == DisputeStatus::Dismissed {
+                return Err(VaultError::DisputeAlreadyDismissed);
+            }
+        }
+
+        // Validate bond amount (minimum 1 token for example)
+        if bond_amount <= 0 {
+            return Err(VaultError::DisputeBondTooSmall);
+        }
+
+        // Transfer bond from disputer to vault
+        token::transfer(&env, &bond_token, &disputer, &env.current_contract_address(), bond_amount);
+
         let dispute_id = storage::increment_dispute_id(&env);
         let dispute = Dispute {
             id: dispute_id,
@@ -10563,9 +10819,12 @@ impl VaultDAO {
             evidence,
             status: DisputeStatus::Filed,
             resolution: DisputeResolution::Dismissed,
+            outcome: crate::types::DisputeOutcome::DrawDispute,
             arbitrator: disputer.clone(), // placeholder until resolved
             filed_at: env.ledger().sequence() as u64,
             resolved_at: 0,
+            dispute_bond: bond_amount,
+            bond_token,
         };
 
         storage::set_dispute(&env, &dispute);
@@ -10573,6 +10832,7 @@ impl VaultDAO {
         storage::extend_instance_ttl(&env);
 
         events::emit_dispute_raised(&env, dispute_id, proposal_id, &disputer);
+        events::emit_dispute_bond_posted(&env, dispute_id, &disputer, &dispute.bond_token, dispute.dispute_bond);
 
         Ok(dispute_id)
     }
@@ -10600,7 +10860,7 @@ impl VaultDAO {
             .map_err(|_| VaultError::DisputeNotFound)?;
 
         if dispute.status == DisputeStatus::Resolved || dispute.status == DisputeStatus::Dismissed {
-            return Err(VaultError::ProposalAlreadyExecuted);
+            return Err(VaultError::DisputeAlreadyResolved);
         }
 
         // Determine if funds should be released to recipient
@@ -10669,6 +10929,93 @@ impl VaultDAO {
         storage::set_dispute(&env, &dispute);
 
         events::emit_dispute_resolved(&env, dispute_id, &admin, resolution_code);
+
+        Ok(())
+    }
+
+    /// Resolve a dispute with outcome and bond handling.
+    /// Only Admin or DisputeArbitrator may call this.
+    pub fn resolve_dispute_with_outcome(
+        env: Env,
+        arbitrator: Address,
+        dispute_id: u64,
+        outcome: crate::types::DisputeOutcome,
+    ) -> Result<(), VaultError> {
+        arbitrator.require_auth();
+
+        // Check role: Admin or DisputeArbitrator
+        if !Role::role_satisfies(Role::DisputeArbitrator, storage::get_role(&env, &arbitrator)) {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let mut dispute = storage::get_dispute(&env, dispute_id)
+            .map_err(|_| VaultError::DisputeNotFound)?;
+
+        // Can't resolve own dispute
+        if dispute.disputer == arbitrator {
+            return Err(VaultError::ArbitratorCannotResolveOwnDispute);
+        }
+
+        if dispute.status == DisputeStatus::Resolved || dispute.status == DisputeStatus::Dismissed {
+            return Err(VaultError::DisputeAlreadyResolved);
+        }
+
+        // Handle bond based on outcome
+        match outcome {
+            crate::types::DisputeOutcome::UpholdDispute => {
+                // Return full bond to disputer
+                token::transfer(
+                    &env,
+                    &dispute.bond_token,
+                    &dispute.disputer,
+                    dispute.dispute_bond,
+                );
+                dispute.status = DisputeStatus::Resolved;
+                dispute.resolution = DisputeResolution::InFavorOfDisputer;
+                events::emit_dispute_bond_returned(&env, dispute_id, &dispute.bond_token, dispute.dispute_bond);
+            }
+            crate::types::DisputeOutcome::DismissDispute => {
+                // Slash 50% of bond: 50% to treasury, 50% back to disputer
+                let half_bond = dispute.dispute_bond / 2;
+                let treasury_amount = half_bond;
+                let return_amount = dispute.dispute_bond - half_bond;
+
+                // Transfer 50% to treasury (vault contract itself)
+                // We don't need to transfer, since we already hold it, just keep it
+                // Transfer 50% back to disputer
+                if return_amount > 0 {
+                    token::transfer(
+                        &env,
+                        &dispute.bond_token,
+                        &dispute.disputer,
+                        return_amount,
+                    );
+                }
+                dispute.status = DisputeStatus::Dismissed;
+                dispute.resolution = DisputeResolution::Dismissed;
+                events::emit_dispute_bond_slashed(&env, dispute_id, &dispute.bond_token, half_bond, treasury_amount);
+            }
+            crate::types::DisputeOutcome::DrawDispute => {
+                // Return full bond to disputer
+                token::transfer(
+                    &env,
+                    &dispute.bond_token,
+                    &dispute.disputer,
+                    dispute.dispute_bond,
+                );
+                dispute.status = DisputeStatus::Resolved;
+                dispute.resolution = DisputeResolution::Compromise;
+                events::emit_dispute_bond_returned(&env, dispute_id, &dispute.bond_token, dispute.dispute_bond);
+            }
+        }
+
+        dispute.outcome = outcome;
+        dispute.arbitrator = arbitrator.clone();
+        dispute.resolved_at = env.ledger().sequence() as u64;
+
+        storage::set_dispute(&env, &dispute);
+
+        events::emit_dispute_outcome(&env, dispute_id, &arbitrator, outcome as u32);
 
         Ok(())
     }

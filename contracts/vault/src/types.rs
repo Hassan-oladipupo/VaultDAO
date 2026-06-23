@@ -229,13 +229,20 @@ pub enum Role {
     Treasurer = 2,
     /// Full operational control: manages roles, signers, and configuration.
     Admin = 3,
+    /// Can resolve disputes.
+    DisputeArbitrator = 4,
 }
 
 impl Role {
     /// Check whether `actual` satisfies the `required` role.
     /// Hierarchy: Admin >= Treasurer >= Member >= Observer
+    /// Special case: Admin and DisputeArbitrator can resolve disputes
     pub fn role_satisfies(required: Role, actual: Role) -> bool {
-        (actual as u32) >= (required as u32)
+        match (required, actual) {
+            (Role::DisputeArbitrator, Role::Admin) => true,
+            (Role::DisputeArbitrator, Role::DisputeArbitrator) => true,
+            _ => (actual as u32) >= (required as u32),
+        }
     }
 }
 
@@ -762,6 +769,8 @@ pub struct StakingConfig {
     pub reputation_discount_threshold: u32,
     pub reputation_discount_percentage: u32,
     pub slash_percentage: u32,
+    pub compound_lock_period: u64,
+    pub compound_epoch: u64,
 }
 
 impl Default for StakingConfig {
@@ -774,6 +783,8 @@ impl Default for StakingConfig {
             reputation_discount_threshold: 900,
             reputation_discount_percentage: 0,
             slash_percentage: 50,
+            compound_lock_period: 17280, // ~1 day at 5s/ledger
+            compound_epoch: 17280, // ~1 day at 5s/ledger
         }
     }
 }
@@ -790,6 +801,9 @@ pub struct StakeRecord {
     pub slashed: bool,
     pub slashed_amount: i128,
     pub released_at: u64,
+    pub auto_compound: bool,
+    pub reinvestment_lock_until: u64,
+    pub last_compounded: u64,
 }
 
 impl Default for GasConfig {
@@ -1172,6 +1186,45 @@ pub enum CrossVaultStatus {
     Cancelled = 4,
 }
 
+/// Status of a cross-vault bridge operation
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BridgeStatus {
+    Initiated = 0,
+    Confirmed = 1,
+    Rejected = 2,
+    Returned = 3,
+}
+
+/// Record of a cross-vault bridge operation
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BridgeRecord {
+    /// Unique bridge ID (hash of source + target + amount + ledger)
+    pub bridge_id: soroban_sdk::BytesN<32>,
+    /// Source vault address
+    pub source_vault: Address,
+    /// Target vault address
+    pub target_vault: Address,
+    /// Token contract address
+    pub token: Address,
+    /// Initiated amount
+    pub amount: i128,
+    /// Minimum amount to receive (slippage protection)
+    pub min_received: i128,
+    /// Deadline ledger
+    pub deadline_ledger: u64,
+    /// Current status
+    pub status: BridgeStatus,
+    /// Actual received amount (only set when Confirmed)
+    pub actual_amount: i128,
+    /// Ledger when bridge was initiated
+    pub initiated_at: u64,
+    /// Ledger when bridge was finalized
+    pub finalized_at: u64,
+}
+
 /// Describes a single action to be executed on a participant vault
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -1235,7 +1288,7 @@ pub enum DisputeStatus {
     Dismissed = 3,
 }
 
-/// Outcome of a dispute resolution
+/// Outcome of a dispute resolution (old, kept for compatibility)
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -1248,6 +1301,19 @@ pub enum DisputeResolution {
     Compromise = 2,
     /// Dispute dismissed as invalid
     Dismissed = 3,
+}
+
+/// Outcome of a dispute resolution with bond slashing
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DisputeOutcome {
+    /// Uphold the dispute - release bond to disputer
+    UpholdDispute = 0,
+    /// Dismiss the dispute - slash 50% of bond
+    DismissDispute = 1,
+    /// Draw - return full bond to disputer
+    DrawDispute = 2,
 }
 
 /// On-chain dispute record for a contested proposal
@@ -1268,12 +1334,18 @@ pub struct Dispute {
     pub status: DisputeStatus,
     /// Resolution outcome (only set when status is Resolved or Dismissed)
     pub resolution: DisputeResolution,
+    /// New dispute outcome with bond handling
+    pub outcome: DisputeOutcome,
     /// Arbitrator who resolved the dispute (zero-value until resolved)
     pub arbitrator: Address,
     /// Ledger when dispute was filed
     pub filed_at: u64,
     /// Ledger when dispute was resolved (0 if unresolved)
     pub resolved_at: u64,
+    /// Bond posted by disputer
+    pub dispute_bond: i128,
+    /// Token used for the bond
+    pub bond_token: Address,
 }
 
 // ============================================================================

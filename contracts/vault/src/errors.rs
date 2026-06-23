@@ -128,6 +128,39 @@ pub enum VaultError {
     PermissionExpired = 320,
     
     PermissionNotFound = 321,
+
+    /// Stake is locked due to recent compounding
+    ReinvestmentLocked = 322,
+
+    /// Bridge already exists with this ID
+    BridgeAlreadyExists = 323,
+
+    /// Bridge ID is invalid
+    BridgeInvalidId = 324,
+
+    /// Bridge deadline has passed
+    BridgeDeadlineExceeded = 325,
+
+    /// Bridge slippage exceeded (actual_amount < min_received)
+    BridgeSlippageExceeded = 326,
+
+    /// Bridge is not in the correct status for this operation
+    BridgeInvalidStatus = 327,
+
+    /// Bridge amount exceeds max single transfer
+    BridgeAmountExceedsLimit = 328,
+
+    /// Dispute bond amount is too small
+    DisputeBondTooSmall = 329,
+
+    /// Cannot re-raise a dismissed dispute
+    DisputeAlreadyDismissed = 330,
+
+    /// Arbitrator cannot resolve their own dispute
+    ArbitratorCannotResolveOwnDispute = 331,
+
+    /// Dispute has already been resolved
+    DisputeAlreadyResolved = 332,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above

@@ -359,6 +359,22 @@ pub fn emit_stake_refunded(env: &Env, proposal_id: u64, proposer: &Address, amou
     );
 }
 
+/// Emit when auto-compound is enabled for a stake
+pub fn emit_auto_compound_enabled(env: &Env, proposal_id: u64, staker: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "auto_compound_enabled"), proposal_id),
+        staker.clone(),
+    );
+}
+
+/// Emit when a stake is compounded
+pub fn emit_stake_compounded(env: &Env, proposal_id: u64, staker: &Address, reward_amount: i128, new_stake_amount: i128, lock_until: u64) {
+    env.events().publish(
+        (Symbol::new(env, "stake_compounded"), proposal_id),
+        (staker.clone(), reward_amount, new_stake_amount, lock_until),
+    );
+}
+
 // ============================================================================
 // Reputation Events (feature/reputation-system)
 // ============================================================================
@@ -1165,6 +1181,38 @@ pub fn emit_dispute_resolved(env: &Env, dispute_id: u64, admin: &Address, resolu
     );
 }
 
+/// Emit when a dispute bond is posted
+pub fn emit_dispute_bond_posted(env: &Env, dispute_id: u64, disputer: &Address, token: &Address, amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "dispute_bond_posted"), dispute_id),
+        (disputer.clone(), token.clone(), amount),
+    );
+}
+
+/// Emit when a dispute is resolved with outcome
+pub fn emit_dispute_outcome(env: &Env, dispute_id: u64, arbitrator: &Address, outcome: u32) {
+    env.events().publish(
+        (Symbol::new(env, "dispute_outcome"), dispute_id),
+        (arbitrator.clone(), outcome),
+    );
+}
+
+/// Emit when a dispute bond is slashed
+pub fn emit_dispute_bond_slashed(env: &Env, dispute_id: u64, token: &Address, slashed_amount: i128, treasury_amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "dispute_bond_slashed"), dispute_id),
+        (token.clone(), slashed_amount, treasury_amount),
+    );
+}
+
+/// Emit when a dispute bond is returned
+pub fn emit_dispute_bond_returned(env: &Env, dispute_id: u64, token: &Address, amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "dispute_bond_returned"), dispute_id),
+        (token.clone(), amount),
+    );
+}
+
 // ============================================================================
 // Bridge Events (feature/cross-chain-bridge)
 // ============================================================================
@@ -1182,6 +1230,70 @@ pub fn emit_bridge_executed(env: &Env, proposal_id: u64, executor: &Address, suc
     env.events().publish(
         (Symbol::new(env, "bridge_executed"), proposal_id),
         (executor.clone(), success_count),
+    );
+}
+
+/// Emit when a bridge to vault is initiated
+pub fn emit_bridge_to_vault_initiated(
+    env: &Env,
+    bridge_id: &soroban_sdk::BytesN<32>,
+    source_vault: &Address,
+    target_vault: &Address,
+    token: &Address,
+    amount: i128,
+    min_received: i128,
+    deadline_ledger: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_to_vault_initiated"), bridge_id.clone()),
+        (
+            source_vault.clone(),
+            target_vault.clone(),
+            token.clone(),
+            amount,
+            min_received,
+            deadline_ledger,
+        ),
+    );
+}
+
+/// Emit when a bridge receipt is confirmed
+pub fn emit_bridge_receipt_confirmed(
+    env: &Env,
+    bridge_id: &soroban_sdk::BytesN<32>,
+    target_vault: &Address,
+    actual_amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_receipt_confirmed"), bridge_id.clone()),
+        (target_vault.clone(), actual_amount),
+    );
+}
+
+/// Emit when a bridge is rejected due to slippage
+pub fn emit_bridge_slippage_rejected(
+    env: &Env,
+    bridge_id: &soroban_sdk::BytesN<32>,
+    target_vault: &Address,
+    actual_amount: i128,
+    min_received: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_slippage_rejected"), bridge_id.clone()),
+        (target_vault.clone(), actual_amount, min_received),
+    );
+}
+
+/// Emit when bridge funds are returned to source vault
+pub fn emit_bridge_funds_returned(
+    env: &Env,
+    bridge_id: &soroban_sdk::BytesN<32>,
+    source_vault: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_funds_returned"), bridge_id.clone()),
+        (source_vault.clone(), amount),
     );
 }
 
