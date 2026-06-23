@@ -22,12 +22,13 @@ use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::errors::VaultError;
 use crate::types::{
-    AuditEntry, BatchExecutionResult, BatchTransaction, Comment, Config, DelegatedPermission,
-    DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot, FeeStructure, FundingRound,
-    FundingRoundConfig, GasConfig, InsuranceConfig, ListMode, NotificationPreferences,
-    PermissionGrant, Proposal, ProposalAmendment, ProposalTemplate, RecoveryProposal, Reputation,
-    RetryState, Role, RoleAssignment, StakeRecord, StakingConfig, SwapProposal, SwapResult,
-    TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy,
+    AuditEntry, BatchExecutionResult, BatchTransaction, Comment, Config, CumulativeVolume,
+    DelegatedPermission, DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot, FeeStructure,
+    FeeTier, FundingRound, FundingRoundConfig, GasConfig, InsuranceConfig, ListMode,
+    NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalTemplate,
+    RecoveryProposal, Reputation, RetryState, Role, RoleAssignment, StakeRecord, StakingConfig,
+    SwapProposal, SwapResult, TierFeeConfig, TimeWeightedConfig, TokenLock, VaultMetrics,
+    VelocityConfig, VotingStrategy,
 };
 
 /// Core storage key definitions (kept minimal to avoid size limits)
@@ -201,6 +202,10 @@ pub enum FeatureKey {
     DelegatedPermission(Address, Address, u32),
     // Stream payment storage (nested with StreamKey)
     // Stream(StreamKey), // Feature incomplete
+    /// Tiered recurring-payment fee configuration -> TierFeeConfig
+    TierFeeConfig,
+    /// Per-payer cumulative volume within the current fee window (Temporary) -> CumulativeVolume
+    CumulativeVolume(Address),
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -210,6 +215,8 @@ pub const INSTANCE_TTL: u32 = DAY_IN_LEDGERS * 30; // 30 days
 pub const INSTANCE_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS * 7; // Extend when below 7 days
 pub const PERSISTENT_TTL: u32 = DAY_IN_LEDGERS * 30; // 30 days
 pub const PERSISTENT_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS * 7; // Extend when below 7 days
+/// Default volume-tracking window for the tiered fee system (~30 days)
+pub const VOLUME_WINDOW_DEFAULT: u64 = DAY_IN_LEDGERS as u64 * 30;
 
 // ============================================================================
 // Initialization
@@ -1812,6 +1819,45 @@ pub fn add_user_volume(env: &Env, user: &Address, token: &Address, amount: i128)
     env.storage()
         .persistent()
         .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+}
+
+// ============================================================================
+// Tiered Recurring-Payment Fee System
+// ============================================================================
+
+pub fn get_tier_fee_config(env: &Env) -> Option<TierFeeConfig> {
+    env.storage().instance().get(&FeatureKey::TierFeeConfig)
+}
+
+pub fn set_tier_fee_config(env: &Env, config: &TierFeeConfig) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::TierFeeConfig, config);
+}
+
+/// Returns the payer's CumulativeVolume from Temporary storage.
+/// If the key is absent the window has expired and a zero-volume record is returned.
+pub fn get_cumulative_volume(env: &Env, payer: &Address) -> CumulativeVolume {
+    let key = FeatureKey::CumulativeVolume(payer.clone());
+    env.storage()
+        .temporary()
+        .get(&key)
+        .unwrap_or(CumulativeVolume {
+            volume: 0,
+            window_start: env.ledger().sequence() as u64,
+        })
+}
+
+/// Persists the payer's CumulativeVolume in Temporary storage.
+/// TTL is capped at PERSISTENT_TTL to stay within Soroban's ledger limits;
+/// the logical window rollover is enforced by comparing `window_start` to the
+/// current ledger in the caller, not by TTL expiry.
+pub fn set_cumulative_volume(env: &Env, payer: &Address, cv: &CumulativeVolume, _window: u64) {
+    let key = FeatureKey::CumulativeVolume(payer.clone());
+    env.storage().temporary().set(&key, cv);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
 }
 
 // ============================================================================

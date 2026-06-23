@@ -1474,9 +1474,9 @@ pub struct FundingRoundConfig {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FeeTier {
-    /// Minimum volume threshold for this tier (in stroops)
-    pub min_volume: i128,
-    /// Fee rate in basis points (e.g., 100 = 1%)
+    /// Cumulative volume threshold to qualify for this tier (in stroops)
+    pub volume_threshold: i128,
+    /// Fee rate in basis points (e.g., 100 = 1%); minimum 1, maximum 10_000
     pub fee_bps: u32,
 }
 
@@ -1529,6 +1529,32 @@ pub struct FeeCalculation {
     pub fee_bps: u32,
     /// Whether reputation discount was applied
     pub reputation_discount_applied: bool,
+}
+
+// ============================================================================
+// Tiered Recurring-Payment Fee System
+// ============================================================================
+
+/// Tracks a payer's cumulative payment volume within the current fee window.
+/// Stored in Temporary storage; absence means the window has expired and volume is 0.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CumulativeVolume {
+    /// Total payment volume processed during the current window (in stroops)
+    pub volume: i128,
+    /// Ledger sequence at which the current window started
+    pub window_start: u64,
+}
+
+/// Admin-configurable settings for the tiered recurring-payment fee system.
+/// Stored as instance storage under FeatureKey::TierFeeConfig.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TierFeeConfig {
+    /// Fee tiers sorted ascending by volume_threshold (max 5)
+    pub tiers: Vec<FeeTier>,
+    /// Volume window length in ledgers; 0 means use the 30-day default
+    pub volume_window: u64,
 }
 
 // ============================================================================

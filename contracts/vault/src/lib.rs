@@ -25,14 +25,15 @@ use soroban_sdk::{contract, contractimpl, Address, Env, IntoVal, Map, String, Sy
 use types::{
     AuditAction, AuditEntry, BatchExecutionResult, BatchOperation, BatchStatus, BatchTransaction,
     CancellationRecord, Comment, Condition, ConditionLogic, Config, DexConfig, Escrow,
-    EscrowStatus, ExecutionFeeEstimate, FundingMilestone, FundingMilestoneStatus, FundingRound,
-    FundingRoundConfig, FundingRoundStatus, GasConfig, InitConfig, InsuranceConfig, ListMode,
-    Milestone, NotificationPreferences, OptionalVaultOracleConfig, Priority, Proposal,
+    EscrowStatus, ExecutionFeeEstimate, FeeTier, FundingMilestone, FundingMilestoneStatus,
+    FundingRound, FundingRoundConfig, FundingRoundStatus, GasConfig, InitConfig, InsuranceConfig,
+    ListMode, Milestone, NotificationPreferences, OptionalVaultOracleConfig, Priority, Proposal,
     ProposalAmendment, ProposalStatus, ProposalTemplate, RecoveryConfig, RecoveryProposal,
     RecoveryStatus, RecurringPayment, Reputation, RetryConfig, RetryState, Role, RoleAssignment,
     StreamStatus, StreamingPayment, Subscription, SubscriptionPayment, SubscriptionStatus,
     SubscriptionTier, SwapProposal, SwapResult, TemplateOverrides, ThresholdStrategy,
-    TransferDetails, VaultMetrics, VaultOracleConfig, VaultPriceData, VotingStrategy,
+    TierFeeConfig, TransferDetails, VaultMetrics, VaultOracleConfig, VaultPriceData,
+    VotingStrategy,
 };
 
 /// The main contract structure for VaultDAO.
@@ -91,6 +92,8 @@ fn calculate_expiration_ledger(config: &Config, priority: &Priority, current_led
 mod test;
 #[cfg(test)]
 mod test_audit;
+#[cfg(test)]
+mod test_fees;
 #[cfg(test)]
 mod test_hooks;
 #[cfg(test)]
@@ -2138,19 +2141,37 @@ impl VaultDAO {
             return Err(VaultError::ExceedsWeeklyLimit);
         }
 
-        // Check balance
-        let balance = token::balance(&env, &payment.token);
-        if balance < payment.amount {
-            return Err(VaultError::InsufficientBalance);
-        }
-
         // Revalidate recipient against current whitelist/blacklist policies.
         // Policies may have changed since scheduling; block execution if the
         // recipient is no longer permitted.
         Self::validate_recipient(&env, &payment.recipient)?;
 
-        // Execute
+        // Compute tier-based fee for this recurring payment.
+        // The proposer's cumulative volume drives the tier lookup so that
+        // high-volume treasury operators earn discounted rates.
+        let fee_bps = Self::applicable_fee_bps(&env, &payment.proposer);
+        let fee_amount = if fee_bps > 0 {
+            (payment.amount * fee_bps as i128) / 10_000
+        } else {
+            0
+        };
+
+        // Ensure the vault can cover both the payment and the fee.
+        let balance = token::balance(&env, &payment.token);
+        if balance < payment.amount + fee_amount {
+            return Err(VaultError::InsufficientBalance);
+        }
+
+        // Execute payment to recipient
         token::transfer(&env, &payment.token, &payment.recipient, payment.amount);
+
+        // Collect fee to the fee structure treasury (if a fee is due)
+        if fee_amount > 0 {
+            let fee_structure = storage::get_fee_structure(&env);
+            token::transfer(&env, &payment.token, &fee_structure.treasury, fee_amount);
+            storage::add_fees_collected(&env, &payment.token, fee_amount);
+            Self::update_cumulative_volume(&env, &payment.proposer, payment.amount);
+        }
 
         // Update limits
         storage::add_daily_spent(&env, today, payment.amount);
@@ -3075,11 +3096,11 @@ impl VaultDAO {
             return Err(VaultError::InvalidAmount);
         }
 
-        // Validate tiers are sorted by min_volume
+        // Validate tiers are sorted by volume_threshold
         for i in 1..fee_structure.tiers.len() {
             let prev = fee_structure.tiers.get(i - 1).unwrap();
             let curr = fee_structure.tiers.get(i).unwrap();
-            if curr.min_volume <= prev.min_volume {
+            if curr.volume_threshold <= prev.volume_threshold {
                 return Err(VaultError::InvalidAmount);
             }
             if curr.fee_bps > 10_000 {
@@ -3130,6 +3151,70 @@ impl VaultDAO {
     /// Get user's total transaction volume for a specific token.
     pub fn get_user_volume(env: Env, user: Address, token: Address) -> i128 {
         storage::get_user_volume(&env, &user, &token)
+    }
+
+    // ========================================================================
+    // Tiered Recurring-Payment Fee System (Issue: feature/tiered-fee-system)
+    // ========================================================================
+
+    /// Configure fee tiers for the recurring-payment fee system.
+    ///
+    /// Tiers must be sorted ascending by `volume_threshold`.  Each tier's
+    /// `fee_bps` must be in the range [1, 10_000].  A maximum of 5 tiers is
+    /// allowed.  Pass an empty Vec to disable fee collection for recurring
+    /// payments.  `volume_window` is in ledgers; 0 selects the 30-day default.
+    pub fn set_fee_tiers(
+        env: Env,
+        admin: Address,
+        tiers: Vec<FeeTier>,
+        volume_window: u64,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        let role = storage::get_role(&env, &admin);
+        if role != types::Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if tiers.len() > 5 {
+            return Err(VaultError::InvalidAmount); // Exceeds max 5 tiers
+        }
+
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if tier.fee_bps < 1 || tier.fee_bps > 10_000 {
+                return Err(VaultError::InvalidAmount);
+            }
+            if tier.volume_threshold < 0 {
+                return Err(VaultError::InvalidAmount);
+            }
+            if i > 0 {
+                let prev = tiers.get(i - 1).unwrap();
+                if tier.volume_threshold <= prev.volume_threshold {
+                    return Err(VaultError::InvalidAmount); // Must be strictly ascending
+                }
+            }
+        }
+
+        let config = TierFeeConfig {
+            tiers,
+            volume_window,
+        };
+        storage::set_tier_fee_config(&env, &config);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Return the current tier fee configuration, or None if not yet set.
+    pub fn get_fee_tiers(env: Env) -> Option<TierFeeConfig> {
+        storage::get_tier_fee_config(&env)
+    }
+
+    /// Return the fee rate (in basis points) that applies to `payer` right now,
+    /// based on their cumulative volume within the current window.
+    ///
+    /// Returns 0 if no tier configuration is set.
+    pub fn get_applicable_fee(env: Env, payer: Address) -> u32 {
+        Self::applicable_fee_bps(&env, &payer)
     }
 
     // ========================================================================
@@ -3645,6 +3730,75 @@ impl VaultDAO {
     }
 
     // ========================================================================
+    // Tiered Fee Private Helpers
+    // ========================================================================
+
+    /// Returns the fee rate (bps) applicable to `payer` at the current ledger.
+    /// Walks the tier list (sorted ascending by volume_threshold) and returns
+    /// the highest tier whose threshold the payer's effective window volume meets.
+    /// Falls back to the first tier's fee if no threshold is crossed.
+    /// Returns 0 when no TierFeeConfig exists.
+    fn applicable_fee_bps(env: &Env, payer: &Address) -> u32 {
+        let Some(tier_config) = storage::get_tier_fee_config(env) else {
+            return 0;
+        };
+        if tier_config.tiers.is_empty() {
+            return 0;
+        }
+
+        let cv = storage::get_cumulative_volume(env, payer);
+        let current_ledger = env.ledger().sequence() as u64;
+        let window = if tier_config.volume_window == 0 {
+            storage::VOLUME_WINDOW_DEFAULT
+        } else {
+            tier_config.volume_window
+        };
+
+        let effective_volume = if current_ledger.saturating_sub(cv.window_start) >= window {
+            0 // Window expired; tier resets to default on next write
+        } else {
+            cv.volume
+        };
+
+        // Start with the first tier as the fallback (default rate)
+        let mut fee_bps = tier_config.tiers.get(0).unwrap().fee_bps;
+        for tier in tier_config.tiers.iter() {
+            if effective_volume >= tier.volume_threshold {
+                fee_bps = tier.fee_bps;
+            } else {
+                break; // Tiers are sorted ascending; no further matches possible
+            }
+        }
+        fee_bps
+    }
+
+    /// Accumulates `amount` into the payer's CumulativeVolume for the current
+    /// fee window.  Rolls the window over (resetting to 0) if the configured
+    /// window duration has elapsed since `window_start`.
+    fn update_cumulative_volume(env: &Env, payer: &Address, amount: i128) {
+        let Some(tier_config) = storage::get_tier_fee_config(env) else {
+            return;
+        };
+        let window = if tier_config.volume_window == 0 {
+            storage::VOLUME_WINDOW_DEFAULT
+        } else {
+            tier_config.volume_window
+        };
+
+        let mut cv = storage::get_cumulative_volume(env, payer);
+        let current_ledger = env.ledger().sequence() as u64;
+
+        if current_ledger.saturating_sub(cv.window_start) >= window {
+            // Window rolled over: start a fresh window
+            cv.volume = amount;
+            cv.window_start = current_ledger;
+        } else {
+            cv.volume = cv.volume.saturating_add(amount);
+        }
+        storage::set_cumulative_volume(env, payer, &cv, window);
+    }
+
+    // ========================================================================
     // Dynamic Fee System (Issue: feature/dynamic-fees)
     // ========================================================================
 
@@ -3683,7 +3837,7 @@ impl VaultDAO {
         let mut fee_bps = fee_structure.base_fee_bps;
         for i in 0..fee_structure.tiers.len() {
             if let Some(tier) = fee_structure.tiers.get(i) {
-                if user_volume >= tier.min_volume {
+                if user_volume >= tier.volume_threshold {
                     fee_bps = tier.fee_bps;
                 } else {
                     break; // Tiers are sorted, so we can stop
