@@ -19,6 +19,10 @@
 
 use soroban_sdk::{contracttype, Address, Env, Map, String, Symbol, Vec};
 
+#[path = "types_balance_snapshot.rs"]
+mod types_balance_snapshot;
+use types_balance_snapshot::BalanceSnapshot;
+
 /// Oracle configuration for price feeds
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +61,8 @@ pub struct InitConfig {
     /// Minimum number of votes (approvals + abstentions) required before threshold is checked.
     /// Set to 0 to disable quorum enforcement.
     pub quorum: u32,
+    /// Quorum as a percentage of total signers (1-100). Ignored when quorum > 0.
+    pub quorum_percentage: u32,
     /// Maximum amount per proposal (in stroops)
     pub spending_limit: i128,
     /// Maximum aggregate daily spending (in stroops)
@@ -78,14 +84,15 @@ pub struct InitConfig {
     pub default_voting_deadline: u64,
     /// Addresses allowed to veto proposals.
     pub veto_addresses: Vec<Address>,
+    /// Veto window in ledgers after proposal creation (0 = veto disabled)
+    pub veto_window_ledgers: u64,
     /// Retry configuration for failed executions
     pub retry_config: RetryConfig,
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
     pub staking_config: StakingConfig,
-    /// Minimum ledgers an admin-rotation request must wait before execution.
-    /// Must be >= MIN_ADMIN_ROTATION_DELAY_LEDGERS (1440 ≈ 24 h); 0 is rejected.
-    pub admin_rotation_delay: u64,
+    /// Proposal ID namespace prefix for multi-vault coordination (must be multiple of 1_000_000)
+    pub proposal_id_prefix: u64,
 }
 
 /// Vault configuration
@@ -122,14 +129,15 @@ pub struct Config {
     pub default_voting_deadline: u64,
     /// Addresses allowed to veto proposals.
     pub veto_addresses: Vec<Address>,
+    /// Veto window in ledgers after proposal creation (0 = veto disabled)
+    pub veto_window_ledgers: u64,
     /// Retry configuration for failed executions
     pub retry_config: RetryConfig,
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
     pub staking_config: StakingConfig,
-    /// Minimum ledgers an admin-rotation request must be pending before it can execute.
-    /// Must be >= MIN_ADMIN_ROTATION_DELAY_LEDGERS (1440 ≈ 24 h).
-    pub admin_rotation_delay: u64,
+    /// Proposal ID namespace prefix for multi-vault coordination
+    pub proposal_id_prefix: u64,
 }
 
 /// Audit record for a cancelled proposal
@@ -210,15 +218,25 @@ pub struct TimeBasedThreshold {
 
 /// Permissions assigned to vault participants.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Role {
+    /// Read-only access for external auditors (passes no permission checks).
+    Observer = 0,
     /// Read-only access (default for non-signers).
-    Member = 0,
+    Member = 1,
     /// Authorized to initiate and approve transfer proposals.
-    Treasurer = 1,
+    Treasurer = 2,
     /// Full operational control: manages roles, signers, and configuration.
-    Admin = 2,
+    Admin = 3,
+}
+
+impl Role {
+    /// Check whether `actual` satisfies the `required` role.
+    /// Hierarchy: Admin >= Treasurer >= Member >= Observer
+    pub fn role_satisfies(required: Role, actual: Role) -> bool {
+        (actual as u32) >= (required as u32)
+    }
 }
 
 /// Address-role pair returned by role enumeration queries.
@@ -314,6 +332,14 @@ pub enum ProposalStatus {
     Vetoed = 7,
 }
 
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum VoteChoice {
+    Approve = 0,
+    Abstain = 1,
+}
+
 /// Proposal priority level for queue ordering
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -350,6 +376,10 @@ pub enum ConditionLogic {
     And = 0,
     /// At least one condition must be true
     Or = 1,
+    /// More than half of conditions must be true
+    Majority = 2,
+    /// Always passes regardless of conditions (used when conditions vec is empty)
+    None = 3,
 }
 
 /// Recipient list access mode
@@ -365,6 +395,16 @@ pub enum ListMode {
 }
 
 /// Transfer proposal
+/// Parameters for a scheduled transfer proposal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ScheduledTransferConfig {
+    /// Ledger sequence at which the proposal becomes executable
+    pub execution_time: u64,
+    /// Number of ledgers after execution_time within which execution is valid (0 = no upper bound)
+    pub execution_window_ledgers: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Proposal {
@@ -406,6 +446,8 @@ pub struct Proposal {
     pub unlock_ledger: u64,
     /// Optional scheduled execution time (ledger number) for delayed execution
     pub execution_time: Option<u64>,
+    /// Execution window in ledgers after execution_time (0 = no upper bound)
+    pub execution_window_ledgers: u64,
     /// Insurance amount staked by proposer (0 = no insurance). Held in vault.
     pub insurance_amount: i128,
     /// Stake amount locked by proposer (0 = no stake). Held in vault.
@@ -424,6 +466,44 @@ pub struct Proposal {
     pub is_swap: bool,
     /// Ledger sequence when voting must complete (0 = no deadline)
     pub voting_deadline: u64,
+    /// Ledger sequence when this proposal was executed (0 = not yet executed)
+    pub execution_ledger: u64,
+}
+
+/// Represents a grouped batch of proposals for atomic execution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchTransaction {
+    pub id: u64,
+    pub proposal_ids: Vec<u64>,
+    pub creator: Address,
+    pub status: BatchStatus,
+    pub created_at: u64,
+    pub executed_count: u32,
+    pub failed_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BatchStatus {
+    Pending = 0,
+    Executing = 1,
+    Completed = 2,
+    RolledBack = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchExecutionResult {
+    pub executed_count: u32,
+    pub failed_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum BatchOperation {
+    Transfer(u64), // proposal id
 }
 
 /// On-chain comment on a proposal
@@ -438,6 +518,19 @@ pub struct Comment {
     pub parent_id: u64,
     pub created_at: u64,
     pub edited_at: u64,
+}
+
+/// Status of a recurring payment
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RecurringStatus {
+    /// Payment is active and will execute on schedule
+    Active = 0,
+    /// Payment is temporarily paused; duration does not count toward schedule
+    Paused = 1,
+    /// Payment has been permanently stopped and cannot be resumed
+    Stopped = 2,
 }
 
 /// Recurring payment schedule
@@ -456,8 +549,12 @@ pub struct RecurringPayment {
     pub next_payment_ledger: u64,
     /// Total payments made so far
     pub payment_count: u32,
-    /// Configured status (Active/Stopped)
-    pub is_active: bool,
+    /// Configured status (Active/Paused/Stopped)
+    pub status: RecurringStatus,
+    /// Maximum missed payments to catch up (0 = unlimited)
+    pub max_missed_payments: u32,
+    /// Ledger at which the payment was paused (0 = not paused)
+    pub paused_at_ledger: u64,
 }
 
 // ============================================================================
@@ -512,16 +609,45 @@ pub struct StreamingPayment {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VelocityConfig {
-    /// Maximum number of transfers allowed in the window
+    /// Maximum number of transfers allowed in the window (global per proposer)
     pub limit: u32,
     /// The time window in seconds (e.g., 3600 for 1 hour)
     pub window: u64,
+    /// Maximum transfers per token per proposer in the window (0 = disabled)
+    pub per_token_limit: u32,
 }
 
 /// Audit action types
 // ============================================================================
 // Reputation System (Issue: feature/reputation-system)
 // ============================================================================
+
+/// Admin-configurable parameters for reputation decay.
+///
+/// Decay formula (integer approximation):
+///   score = max(decay_min_score, score * 0.5 ^ (ledgers_since_last / half_life))
+///
+/// The exponent is computed as the number of complete half-life periods elapsed.
+/// Each period halves the distance between the current score and `decay_min_score`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReputationConfig {
+    /// Number of ledgers that constitute one half-life (~30 days default).
+    /// Must be > 0; a value of 0 disables decay entirely.
+    pub decay_half_life_ledgers: u64,
+    /// Floor score that decay can never push below (0–1000).
+    pub decay_min_score: u32,
+}
+
+impl Default for ReputationConfig {
+    fn default() -> Self {
+        ReputationConfig {
+            // ~30 days at 5 s/ledger
+            decay_half_life_ledgers: 17_280 * 30,
+            decay_min_score: 100,
+        }
+    }
+}
 
 /// Tracks proposer/approver behavior for incentive alignment
 #[contracttype]
@@ -784,6 +910,64 @@ pub struct SwapResult {
 // Cross-Chain Bridge (Issue: feature/cross-chain-bridge)
 // ============================================================================
 
+/// Identifies an external chain for bridge operations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainId {
+    /// Human-readable chain name (e.g. "ethereum", "polygon")
+    pub name: soroban_sdk::Symbol,
+    /// Numeric chain identifier (e.g. EVM chain ID)
+    pub chain_id: u64,
+}
+
+/// A single asset transfer leg in a cross-chain proposal.
+///
+/// # Fee accounting for multi-hop transfers
+/// Each hop may incur a bridge fee deducted from `amount`. The caller is
+/// responsible for supplying an `amount` that already accounts for all
+/// intermediate fees so that the final recipient receives the intended value.
+/// Fee documentation should be provided off-chain (e.g. in proposal metadata).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CrossChainAsset {
+    /// Token contract address on the source chain (Stellar SAC or custom)
+    pub token: soroban_sdk::Address,
+    /// Amount to bridge (in token's smallest unit)
+    pub amount: i128,
+    /// Destination chain identifier
+    pub destination_chain: ChainId,
+    /// Recipient address on the destination chain (encoded as a Symbol/String)
+    pub destination_address: soroban_sdk::String,
+}
+
+/// Configuration for the bridge module.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BridgeConfig {
+    /// Whether the bridge feature is enabled
+    pub enabled: bool,
+    /// Authorized bridge adapter contract addresses
+    pub bridge_adapters: soroban_sdk::Vec<soroban_sdk::Address>,
+    /// Maximum amount per single bridge action (in stroops)
+    pub max_action_amount: i128,
+    /// Maximum number of actions per bridge proposal
+    pub max_actions: u32,
+}
+
+/// A cross-chain bridge proposal stored alongside the base Proposal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CrossChainProposal {
+    /// Assets to bridge
+    pub assets: soroban_sdk::Vec<CrossChainAsset>,
+    /// Current execution status
+    pub status: CrossVaultStatus,
+    /// Per-asset execution results (true = success)
+    pub execution_results: soroban_sdk::Vec<bool>,
+    /// Ledger when executed (0 if not yet executed)
+    pub executed_at: u64,
+}
+
 /// Chain identifier for cross-chain operations
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -800,6 +984,7 @@ pub enum AuditAction {
     UpdateLimits = 8,
     UpdateThreshold = 9,
     AbstainProposal = 10,
+    AmendProposal = 11,
 }
 
 /// Audit trail entry with cryptographic verification
@@ -955,6 +1140,8 @@ pub struct Subscription {
     pub total_payments: u32,
     pub last_payment_ledger: u64,
     pub auto_renew: bool,
+    /// Number of ledgers after next_renewal_ledger during which late renewal is still accepted
+    pub grace_period_ledgers: u64,
 }
 
 /// Payment record for subscription tracking
@@ -1412,16 +1599,29 @@ pub enum FundingMilestoneStatus {
 pub struct FundingMilestone {
     /// Milestone description
     pub description: String,
-    /// Amount to release upon completion (in stroops)
+    /// Amount to release upon completion (in stroops) — used when release_percentage_bps = 0
     pub amount: i128,
+    /// Percentage of total amount in basis points (e.g. 2500 = 25%).
+    /// Must sum to exactly 10000 across all milestones in a round.
+    /// When 0 for all milestones, the fixed `amount` field is used instead.
+    pub release_percentage_bps: u32,
     /// Current status
     pub status: FundingMilestoneStatus,
+
     /// Ledger when milestone was submitted
     pub submitted_at: u64,
-    /// Ledger when milestone was verified
+
+    /// Ledger when milestone was first verified/submitted for verification
     pub verified_at: u64,
-    /// Address that verified the milestone
-    pub verified_by: Option<Address>,
+
+    /// Number of required approvals for quorum
+    pub required_verifiers: u32,
+
+    /// All addresses that have verified this milestone
+    pub verifications: Vec<Address>,
+
+    /// Rejection reason, if rejected
+    pub rejection_reason: Option<String>,
 }
 
 /// Status of a funding round
@@ -1430,9 +1630,11 @@ pub struct FundingMilestone {
 pub enum FundingRoundStatus {
     /// Round is pending approval
     Pending,
-    /// Round has been approved and is active
+    /// Round has been approved by admin (ready to become active)
+    Approved,
+    /// Round is active — milestones can be submitted and verified
     Active,
-    /// Round has been completed
+    /// Round has been completed (all milestones verified and paid)
     Completed,
     /// Round was cancelled
     Cancelled,
@@ -1647,21 +1849,7 @@ pub struct ExecutionSnapshot {
     pub was_in_priority_queue: bool,
 }
 
-// ============================================================================
-// Batch Operations
-// ============================================================================
 
-/// Single operation in a batch transaction
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BatchOperation {
-    /// Recipient address
-    pub recipient: Address,
-    /// Token contract address
-    pub token: Address,
-    /// Amount to transfer
-    pub amount: i128,
-}
 
 /// Details of a transfer
 #[contracttype]
@@ -1675,44 +1863,4 @@ pub struct TransferDetails {
     pub amount: i128,
 }
 
-/// Status of a batch transaction
-#[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BatchStatus {
-    Pending,
-    Executing,
-    Completed,
-    RolledBack,
-}
 
-/// Batch transaction containing multiple operations
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BatchTransaction {
-    /// Unique batch ID
-    pub id: u64,
-    /// Creator of the batch
-    pub creator: Address,
-    /// List of operations
-    pub operations: Vec<BatchOperation>,
-    /// Current status
-    pub status: BatchStatus,
-    /// Creation timestamp
-    pub created_at: u64,
-    /// Optional memo
-    pub memo: Symbol,
-}
-
-/// Result of batch execution
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BatchExecutionResult {
-    /// Batch ID
-    pub batch_id: u64,
-    /// Whether all operations succeeded
-    pub success: bool,
-    /// Number of successful operations
-    pub successful_ops: u32,
-    /// Number of failed operations
-    pub failed_ops: u32,
-}

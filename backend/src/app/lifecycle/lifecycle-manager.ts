@@ -1,5 +1,6 @@
 import type { Server } from "http";
 import { createLogger } from "../../shared/logging/logger.js";
+import type { InMemoryCacheAdapter } from "../../shared/cache/cache.adapter.js";
 
 export interface ShutdownHook {
   name: string;
@@ -22,10 +23,61 @@ export class LifecycleManager {
   private hooks: ShutdownHook[] = [];
   private shuttingDown = false;
   private shutdownTimeout: NodeJS.Timeout | null = null;
+  private initialized = false;
+  private inFlightRequests = 0;
+
+  /**
+   * Increment the in-flight request counter
+   */
+  public incrementInFlight(): void {
+    this.inFlightRequests++;
+  }
+
+  /**
+   * Decrement the in-flight request counter
+   */
+  public decrementInFlight(): void {
+    this.inFlightRequests = Math.max(0, this.inFlightRequests - 1);
+  }
+
+  /**
+   * Get the current in-flight request count
+   */
+  public getInFlightCount(): number {
+    return this.inFlightRequests;
+  }
+
+  /**
+   * Check if the service is shutting down
+   */
+  public isShuttingDown(): boolean {
+    return this.shuttingDown;
+  }
+
+  /**
+   * Wait for in-flight requests to complete or timeout
+   */
+  private async waitForInFlightRequests(): Promise<void> {
+    const startTime = Date.now();
+    
+    while (this.inFlightRequests > 0) {
+      // Check if we've exceeded the shutdown timeout
+      if (Date.now() - startTime > this.shutdownTimeoutMs) {
+        this.logger.warn("shutdown timeout exceeded waiting for in-flight requests", {
+          inFlightRequests: this.inFlightRequests,
+          timeoutMs: this.shutdownTimeoutMs,
+        });
+        break;
+      }
+      
+      // Wait for a short period before checking again
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
 
   constructor(
     private server: Server | null = null,
-    private shutdownTimeoutMs: number = 30_000
+    private shutdownTimeoutMs: number = 30_000,
   ) {}
 
   /**
@@ -38,9 +90,23 @@ export class LifecycleManager {
   }
 
   /**
+   * Register an InMemoryCacheAdapter for cleanup on shutdown.
+   * Calls destroy() during graceful shutdown to clear the cleanup interval.
+   */
+  public registerCache(name: string, cache: InMemoryCacheAdapter<any>): void {
+    this.onShutdown({ name: `cache:${name}`, handler: () => cache.destroy() });
+  }
+
+  /**
    * Initialize signal handlers and start listening for shutdown signals.
    */
   public initialize(): void {
+    if (this.initialized) {
+      this.logger.warn("lifecycle manager already initialized, skipping");
+      return;
+    }
+    this.initialized = true;
+
     const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
 
     signals.forEach((signal) => {
@@ -52,11 +118,33 @@ export class LifecycleManager {
 
     // Handle uncaught exceptions
     process.on("uncaughtException", (err) => {
-      this.logger.error("uncaught exception", { error: err.message });
+      this.logger.error("uncaught exception", {
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
       this.shutdown().catch((shutdownErr) => {
         this.logger.error("shutdown failed after exception", {
           error:
-            shutdownErr instanceof Error ? shutdownErr.message : String(shutdownErr),
+            shutdownErr instanceof Error
+              ? shutdownErr.message
+              : String(shutdownErr),
+        });
+        process.exit(1);
+      });
+    });
+
+    // Handle unhandled promise rejections
+    process.on("unhandledRejection", (reason) => {
+      this.logger.error("unhandled promise rejection", {
+        reason: reason instanceof Error ? reason.message : String(reason),
+        stack: reason instanceof Error ? reason.stack : undefined,
+      });
+      this.shutdown().catch((shutdownErr) => {
+        this.logger.error("shutdown failed after rejection", {
+          error:
+            shutdownErr instanceof Error
+              ? shutdownErr.message
+              : String(shutdownErr),
         });
         process.exit(1);
       });
@@ -74,6 +162,7 @@ export class LifecycleManager {
       return;
     }
 
+    const startTime = Date.now();
     this.shuttingDown = true;
     this.logger.info("starting graceful shutdown");
 
@@ -86,15 +175,21 @@ export class LifecycleManager {
     }, this.shutdownTimeoutMs);
 
     try {
-      // Close HTTP server first (stop accepting connections)
+      // 1. Stop accepting new connections first (drain in-flight requests)
       if (this.server) {
         await this.closeServer();
       }
 
-      // Execute shutdown hooks in reverse order (LIFO)
+      // 2. Wait for in-flight requests to complete
+      await this.waitForInFlightRequests();
+
+      // 3. Execute shutdown hooks (background jobs, queues, etc.) after HTTP is drained
       await this.executeShutdownHooks();
 
-      this.logger.info("graceful shutdown completed");
+      const totalDuration = Date.now() - startTime;
+      this.logger.info("graceful shutdown completed", {
+        durationMs: totalDuration,
+      });
       process.exit(0);
     } catch (err) {
       this.logger.error("graceful shutdown failed", {
@@ -112,6 +207,7 @@ export class LifecycleManager {
    * Close the HTTP server.
    */
   private closeServer(): Promise<void> {
+    const stepStart = Date.now();
     return new Promise((resolve, reject) => {
       if (!this.server) {
         resolve();
@@ -124,10 +220,13 @@ export class LifecycleManager {
         if (err) {
           this.logger.error("HTTP server close error", {
             error: err.message,
+            durationMs: Date.now() - stepStart,
           });
           reject(err);
         } else {
-          this.logger.info("HTTP server closed");
+          this.logger.info("HTTP server closed", {
+            durationMs: Date.now() - stepStart,
+          });
           resolve();
         }
       });
@@ -148,14 +247,19 @@ export class LifecycleManager {
     const reversedHooks = [...this.hooks].reverse();
 
     for (const hook of reversedHooks) {
+      const stepStart = Date.now();
       try {
         this.logger.info("executing shutdown hook", { hook: hook.name });
         await Promise.resolve(hook.handler());
-        this.logger.info("shutdown hook completed", { hook: hook.name });
+        this.logger.info("shutdown hook completed", {
+          hook: hook.name,
+          durationMs: Date.now() - stepStart,
+        });
       } catch (err) {
         this.logger.error("shutdown hook failed", {
           hook: hook.name,
           error: err instanceof Error ? err.message : String(err),
+          durationMs: Date.now() - stepStart,
         });
       }
     }

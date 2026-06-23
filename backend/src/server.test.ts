@@ -17,26 +17,37 @@ const mockEnv = {
 
 test("Server Startup", async (t) => {
   await t.test("starts successfully with valid env", async () => {
-    const server = startServer(mockEnv as any);
+    const { server, runtime } = await startServer(mockEnv as any);
 
     assert.ok(server, "Server should start");
     assert.ok(
       typeof server.close === "function",
-      "Server should be a valid HTTP server"
+      "Server should be a valid HTTP server",
     );
 
     // Clean up
+    runtime.wsServer?.stop();
+    await runtime.jobManager.stopAll();
+    if (typeof (server as any).closeAllConnections === "function") {
+      (server as any).closeAllConnections();
+    }
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
     });
   });
 
   await t.test("returns BackendRuntime with required properties", async () => {
-    // Note: startServer actually returns the HTTP server, not the runtime
-    // But we can verify the server creation doesn't throw
-    assert.doesNotThrow(() => {
-      const server = startServer(mockEnv as any);
-      server.close();
+    // Note: startServer returns { server, runtime }
+    const { server, runtime } = await startServer(mockEnv as any);
+    assert.ok(runtime.jobManager);
+
+    runtime.wsServer?.stop();
+    await runtime.jobManager.stopAll();
+    if (typeof (server as any).closeAllConnections === "function") {
+      (server as any).closeAllConnections();
+    }
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
     });
   });
 });

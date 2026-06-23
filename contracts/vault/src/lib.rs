@@ -5,7 +5,6 @@
 
 #![no_std]
 #![allow(clippy::too_many_arguments)]
-#![allow(dead_code, unused_imports, unused_variables)]
 #![allow(clippy::empty_line_after_outer_attr)]
 #![allow(clippy::unwrap_or_default)]
 #![allow(clippy::unnecessary_unwrap)]
@@ -19,22 +18,25 @@ mod events;
 mod storage;
 mod token;
 mod types;
+mod types_balance_snapshot;
 
 use errors::VaultError;
 use soroban_sdk::{contract, contractimpl, Address, Env, IntoVal, Map, String, Symbol, Vec};
 use types::{
     AuditAction, AuditEntry, BatchExecutionResult, BatchOperation, BatchStatus, BatchTransaction,
-    CancellationRecord, Comment, Condition, ConditionLogic, Config, DexConfig, Escrow,
-    EscrowCondition, EscrowStatus, ExecutionFeeEstimate, FeeTier, FundingMilestone,
-    FundingMilestoneStatus, FundingRound, FundingRoundConfig, FundingRoundStatus, GasConfig,
-    InitConfig, InsuranceConfig, ListMode, Milestone, NotificationPreferences,
-    OptionalVaultOracleConfig, PendingAdminRotation, PriceOracleClient, Priority, Proposal,
+    BridgeConfig, CancellationRecord, Comment, Condition, ConditionLogic, Config,
+    CrossChainAsset, CrossChainProposal, CrossVaultConfig, CrossVaultProposal, CrossVaultStatus,
+    Delegation, DelegationHistory, DexConfig, Dispute, DisputeResolution, DisputeStatus, Escrow,
+    EscrowStatus, ExecutionFeeEstimate, FundingMilestone, FundingMilestoneStatus, FundingRound,
+    FundingRoundConfig, FundingRoundStatus, GasConfig, InitConfig, InsuranceConfig, ListMode,
+    Milestone, NotificationPreferences, OptionalVaultOracleConfig, Priority, Proposal,
     ProposalAmendment, ProposalStatus, ProposalTemplate, RecoveryConfig, RecoveryProposal,
-    RecoveryStatus, RecurringPayment, Reputation, RetryConfig, RetryState, Role, RoleAssignment,
-    StreamStatus, StreamingPayment, Subscription, SubscriptionPayment, SubscriptionStatus,
-    SubscriptionTier, SwapProposal, SwapResult, TemplateOverrides, ThresholdStrategy,
-    TierFeeConfig, TransferDetails, VaultMetrics, VaultOracleConfig, VaultPriceData,
-    VotingStrategy,
+    RecoveryStatus, RecurringPayment, Reputation, ReputationConfig, RetryConfig, RetryState, Role,
+    RoleAssignment, ScheduledTransferConfig, StakingConfig, StreamStatus, StreamingPayment,
+    Subscription, SubscriptionStatus, SubscriptionTier, SwapProposal, SwapResult,
+    TemplateOverrides, ThresholdStrategy, TransferDetails, VaultAction, VaultMetrics,
+    VaultOracleConfig, VaultPriceData, VelocityConfig, VotingStrategy,
+    VoteChoice,
 };
 
 /// The main contract structure for VaultDAO.
@@ -77,6 +79,10 @@ const MIN_ATTACHMENT_LEN: u32 = 46;
 const MAX_ATTACHMENT_LEN: u32 = 128;
 
 /// Reputation adjustments
+/// Minimum interval between recurring payments: 720 ledgers ≈ 1 hour at ~5 s/ledger.
+/// Prevents near-instant repeated draining of the vault.
+const MIN_RECURRING_INTERVAL: u64 = 720;
+
 const REP_EXEC_PROPOSER: u32 = 10;
 const REP_EXEC_APPROVER: u32 = 5;
 const REP_REJECTION_PENALTY: u32 = 20;
@@ -100,15 +106,71 @@ mod test_admin_rotation;
 #[cfg(test)]
 mod test_audit;
 #[cfg(test)]
-mod test_escrow_oracle;
+mod test_cross_vault;
 #[cfg(test)]
-mod test_fees;
+mod test_disputes;
 #[cfg(test)]
 mod test_hooks;
 #[cfg(test)]
 mod test_recurring;
 #[cfg(test)]
 mod test_regressions;
+#[cfg(test)]
+mod test_subscriptions;
+#[cfg(test)]
+mod test_voting_deadline;
+#[cfg(test)]
+mod test_streaming;
+#[cfg(test)]
+mod test_attachments;
+#[cfg(test)]
+mod test_tags;
+#[cfg(test)]
+mod test_retry;
+#[cfg(test)]
+mod test_staking;
+#[cfg(test)]
+mod test_fees;
+
+
+#[cfg(test)]
+pub mod mock_oracle {
+    use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+    use crate::types::VaultPriceData;
+
+    #[contracttype]
+    #[derive(Clone)]
+    enum DataKey {
+        Price,
+    }
+
+    #[contract]
+    pub struct MockOracle;
+
+    #[contractimpl]
+    impl MockOracle {
+        /// Set the mocked price and timestamp (ledger sequence).
+        pub fn set_price(env: Env, price: i128, timestamp: u64) {
+            env.storage()
+                .instance()
+                .set(&DataKey::Price, &VaultPriceData { price, timestamp });
+        }
+
+        /// Return the last mocked price, defaulting to price=1000, timestamp=0.
+        pub fn lastprice(env: Env, _asset: Address) -> Option<VaultPriceData> {
+            Some(env.storage().instance().get(&DataKey::Price).unwrap_or(
+                VaultPriceData {
+                    price: 1000,
+                    timestamp: 0,
+                },
+            ))
+        }
+
+        pub fn base(_env: Env) -> Symbol {
+            Symbol::new(&_env, "USD")
+        }
+    }
+}
 
 #[contractimpl]
 #[allow(clippy::too_many_arguments)]
@@ -136,7 +198,7 @@ impl VaultDAO {
             return Err(VaultError::NoSigners);
         }
         if config.threshold < 1 {
-            return Err(VaultError::ThresholdTooLow);
+            return Err(VaultError::ThresholdTooHigh);
         }
         if config.threshold > config.signers.len() {
             return Err(VaultError::ThresholdTooHigh);
@@ -153,6 +215,30 @@ impl VaultDAO {
             return Err(VaultError::InvalidAmount);
         }
 
+        // Validate threshold strategy
+        match &config.threshold_strategy {
+            ThresholdStrategy::TimeBased(tb) => {
+                if tb.reduced_threshold > tb.initial_threshold {
+                    return Err(VaultError::InvalidThresholdConfig);
+                }
+                if tb.reduced_threshold < 1 {
+                    return Err(VaultError::InvalidThresholdConfig);
+                }
+                if tb.initial_threshold < config.threshold {
+                    return Err(VaultError::InvalidThresholdConfig);
+                }
+            }
+            _ => {} // Other strategies don't need additional validation
+        }
+
+        // Validate proposal_id_prefix
+        let prefix = config.proposal_id_prefix;
+        if prefix != 0 {
+            if prefix % 1_000_000 != 0 || prefix > u64::MAX / 2 {
+                return Err(VaultError::InvalidProposalIdPrefix);
+            }
+        }
+
         // Admin must authorize initialization
         admin.require_auth();
 
@@ -161,7 +247,7 @@ impl VaultDAO {
             signers: config.signers.clone(),
             threshold: config.threshold,
             quorum: config.quorum,
-            quorum_percentage: 0,
+            quorum_percentage: config.quorum_percentage,
             spending_limit: config.spending_limit,
             daily_limit: config.daily_limit,
             weekly_limit: config.weekly_limit,
@@ -173,10 +259,11 @@ impl VaultDAO {
             post_execution_hooks: config.post_execution_hooks,
             default_voting_deadline: config.default_voting_deadline,
             veto_addresses: config.veto_addresses,
+            veto_window_ledgers: config.veto_window_ledgers,
             retry_config: config.retry_config,
             recovery_config: config.recovery_config.clone(),
             staking_config: config.staking_config,
-            admin_rotation_delay: config.admin_rotation_delay,
+            proposal_id_prefix: config.proposal_id_prefix,
         };
 
         // Store state
@@ -247,6 +334,7 @@ impl VaultDAO {
             insurance_amount,
             empty_dependencies,
             None,
+            0,
         )
     }
 
@@ -262,7 +350,7 @@ impl VaultDAO {
     /// * `conditions` - Optional execution conditions.
     /// * `condition_logic` - And/Or logic for combining conditions.
     /// * `insurance_amount` - Tokens staked by proposer as guarantee (0 = none).
-    /// * `execution_time` - Scheduled execution ledger.
+    /// * `schedule` - Scheduled execution time and optional window (0 window = no upper bound).
     ///
     /// # Returns
     /// The unique ID of the newly created proposal.
@@ -278,7 +366,7 @@ impl VaultDAO {
         conditions: Vec<Condition>,
         condition_logic: ConditionLogic,
         insurance_amount: i128,
-        execution_time: u64,
+        schedule: ScheduledTransferConfig,
     ) -> Result<u64, VaultError> {
         let empty_dependencies = Vec::new(&env);
         Self::propose_transfer_internal(
@@ -293,7 +381,8 @@ impl VaultDAO {
             condition_logic,
             insurance_amount,
             empty_dependencies,
-            Some(execution_time),
+            Some(schedule.execution_time),
+            schedule.execution_window_ledgers,
         )
     }
 
@@ -328,6 +417,7 @@ impl VaultDAO {
             insurance_amount,
             depends_on,
             None,
+            0,
         )
     }
 
@@ -345,6 +435,7 @@ impl VaultDAO {
         insurance_amount: i128,
         depends_on: Vec<u64>,
         execution_time: Option<u64>,
+        execution_window_ledgers: u64,
     ) -> Result<u64, VaultError> {
         // 1. Verify identity
         proposer.require_auth();
@@ -354,7 +445,7 @@ impl VaultDAO {
 
         // 3. Check permission
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -362,7 +453,7 @@ impl VaultDAO {
         Self::validate_recipient(&env, &recipient)?;
 
         // 5. Velocity Limit Check (Sliding Window)
-        if !storage::check_and_update_velocity(&env, &proposer, &config.velocity_limit) {
+        if !storage::check_and_update_velocity(&env, &proposer, &token_addr, &config.velocity_limit) {
             return Err(VaultError::VelocityLimitExceeded);
         }
 
@@ -373,8 +464,9 @@ impl VaultDAO {
 
         // 7. Check per-proposal spending limit with reputation boost
         // High reputation (800+) gets 2x limit, very high (900+) gets 3x
-        let rep = storage::get_reputation(&env, &proposer);
-        storage::apply_reputation_decay(&env, &mut rep.clone());
+        let mut rep = storage::get_reputation(&env, &proposer);
+        storage::apply_reputation_decay(&env, &mut rep);
+        storage::set_reputation(&env, &proposer, &rep);
         let adjusted_spending_limit = if rep.score >= 900 {
             config.spending_limit * 3
         } else if rep.score >= 800 {
@@ -487,7 +579,7 @@ impl VaultDAO {
 
         // 14. Create and store the proposal
         let proposal_id = storage::increment_proposal_id(&env);
-        Self::validate_dependencies(&env, proposal_id, &depends_on)?;
+        Self::validate_dependencies(env.clone(), proposal_id, depends_on.clone())?;
 
         // Create stake record after proposal_id is generated
         if actual_stake > 0 {
@@ -533,6 +625,7 @@ impl VaultDAO {
             expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
             unlock_ledger,
             execution_time,
+            execution_window_ledgers,
             insurance_amount: actual_insurance,
             stake_amount: actual_stake,
             gas_limit: proposal_gas_limit,
@@ -546,6 +639,7 @@ impl VaultDAO {
             } else {
                 0
             },
+            execution_ledger: 0,
         };
 
         storage::set_proposal(&env, &proposal);
@@ -583,6 +677,17 @@ impl VaultDAO {
 
         // Update reputation for creating proposal
         Self::update_reputation_on_propose(&env, &proposer);
+        storage::metrics_on_proposal(&env);
+
+        // Emit metrics update event
+        let metrics = storage::get_metrics(&env);
+        events::emit_metrics_updated(
+            &env,
+            metrics.executed_count,
+            metrics.rejected_count,
+            metrics.expired_count,
+            metrics.success_rate_bps(),
+        );
 
         Ok(proposal_id)
     }
@@ -620,12 +725,17 @@ impl VaultDAO {
 
         let config = storage::get_config(&env)?;
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
-        // Velocity check once for the batch
-        if !storage::check_and_update_velocity(&env, &proposer, &config.velocity_limit) {
+        // Velocity check once for the batch (use first transfer token for per-token tracking)
+        let batch_token = if transfers.is_empty() {
+            return Err(VaultError::InvalidAmount);
+        } else {
+            transfers.get(0).unwrap().token.clone()
+        };
+        if !storage::check_and_update_velocity(&env, &proposer, &batch_token, &config.velocity_limit) {
             return Err(VaultError::VelocityLimitExceeded);
         }
 
@@ -744,8 +854,13 @@ impl VaultDAO {
                 condition_logic: condition_logic.clone(),
                 created_at: current_ledger,
                 expires_at: calculate_expiration_ledger(&config, &priority, current_ledger),
-                unlock_ledger: 0,
+                unlock_ledger: if transfer.amount >= config.timelock_threshold {
+                    current_ledger + config.timelock_delay
+                } else {
+                    0
+                },
                 execution_time: None,
+                execution_window_ledgers: 0,
                 insurance_amount: insurance_per_proposal,
                 stake_amount: 0, // Batch proposals don't require individual stakes
                 gas_limit: proposal_gas_limit,
@@ -759,6 +874,7 @@ impl VaultDAO {
                 } else {
                     0
                 },
+                execution_ledger: 0,
             };
 
             storage::set_proposal(&env, &proposal);
@@ -792,6 +908,19 @@ impl VaultDAO {
 
         Self::update_reputation_on_propose(&env, &proposer);
 
+        // Create batch transaction record for atomic execution later
+        let batch_id = storage::increment_batch_id(&env);
+        let batch = types::BatchTransaction {
+            id: batch_id,
+            proposal_ids: proposal_ids.clone(),
+            creator: proposer.clone(),
+            status: types::BatchStatus::Pending,
+            created_at: current_ledger,
+            executed_count: 0,
+            failed_count: 0,
+        };
+        storage::set_batch(&env, &batch);
+
         Ok(proposal_ids)
     }
 
@@ -822,6 +951,24 @@ impl VaultDAO {
 
         // Check permission
 
+        // Apply reputation decay for the signer at the start of approve
+        {
+            let mut rep = storage::get_reputation(&env, &signer);
+            let old_score = rep.score;
+            storage::apply_reputation_decay(&env, &mut rep);
+            let new_score = rep.score;
+            storage::set_reputation(&env, &signer, &rep);
+            if old_score != new_score {
+                events::emit_reputation_updated(
+                    &env,
+                    &signer,
+                    old_score,
+                    new_score,
+                    Symbol::new(&env, "decay"),
+                );
+            }
+        }
+
         // Get proposal
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
@@ -830,30 +977,73 @@ impl VaultDAO {
             return Err(VaultError::VoterNotInSnapshot);
         }
 
-        // Resolve delegation chain to get effective voter
-        let effective_voter = Self::resolve_delegation_chain(&env, &signer, 0);
-        let is_delegated = effective_voter != signer;
+        // Get all signers represented by this signer (including self)
+        let mut represented_voters = Vec::new(&env);
+        represented_voters.push_back(signer.clone());
+        Self::get_all_represented_voters(&env, &signer, &mut represented_voters, 0);
 
         // Validate state
         if proposal.status != ProposalStatus::Pending {
             return Err(VaultError::ProposalNotPending);
         }
 
-        // Prevent double-approval or abstaining then approving (check effective voter)
-        if proposal.approvals.contains(&effective_voter)
-            || proposal.abstentions.contains(&effective_voter)
-        {
+        let current_ledger = env.ledger().sequence() as u64;
+        let mut vote_cast_count: u32 = 0;
+
+        for voter in represented_voters.iter() {
+            // Snapshot check: voter must have been a signer at proposal creation
+            if !proposal.snapshot_signers.contains(&voter) {
+                continue;
+            }
+
+            if proposal.abstentions.contains(&voter) {
+                return Err(VaultError::AlreadyAbstained);
+            }
+
+            // Prevent double-approval
+            if proposal.approvals.contains(&voter) {
+                continue;
+            }
+
+            // Add approval
+            proposal.approvals.push_back(voter.clone());
+            vote_cast_count += 1;
+
+            // Reputation boost for approving
+            Self::update_reputation_on_approval(&env, &voter);
+
+            // Emit delegated vote event if voting through delegation
+            if voter != signer {
+                events::emit_delegated_vote(&env, proposal_id, &voter, &signer);
+            }
+        }
+
+        if vote_cast_count == 0 {
             return Err(VaultError::AlreadyApproved);
         }
 
-        // Check expiration (only if expiration is enabled, i.e., expires_at > 0)
-        let current_ledger = env.ledger().sequence() as u64;
+        // Record that the actual signer provided auth at this ledger
+        storage::set_approval_ledger(&env, proposal_id, &signer, current_ledger);
+
+        // Check expiration
         if proposal.expires_at > 0 && current_ledger > proposal.expires_at {
+            if proposal.status != ProposalStatus::Expired {
+                storage::refund_spending_limits(&env, proposal.amount);
+            }
             proposal.status = ProposalStatus::Expired;
             storage::set_proposal(&env, &proposal);
             storage::metrics_on_expiry(&env);
             events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
-            return Err(VaultError::ProposalExpired);
+
+            let metrics = storage::get_metrics(&env);
+            events::emit_metrics_updated(
+                &env,
+                metrics.executed_count,
+                metrics.rejected_count,
+                metrics.expired_count,
+                metrics.success_rate_bps(),
+            );
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check voting deadline
@@ -861,77 +1051,37 @@ impl VaultDAO {
             proposal.status = ProposalStatus::Rejected;
             storage::set_proposal(&env, &proposal);
             storage::metrics_on_rejection(&env);
+            Self::slash_insurance_on_rejection(&env, &proposal);
+            Self::slash_stake_on_rejection(&env, &proposal);
             events::emit_proposal_deadline_rejected(&env, proposal_id, proposal.voting_deadline);
-            return Err(VaultError::VotingDeadlinePassed);
+            return Ok(());
         }
 
-        // Add approval using effective voter
-        proposal.approvals.push_back(effective_voter.clone());
-        let current_ledger = env.ledger().sequence() as u64;
-        storage::set_approval_ledger(&env, proposal_id, &signer, current_ledger);
-
-        // Emit delegated vote event if voting through delegation
-        if is_delegated {
-            events::emit_delegated_vote(&env, proposal_id, &effective_voter, &signer);
-        }
-
-        // Calculate current vote totals
-        let approval_count = proposal.approvals.len();
-        let quorum_votes = approval_count + proposal.abstentions.len();
-        let previous_quorum_votes = quorum_votes.saturating_sub(1);
-        let was_quorum_reached = config.quorum == 0 || previous_quorum_votes >= config.quorum;
-
-        // Check if threshold met AND quorum satisfied
-        let threshold_reached = Self::is_threshold_reached(&env, &config, &proposal);
-        let quorum_reached = config.quorum == 0 || quorum_votes >= config.quorum;
-        if config.quorum > 0 && !was_quorum_reached && quorum_reached {
-            events::emit_quorum_reached(&env, proposal_id, quorum_votes, config.quorum);
-        }
-
-        if threshold_reached && quorum_reached {
-            // Check if proposal has execution_time (scheduled)
-            if proposal.execution_time.is_some() {
-                // Transition to Scheduled status
-                proposal.status = ProposalStatus::Scheduled;
-                events::emit_proposal_scheduled(
-                    &env,
-                    proposal_id,
-                    proposal.execution_time.unwrap(),
-                    current_ledger,
-                );
-            } else {
-                // Immediate execution - transition to Approved
-                proposal.status = ProposalStatus::Approved;
-
-                // Check for Timelock
-                if proposal.amount >= config.timelock_threshold {
-                    let current_ledger = env.ledger().sequence() as u64;
-                    proposal.unlock_ledger = current_ledger + config.timelock_delay;
-                } else {
-                    proposal.unlock_ledger = 0;
-                }
-
-                events::emit_proposal_ready(&env, proposal_id, proposal.unlock_ledger);
-            }
-        }
+        let previous_quorum_votes = proposal
+            .approvals
+            .len()
+            .saturating_add(proposal.abstentions.len())
+            .saturating_sub(vote_cast_count);
+        Self::reevaluate_vote_state(
+            &env,
+            &config,
+            proposal_id,
+            &mut proposal,
+            current_ledger,
+            previous_quorum_votes,
+        );
 
         storage::set_proposal(&env, &proposal);
         storage::extend_instance_ttl(&env);
-
-        // Create audit entry
         storage::create_audit_entry(&env, AuditAction::ApproveProposal, &signer, proposal_id);
 
-        // Emit event
         events::emit_proposal_approved(
             &env,
             proposal_id,
-            &effective_voter,
-            approval_count,
+            &signer,
+            proposal.approvals.len(),
             config.threshold,
         );
-
-        // Reputation boost for approving (credit the effective voter)
-        Self::update_reputation_on_approval(&env, &effective_voter);
 
         Ok(())
     }
@@ -962,30 +1112,70 @@ impl VaultDAO {
             return Err(VaultError::VoterNotInSnapshot);
         }
 
-        // Resolve delegation chain to get effective voter
-        let effective_voter = Self::resolve_delegation_chain(&env, &signer, 0);
-        let is_delegated = effective_voter != signer;
+        // Get all signers represented by this signer (including self)
+        let mut represented_voters = Vec::new(&env);
+        represented_voters.push_back(signer.clone());
+        Self::get_all_represented_voters(&env, &signer, &mut represented_voters, 0);
 
         // Validate state
         if proposal.status != ProposalStatus::Pending {
             return Err(VaultError::ProposalNotPending);
         }
 
-        // Prevent double-abstaining or approving then abstaining
-        if proposal.approvals.contains(&effective_voter)
-            || proposal.abstentions.contains(&effective_voter)
-        {
-            return Err(VaultError::AlreadyApproved);
+        let current_ledger = env.ledger().sequence() as u64;
+        let mut vote_cast_count: u32 = 0;
+
+        for voter in represented_voters.iter() {
+            // Snapshot check: voter must have been a signer at proposal creation
+            if !proposal.snapshot_signers.contains(&voter) {
+                continue;
+            }
+
+            if proposal.approvals.contains(&voter) {
+                return Err(VaultError::AlreadyApproved);
+            }
+
+            // Prevent double-abstaining
+            if proposal.abstentions.contains(&voter) {
+                continue;
+            }
+
+            // Add abstention
+            proposal.abstentions.push_back(voter.clone());
+            vote_cast_count += 1;
+
+            // Track participation for abstaining
+            Self::update_reputation_on_abstention(&env, &voter);
+
+            // Emit delegated vote event if voting through delegation
+            if voter != signer {
+                events::emit_delegated_vote(&env, proposal_id, &voter, &signer);
+            }
+        }
+
+        if vote_cast_count == 0 {
+            return Err(VaultError::AlreadyAbstained);
         }
 
         // Check expiration
-        let current_ledger = env.ledger().sequence() as u64;
         if proposal.expires_at > 0 && current_ledger > proposal.expires_at {
+            if proposal.status != ProposalStatus::Expired {
+                storage::refund_spending_limits(&env, proposal.amount);
+            }
             proposal.status = ProposalStatus::Expired;
             storage::set_proposal(&env, &proposal);
             storage::metrics_on_expiry(&env);
             events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
-            return Err(VaultError::ProposalExpired);
+
+            let metrics = storage::get_metrics(&env);
+            events::emit_metrics_updated(
+                &env,
+                metrics.executed_count,
+                metrics.rejected_count,
+                metrics.expired_count,
+                metrics.success_rate_bps(),
+            );
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check voting deadline
@@ -993,69 +1183,176 @@ impl VaultDAO {
             proposal.status = ProposalStatus::Rejected;
             storage::set_proposal(&env, &proposal);
             storage::metrics_on_rejection(&env);
+            Self::slash_insurance_on_rejection(&env, &proposal);
+            Self::slash_stake_on_rejection(&env, &proposal);
             events::emit_proposal_deadline_rejected(&env, proposal_id, proposal.voting_deadline);
-            return Err(VaultError::VotingDeadlinePassed);
+            return Ok(());
         }
 
-        // Add abstention using effective voter
-        proposal.abstentions.push_back(effective_voter.clone());
+        let previous_quorum_votes = proposal
+            .approvals
+            .len()
+            .saturating_add(proposal.abstentions.len())
+            .saturating_sub(vote_cast_count);
+        Self::reevaluate_vote_state(
+            &env,
+            &config,
+            proposal_id,
+            &mut proposal,
+            current_ledger,
+            previous_quorum_votes,
+        );
 
-        // Emit delegated vote event if voting through delegation
-        if is_delegated {
-            events::emit_delegated_vote(&env, proposal_id, &effective_voter, &signer);
+        storage::set_proposal(&env, &proposal);
+        storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(&env, AuditAction::AbstainProposal, &signer, proposal_id);
+
+        events::emit_proposal_abstained(
+            &env,
+            proposal_id,
+            &signer,
+            proposal.abstentions.len(),
+            proposal.approvals.len() + proposal.abstentions.len(),
+        );
+
+        Ok(())
+    }
+
+    /// Change an existing vote during the active voting window.
+    pub fn change_vote(
+        env: Env,
+        signer: Address,
+        proposal_id: u64,
+        new_vote: VoteChoice,
+    ) -> Result<(), VaultError> {
+        signer.require_auth();
+
+        let config = storage::get_config(&env)?;
+        if !config.signers.contains(&signer) {
+            return Err(VaultError::NotASigner);
         }
 
-        // Calculate current vote totals
-        let approval_count = proposal.approvals.len();
-        let abstention_count = proposal.abstentions.len();
-        let quorum_votes = approval_count + abstention_count;
-        let previous_quorum_votes = quorum_votes.saturating_sub(1);
-        let was_quorum_reached = config.quorum == 0 || previous_quorum_votes >= config.quorum;
-
-        // Check if threshold met AND quorum satisfied
-        let threshold_reached = Self::is_threshold_reached(&env, &config, &proposal);
-        let quorum_reached = config.quorum == 0 || quorum_votes >= config.quorum;
-        if config.quorum > 0 && !was_quorum_reached && quorum_reached {
-            events::emit_quorum_reached(&env, proposal_id, quorum_votes, config.quorum);
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+        if !proposal.snapshot_signers.contains(&signer) {
+            return Err(VaultError::VoterNotInSnapshot);
         }
 
-        if threshold_reached && quorum_reached {
-            if proposal.execution_time.is_some() {
-                proposal.status = ProposalStatus::Scheduled;
-                events::emit_proposal_scheduled(
-                    &env,
-                    proposal_id,
-                    proposal.execution_time.unwrap(),
-                    current_ledger,
-                );
-            } else {
-                proposal.status = ProposalStatus::Approved;
-                if proposal.amount >= config.timelock_threshold {
-                    proposal.unlock_ledger = current_ledger + config.timelock_delay;
-                } else {
-                    proposal.unlock_ledger = 0;
+        if proposal.status != ProposalStatus::Pending
+            && proposal.status != ProposalStatus::Approved
+            && proposal.status != ProposalStatus::Scheduled
+        {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        if proposal.expires_at > 0 && current_ledger > proposal.expires_at {
+            return Err(VaultError::ProposalExpired);
+        }
+        if proposal.voting_deadline == 0 || current_ledger > proposal.voting_deadline {
+            return Err(VaultError::ProposalExpired);
+        }
+
+        let previous_quorum_votes = proposal.approvals.len() + proposal.abstentions.len();
+        let mut represented_voters = Vec::new(&env);
+        represented_voters.push_back(signer.clone());
+        Self::get_all_represented_voters(&env, &signer, &mut represented_voters, 0);
+
+        let mut switched_count: u32 = 0;
+        let mut has_target_vote = false;
+
+        for voter in represented_voters.iter() {
+            if !proposal.snapshot_signers.contains(&voter) {
+                continue;
+            }
+
+            match new_vote {
+                VoteChoice::Approve => {
+                    if proposal.approvals.contains(&voter) {
+                        has_target_vote = true;
+                        continue;
+                    }
+                    if proposal.abstentions.contains(&voter) {
+                        proposal.abstentions =
+                            Self::remove_address_from_vec(&env, &proposal.abstentions, &voter);
+                        proposal.approvals.push_back(voter.clone());
+                        switched_count += 1;
+                        events::emit_vote_changed(
+                            &env,
+                            proposal_id,
+                            &voter,
+                            VoteChoice::Abstain as u32,
+                            VoteChoice::Approve as u32,
+                        );
+                        if voter != signer {
+                            events::emit_delegated_vote(&env, proposal_id, &voter, &signer);
+                        }
+                    }
                 }
-                events::emit_proposal_ready(&env, proposal_id, proposal.unlock_ledger);
+                VoteChoice::Abstain => {
+                    if proposal.abstentions.contains(&voter) {
+                        has_target_vote = true;
+                        continue;
+                    }
+                    if proposal.approvals.contains(&voter) {
+                        proposal.approvals =
+                            Self::remove_address_from_vec(&env, &proposal.approvals, &voter);
+                        proposal.abstentions.push_back(voter.clone());
+                        switched_count += 1;
+                        events::emit_vote_changed(
+                            &env,
+                            proposal_id,
+                            &voter,
+                            VoteChoice::Approve as u32,
+                            VoteChoice::Abstain as u32,
+                        );
+                        if voter != signer {
+                            events::emit_delegated_vote(&env, proposal_id, &voter, &signer);
+                        }
+                    }
+                }
             }
         }
+
+        if switched_count == 0 {
+            return Err(match new_vote {
+                VoteChoice::Approve if has_target_vote => VaultError::AlreadyApproved,
+                VoteChoice::Abstain if has_target_vote => VaultError::AlreadyAbstained,
+                _ => VaultError::InvalidStatusTransition,
+            });
+        }
+
+        if new_vote == VoteChoice::Approve {
+            storage::set_approval_ledger(&env, proposal_id, &signer, current_ledger);
+        }
+
+        Self::reevaluate_vote_state(
+            &env,
+            &config,
+            proposal_id,
+            &mut proposal,
+            current_ledger,
+            previous_quorum_votes,
+        );
 
         storage::set_proposal(&env, &proposal);
         storage::extend_instance_ttl(&env);
 
-        // Create audit entry
-        storage::create_audit_entry(&env, AuditAction::AbstainProposal, &signer, proposal_id);
-
-        // Emit event
-        events::emit_proposal_abstained(
-            &env,
-            proposal_id,
-            &effective_voter,
-            abstention_count as u32,
-            quorum_votes as u32,
-        );
-
-        // Track participation for abstaining
-        Self::update_reputation_on_abstention(&env, &effective_voter);
+        match new_vote {
+            VoteChoice::Approve => events::emit_proposal_approved(
+                &env,
+                proposal_id,
+                &signer,
+                proposal.approvals.len(),
+                config.threshold,
+            ),
+            VoteChoice::Abstain => events::emit_proposal_abstained(
+                &env,
+                proposal_id,
+                &signer,
+                proposal.abstentions.len(),
+                proposal.approvals.len() + proposal.abstentions.len(),
+            ),
+        }
 
         Ok(())
     }
@@ -1083,12 +1380,33 @@ impl VaultDAO {
         // Executor must authorize (to prevent griefing)
         executor.require_auth();
 
+        // Apply reputation decay for the executor at the start of execute
+        {
+            let mut rep = storage::get_reputation(&env, &executor);
+            let old_score = rep.score;
+            storage::apply_reputation_decay(&env, &mut rep);
+            let new_score = rep.score;
+            storage::set_reputation(&env, &executor, &rep);
+            if old_score != new_score {
+                events::emit_reputation_updated(
+                    &env,
+                    &executor,
+                    old_score,
+                    new_score,
+                    Symbol::new(&env, "decay"),
+                );
+            }
+        }
+
         // Get proposal
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
-        // Validate state
+        // Validate state via state machine
         if proposal.status == ProposalStatus::Executed {
             return Err(VaultError::ProposalAlreadyExecuted);
+        }
+        if proposal.status == ProposalStatus::Cancelled {
+            return Err(VaultError::ProposalAlreadyCancelled);
         }
         if proposal.status == ProposalStatus::Vetoed {
             return Err(VaultError::ProposalNotApproved);
@@ -1100,11 +1418,25 @@ impl VaultDAO {
         // Check expiration (even approved proposals can expire)
         let current_ledger = env.ledger().sequence() as u64;
         if current_ledger > proposal.expires_at {
+            // Only refund once — guard against double-refund if already Expired
+            if proposal.status != ProposalStatus::Expired {
+                storage::refund_spending_limits(&env, proposal.amount);
+            }
             proposal.status = ProposalStatus::Expired;
+            storage::tag_index_prune_proposal(&env, &proposal.tags, proposal_id);
             storage::set_proposal(&env, &proposal);
             storage::metrics_on_expiry(&env);
             events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
-            return Err(VaultError::ProposalExpired);
+
+            let metrics = storage::get_metrics(&env);
+            events::emit_metrics_updated(
+                &env,
+                metrics.executed_count,
+                metrics.rejected_count,
+                metrics.expired_count,
+                metrics.success_rate_bps(),
+            );
+            return Err(VaultError::PermissionExpired);
         }
 
         // Check Timelock
@@ -1112,11 +1444,15 @@ impl VaultDAO {
             return Err(VaultError::TimelockNotExpired);
         }
 
-        // Dependencies must be fully executed before this proposal can execute.
+        // Dependencies must be fully executed before this proposal can execute,
+        // and must have been executed in a prior ledger (not the same ledger batch).
         for dependency_id in proposal.depends_on.iter() {
             if let Ok(dep_proposal) = storage::get_proposal(&env, dependency_id) {
                 if dep_proposal.status != ProposalStatus::Executed {
                     return Err(VaultError::ProposalNotApproved);
+                }
+                if dep_proposal.execution_ledger == 0 || dep_proposal.execution_ledger >= current_ledger {
+                    return Err(VaultError::DependencyNotExecuted);
                 }
             } else {
                 return Err(VaultError::ProposalNotFound);
@@ -1146,6 +1482,17 @@ impl VaultDAO {
             Self::call_hook(&env, &hook, proposal_id, true);
         }
 
+        // Capture snapshot before transfer to enable admin rollback if needed
+        let snapshot = crate::types::ExecutionSnapshot {
+            proposal: proposal.clone(),
+            was_in_priority_queue: storage::is_in_priority_queue(
+                &env,
+                proposal.priority.clone() as u32,
+                proposal_id,
+            ),
+        };
+        storage::set_execution_snapshot(&env, proposal_id, &snapshot);
+
         // Attempt execution — retryable failures are handled below
         let exec_result =
             Self::try_execute_transfer(&env, &executor, &mut proposal, current_ledger);
@@ -1159,8 +1506,28 @@ impl VaultDAO {
 
                 // Update proposal status
                 proposal.status = ProposalStatus::Executed;
+                proposal.execution_ledger = current_ledger;
                 storage::set_proposal(&env, &proposal);
                 storage::extend_instance_ttl(&env);
+
+                // If this is a config change proposal, apply the pending config
+                if proposal.memo == Symbol::new(&env, "config_change") {
+                    if let Some(pending_id) = storage::get_pending_config_proposal(&env) {
+                        if pending_id == proposal_id {
+                            let stored: Option<Config> = env
+                                .storage()
+                                .persistent()
+                                .get(&crate::storage::FeatureKey::PendingConfig);
+                            if let Some(new_config) = stored {
+                                storage::set_config(&env, &new_config);
+                            }
+                            storage::clear_pending_config_proposal(&env);
+                            env.storage()
+                                .persistent()
+                                .remove(&crate::storage::FeatureKey::PendingConfig);
+                        }
+                    }
+                }
 
                 // Emit execution event (rich: includes token and ledger)
                 events::emit_proposal_executed(
@@ -1189,6 +1556,13 @@ impl VaultDAO {
                     metrics.success_rate_bps(),
                 );
 
+                storage::create_audit_entry(
+                    &env,
+                    AuditAction::ExecuteProposal,
+                    &executor,
+                    proposal_id,
+                );
+
                 Ok(())
             }
             Err(err) if Self::is_retryable_error(&err) => {
@@ -1212,37 +1586,565 @@ impl VaultDAO {
             Err(err) => Err(err),
         }
     }
+
+    /// Get the retry state for a proposal.
+    ///
+    /// Returns the current retry state if the proposal has been scheduled for retry,
+    /// or `None` if no retry is pending.
+    ///
+    /// # Arguments
+    /// * `proposal_id` - The ID of the proposal to check
+    ///
+    /// # Returns
+    /// `Some(RetryState)` if a retry is scheduled, `None` otherwise
     pub fn get_retry_state(env: Env, proposal_id: u64) -> Option<RetryState> {
         storage::get_retry_state(&env, proposal_id)
     }
 
+    /// Retry execution of a previously failed proposal.
+    ///
+    /// Only available for proposals in `ProposalStatus::Approved` that have a
+    /// `RetryState` with `retry_count > 0` (i.e., at least one prior failure).
+    /// Checks that `current_ledger >= retry_state.next_retry_ledger` before
+    /// attempting execution.
+    ///
+    /// On failure, schedules the next retry with exponential backoff and emits
+    /// `retry_scheduled`. When `retry_count >= max_retries`, emits
+    /// `retries_exhausted` and sets the proposal to `ProposalStatus::Expired`.
+    ///
+    /// Returns `VaultError::RetryError` if retry is disabled or conditions are
+    /// not met.
+    pub fn retry_execute_proposal(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        let config = storage::get_config(&env)?;
+
+        if !config.retry_config.enabled {
+            return Err(VaultError::RetryError);
+        }
+
+        let retry_state = storage::get_retry_state(&env, proposal_id)
+            .ok_or(VaultError::RetryError)?;
+
+        // Only proposals that have already failed at least once are retryable here
+        if retry_state.retry_count == 0 {
+            return Err(VaultError::RetryError);
+        }
+
+        let proposal = storage::get_proposal(&env, proposal_id)?;
+        if proposal.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+
+        // Enforce backoff window
+        if current_ledger < retry_state.next_retry_ledger {
+            return Err(VaultError::RetryError);
+        }
+
+        // Check max retries — if exhausted, expire the proposal
+        if retry_state.retry_count >= config.retry_config.max_retries {
+            let mut expired = proposal;
+            expired.status = ProposalStatus::Expired;
+            storage::set_proposal(&env, &expired);
+            events::emit_retries_exhausted(&env, proposal_id, retry_state.retry_count);
+            return Err(VaultError::RetryError);
+        }
+
+        // Delegate to execute_proposal which handles the full execution path
+        // including retry scheduling on failure
+        Self::execute_proposal(env, executor, proposal_id)
+    }
+
+    /// Execute a batch transaction atomically: either all proposals succeed or
+    /// any partial progress is attempted to be reversed and the batch is marked RolledBack.
+    pub fn execute_batch(env: Env, executor: Address, batch_id: u64) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        let mut batch = storage::get_batch(&env, batch_id)?;
+
+        if batch.status != BatchStatus::Pending {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Mark as executing
+        batch.status = BatchStatus::Executing;
+        storage::set_batch(&env, &batch);
+
+        let mut executed_transfers: Vec<(u64, Address, Address, i128)> = Vec::new(&env); // (proposal_id, token, recipient, amount)
+        let mut executed_count: u32 = 0;
+        let mut failed_count: u32 = 0;
+        let mut first_failure_reason: Option<VaultError> = None;
+
+        // Phase 1: Validate all proposals before executing any transfers
+        for i in 0..batch.proposal_ids.len() {
+            let pid = batch.proposal_ids.get(i).unwrap();
+            let proposal = match storage::get_proposal(&env, pid) {
+                Ok(p) => p,
+                Err(e) => {
+                    first_failure_reason = Some(e);
+                    failed_count += 1;
+                    break;
+                }
+            };
+
+            if proposal.status != ProposalStatus::Approved {
+                first_failure_reason = Some(VaultError::ProposalNotApproved);
+                failed_count += 1;
+                break;
+            }
+
+            let current_ledger = env.ledger().sequence() as u64;
+            if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
+                first_failure_reason = Some(VaultError::TimelockNotExpired);
+                failed_count += 1;
+                break;
+            }
+
+            // Ensure dependencies executed
+            if let Err(e) = Self::ensure_dependencies_executable(&env, &proposal) {
+                first_failure_reason = Some(e);
+                failed_count += 1;
+                break;
+            }
+        }
+
+        // If validation failed, mark batch as failed without executing anything
+        if failed_count > 0 {
+            batch.status = BatchStatus::RolledBack;
+            batch.executed_count = 0;
+            batch.failed_count = failed_count;
+            storage::set_batch(&env, &batch);
+            storage::set_batch_result(&env, batch.id, &BatchExecutionResult {
+                executed_count: 0,
+                failed_count,
+            });
+            events::emit_batch_rolled_back(&env, &executor, 0);
+            return first_failure_reason.map_or(Ok(()), |e| Err(e));
+        }
+
+        // Phase 2: Execute all transfers atomically
+        for i in 0..batch.proposal_ids.len() {
+            let pid = batch.proposal_ids.get(i).unwrap();
+            let mut proposal = storage::get_proposal(&env, pid).unwrap(); // Already validated above
+
+            // Attempt transfer using token::try_transfer to avoid panicking
+            if token::try_transfer(&env, &proposal.token, &proposal.recipient, proposal.amount)
+                .is_ok()
+            {
+                // Mark executed and store transfer details for potential rollback
+                proposal.status = ProposalStatus::Executed;
+                proposal.execution_ledger = env.ledger().sequence() as u64;
+                storage::set_proposal(&env, &proposal);
+                executed_transfers.push_back((
+                    pid,
+                    proposal.token.clone(),
+                    proposal.recipient.clone(),
+                    proposal.amount,
+                ));
+                executed_count += 1;
+                storage::create_audit_entry(&env, AuditAction::ExecuteProposal, &executor, pid);
+            } else {
+                // Transfer failed - initiate rollback
+                failed_count += 1;
+                break;
+            }
+        }
+
+        // Phase 3: Handle success or rollback
+        if failed_count == 0 {
+            // All transfers succeeded
+            batch.status = BatchStatus::Completed;
+            batch.executed_count = executed_count;
+            batch.failed_count = 0;
+            storage::set_batch(&env, &batch);
+            storage::set_batch_result(&env, batch.id, &BatchExecutionResult {
+                executed_count,
+                failed_count,
+            });
+            events::emit_batch_executed(&env, &executor, executed_count, failed_count);
+            return Ok(());
+        }
+
+        // Partial failure: attempt rollback of completed transfers
+        let mut rollback_entries: Vec<(Address, i128)> = Vec::new(&env);
+        let mut rollback_successful = true;
+
+        for j in 0..executed_transfers.len() {
+            let (pid, token_addr, recipient, amount) = executed_transfers.get(j).unwrap();
+            
+            // Record the recipient and amount for rollback state
+            rollback_entries.push_back((recipient.clone(), amount));
+            
+            // Attempt to transfer from the recipient back to vault
+            // This requires the recipient to have authorized the transfer or 
+            // the token contract to allow this operation
+            if token::transfer_from_vault(&env, &token_addr, &recipient, amount).is_err() {
+                rollback_successful = false;
+                // Continue attempting other rollbacks even if one fails
+            } else {
+                // Reset proposal status to Approved to reflect successful rollback
+                if let Ok(mut proposal) = storage::get_proposal(&env, pid) {
+                    proposal.status = ProposalStatus::Approved;
+                    storage::set_proposal(&env, &proposal);
+                }
+            }
+        }
+
+        // Update batch status and store rollback information
+        batch.status = BatchStatus::RolledBack;
+        batch.executed_count = executed_count;
+        batch.failed_count = failed_count;
+        storage::set_batch(&env, &batch);
+        storage::set_batch_rollback(&env, batch.id, &rollback_entries);
+        storage::set_batch_result(&env, batch.id, &BatchExecutionResult {
+            executed_count,
+            failed_count,
+        });
+
+        events::emit_batch_rolled_back(&env, &executor, executed_count);
+
+        // Return success even if rollback partially failed - the rollback state is persisted
+        // for off-chain reconciliation
+        Ok(())
+    }
+
+    /// Retrieve batch details
+    pub fn get_batch(env: Env, batch_id: u64) -> Result<BatchTransaction, VaultError> {
+        storage::get_batch(&env, batch_id)
+    }
+
+    /// Retrieve batch execution result
+    pub fn get_batch_result(env: Env, batch_id: u64) -> Option<BatchExecutionResult> {
+        storage::get_batch_result(&env, batch_id)
+    }
+
+    /// Retrieve batch rollback state
+    pub fn get_rollback_state(env: Env, batch_id: u64) -> Vec<(Address, i128)> {
+        storage::get_batch_rollback(&env, batch_id).unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Delegate voting power to another signer.
+    ///
+    /// Allows a signer to delegate their voting power to another signer for a specified period.
+    /// The delegation chain is validated to prevent circular delegations and excessive depth.
+    ///
+    /// # Arguments
+    /// * `delegator` - The signer delegating their voting power (must authorize)
+    /// * `delegate` - The signer receiving the delegated voting power
+    /// * `expiry_ledger` - Ledger at which the delegation expires (0 = no expiration)
+    ///
+    /// # Errors
+    /// - [`VaultError::InvalidAmount`] if delegator and delegate are the same
+    /// - [`VaultError::NotASigner`] if either address is not a signer
+    /// - [`VaultError::Unauthorized`] if delegation would create a circular chain or exceed max depth
     pub fn delegate_voting_power(
         env: Env,
         delegator: Address,
-        _delegate: Address,
-        _expiry_ledger: u64,
+        delegate: Address,
+        expiry_ledger: u64,
     ) -> Result<(), VaultError> {
         delegator.require_auth();
+
+        if delegator == delegate {
+            return Err(VaultError::InvalidAmount); // Invalid operation
+        }
+
         let config = storage::get_config(&env)?;
-        if !config.signers.contains(&delegator) {
+        if !config.signers.contains(&delegator) || !config.signers.contains(&delegate) {
             return Err(VaultError::NotASigner);
         }
-        Err(VaultError::Unauthorized)
+
+        // Circular delegation check (A -> B, B -> A)
+        if let Some(existing) = storage::get_delegation(&env, &delegate) {
+            if existing.delegate == delegator {
+                return Err(VaultError::Unauthorized); // Circular
+            }
+        }
+
+        // Enforce max delegation depth (prevent chains longer than 10)
+        const MAX_DELEGATION_DEPTH: u32 = 10;
+        let mut depth = 0u32;
+        let mut current = delegate.clone();
+        let current_ledger = env.ledger().sequence() as u64;
+
+        loop {
+            if depth >= MAX_DELEGATION_DEPTH {
+                return Err(VaultError::Unauthorized); // Chain would be too long
+            }
+
+            if let Some(delegation) = storage::get_delegation(&env, &current) {
+                // Check if delegation is still active
+                if !delegation.is_active
+                    || (delegation.expiry_ledger > 0 && current_ledger > delegation.expiry_ledger)
+                {
+                    break;
+                }
+                current = delegation.delegate;
+                depth += 1;
+            } else {
+                break;
+            }
+        }
+
+        let old_delegate = storage::get_delegation(&env, &delegator)
+            .map(|d| d.delegate)
+            .unwrap_or(delegator.clone());
+
+        let delegation = Delegation {
+            delegator: delegator.clone(),
+            delegate: delegate.clone(),
+            created_at: env.ledger().sequence() as u64,
+            expiry_ledger,
+            is_active: true,
+        };
+
+        storage::set_delegation(&env, &delegation);
+
+        let history = DelegationHistory {
+            id: storage::increment_delegation_id(&env),
+            delegator: delegator.clone(),
+            previous_delegate: old_delegate,
+            new_delegate: delegate.clone(),
+            changed_at: env.ledger().sequence() as u64,
+        };
+        storage::add_delegation_history(&env, &history);
+
+        Ok(())
     }
 
-    // Delegation currently resolves to self until full delegation flow is restored.
-    fn resolve_delegation_chain(_env: &Env, voter: &Address, _depth: u32) -> Address {
-        voter.clone()
+        // ============================================================
+    // Delegation: Cycle-safe vote delegation
+    // ============================================================
+
+    const MAX_DELEGATION_DEPTH: u32 = 5;
+
+    pub fn delegate_vote(
+        env: Env,
+        delegator: Address,
+        delegate: Address,
+        expiry_ledger: u64,
+    ) -> Result<(), VaultError> {
+        delegator.require_auth();
+
+        // Basic self-delegation protection
+        if delegator == delegate {
+            return Err(VaultError::CircularDelegation);
+        }
+
+        // Check cycle BEFORE writing state
+        Self::check_delegation_cycle(&env, &delegate, &delegator, 0)?;
+
+        // Load existing delegation (if any)
+        let mut delegation = storage::get_delegation(&env, &delegator);
+
+        // Update reverse index: remove old delegate mapping if exists
+        if delegation.is_active {
+            storage::remove_delegator_index(&env, &delegation.delegate, &delegator);
+        }
+
+        // Create new delegation
+        delegation.delegator = delegator.clone();
+        delegation.delegate = delegate.clone();
+        delegation.created_at = env.ledger().sequence() as u64;
+        delegation.expiry_ledger = expiry_ledger;
+        delegation.is_active = true;
+
+        storage::set_delegation(&env, &delegation);
+
+        // Reverse index: delegate -> delegators
+        storage::add_delegator_index(&env, &delegate, &delegator);
+
+        // Audit history
+        storage::push_delegation_history(&env, DelegationHistory {
+            id: storage::next_delegation_id(&env),
+            delegator,
+            previous_delegate: delegation.delegate.clone(),
+            new_delegate: delegate,
+            changed_at: env.ledger().sequence() as u64,
+        });
+
+        Ok(())
     }
 
+
+    fn check_delegation_cycle(
+        env: &Env,
+        current: &Address,
+        target: &Address,
+        depth: u32,
+    ) -> Result<(), VaultError> {
+        if depth >= MAX_DELEGATION_DEPTH {
+            return Err(VaultError::DelegationChainTooLong);
+        }
+    
+        if current == target {
+            return Err(VaultError::CircularDelegation);
+        }
+    
+        let delegation = storage::get_delegation(env, current);
+    
+        if !delegation.is_active {
+            return Ok(());
+        }
+    
+        Self::check_delegation_cycle(
+            env,
+            &delegation.delegate,
+            target,
+            depth + 1,
+        )
+    }
+
+
+    fn resolve_delegation_chain(
+        env: &Env,
+        current: &Address,
+        output: &mut Vec<Address>,
+        depth: u32,
+    ) {
+        if depth >= MAX_DELEGATION_DEPTH {
+            return;
+        }
+    
+        let delegation = storage::get_delegation(env, current);
+    
+        if !delegation.is_active {
+            return;
+        }
+    
+        let current_ledger = env.ledger().sequence() as u64;
+        if delegation.expiry_ledger != 0 && current_ledger > delegation.expiry_ledger {
+            return;
+        }
+    
+        let delegate = delegation.delegate.clone();
+    
+        if !output.contains(&delegate) {
+            output.push_back(delegate.clone());
+    
+            Self::resolve_delegation_chain(env, &delegate, output, depth + 1);
+        }
+    }
+
+    fn get_all_represented_voters(
+        env: &Env,
+        signer: &Address,
+        voters: &mut Vec<Address>,
+        depth: u32,
+    ) {
+        if depth >= 5 {
+            return;
+        }
+
+        let delegators = storage::get_delegators_for(env, signer);
+
+        for delegator in delegators.iter() {
+            if !voters.contains(&delegator) {
+                let delegation = storage::get_delegation(env, &delegator);
+        
+                let current_ledger = env.ledger().sequence() as u64;
+        
+                if delegation.is_active
+                    && (delegation.expiry_ledger == 0 || current_ledger <= delegation.expiry_ledger)
+                {
+                    represented_voters.push_back(delegator.clone());
+        
+                    // Continue forward chain safely
+                    Self::resolve_delegation_chain(
+                        env,
+                        &delegator,
+                        &mut represented_voters,
+                        0,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Revoke a voting power delegation.
+    ///
+    /// Removes the delegation set by the caller, restoring their voting power to themselves.
+    /// If no delegation exists, returns an error.
+    ///
+    /// # Arguments
+    /// * `delegator` - The signer revoking their delegation (must authorize)
+    ///
+    /// # Returns
+    /// `Ok(())` on success
+    ///
+    /// # Errors
+    /// - [`VaultError::ProposalNotFound`] if no delegation exists for the caller
     pub fn revoke_delegation(env: Env, delegator: Address) -> Result<(), VaultError> {
         delegator.require_auth();
-        let config = storage::get_config(&env)?;
-        if !config.signers.contains(&delegator) {
-            return Err(VaultError::NotASigner);
+
+        let old_delegation = storage::get_delegation(&env, &delegator);
+        if let Some(d) = old_delegation {
+            storage::remove_delegation(&env, &delegator);
+
+            let history = DelegationHistory {
+                id: storage::increment_delegation_id(&env),
+                delegator: delegator.clone(),
+                previous_delegate: d.delegate,
+                new_delegate: delegator.clone(),
+                changed_at: env.ledger().sequence() as u64,
+            };
+            storage::add_delegation_history(&env, &history);
+            Ok(())
+        } else {
+            Err(VaultError::ProposalNotFound) // No delegation to revoke
         }
-        Err(VaultError::Unauthorized)
     }
+
+    /// Get the delegation chain for an address.
+    ///
+    /// Returns a vector of addresses representing the delegation chain from the given address
+    /// to the final delegate. For example, if A delegates to B and B delegates to C, calling
+    /// this with A returns [B, C].
+    ///
+    /// # Arguments
+    /// * `addr` - The address to trace the delegation chain for
+    ///
+    /// # Returns
+    /// A vector of addresses in the delegation chain (empty if no delegation)
+    ///
+    /// # Errors
+    /// Returns `VaultError::Unauthorized` if the delegation chain exceeds max depth (10)
+    pub fn get_delegation_chain(env: Env, addr: Address) -> Result<Vec<Address>, VaultError> {
+        const MAX_DELEGATION_DEPTH: u32 = 10;
+        let mut chain = Vec::new(&env);
+        let mut current = addr.clone();
+        let mut depth = 0u32;
+        let current_ledger = env.ledger().sequence() as u64;
+
+        loop {
+            if depth >= MAX_DELEGATION_DEPTH {
+                return Err(VaultError::Unauthorized); // Chain too long
+            }
+
+            if let Some(delegation) = storage::get_delegation(&env, &current) {
+                // Check if delegation is still active
+                if !delegation.is_active
+                    || (delegation.expiry_ledger > 0 && current_ledger > delegation.expiry_ledger)
+                {
+                    break;
+                }
+                chain.push_back(delegation.delegate.clone());
+                current = delegation.delegate;
+                depth += 1;
+            } else {
+                break;
+            }
+        }
+
+        Ok(chain)
+    }
+
     /// Veto a proposal. Can be called only by configured veto addresses.
     ///
     /// A veto moves a proposal to `Vetoed` and removes it from the priority queue.
@@ -1254,7 +2156,21 @@ impl VaultDAO {
             return Err(VaultError::Unauthorized);
         }
 
+        let config = storage::get_config(&env)?;
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        // Check veto window - veto_window_ledgers of 0 means veto is disabled entirely
+        if config.veto_window_ledgers == 0 {
+            return Err(VaultError::VetoWindowClosed);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let veto_deadline = proposal.created_at + config.veto_window_ledgers;
+        
+        // Veto only succeeds within proposal.created_at + veto_window_ledgers
+        if current_ledger > veto_deadline {
+            return Err(VaultError::VetoWindowClosed);
+        }
 
         if proposal.status == ProposalStatus::Executed {
             return Err(VaultError::ProposalAlreadyExecuted);
@@ -1272,7 +2188,119 @@ impl VaultDAO {
         storage::remove_from_priority_queue(&env, proposal.priority.clone() as u32, proposal_id);
         storage::extend_instance_ttl(&env);
 
+        // Refund reserved spending capacity
+        storage::refund_spending_limits(&env, proposal.amount);
+
+        // Veto is not punitive — return insurance in full
+        if proposal.insurance_amount > 0 {
+            token::transfer(
+                &env,
+                &proposal.token,
+                &proposal.proposer,
+                proposal.insurance_amount,
+            );
+            events::emit_insurance_returned(
+                &env,
+                proposal_id,
+                &proposal.proposer,
+                proposal.insurance_amount,
+            );
+        }
+
+        // Return stake in full
+        if proposal.stake_amount > 0 {
+            if let Some(mut stake_record) = storage::get_stake_record(&env, proposal_id) {
+                if !stake_record.refunded && !stake_record.slashed {
+                    token::transfer(
+                        &env,
+                        &proposal.token,
+                        &proposal.proposer,
+                        proposal.stake_amount,
+                    );
+                    stake_record.refunded = true;
+                    stake_record.released_at = env.ledger().sequence() as u64;
+                    storage::set_stake_record(&env, &stake_record);
+                    events::emit_stake_refunded(
+                        &env,
+                        proposal_id,
+                        &proposal.proposer,
+                        proposal.stake_amount,
+                    );
+                }
+            }
+        }
+
+        // Calculate remaining window for event
+        let remaining_window = veto_deadline.saturating_sub(current_ledger);
         events::emit_proposal_vetoed(&env, proposal_id, &vetoer);
+
+        Ok(())
+    }
+
+    /// Add an address to the veto list
+    ///
+    /// Only admins can add veto addresses.
+    ///
+    /// # Arguments
+    /// * `admin` - Address performing the action (must be Admin)
+    /// * `addr` - Address to add to veto list
+    pub fn add_veto_address(env: Env, admin: Address, addr: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        let mut config = storage::get_config(&env)?;
+
+        if config.veto_addresses.contains(&addr) {
+            return Err(VaultError::AddressAlreadyOnList);
+        }
+
+        // Cap veto_addresses list at 10 entries
+        if config.veto_addresses.len() >= 10 {
+            return Err(VaultError::BatchTooLarge); // Reusing existing error for list size limit
+        }
+
+        config.veto_addresses.push_back(addr.clone());
+        storage::set_config(&env, &config);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
+    /// Remove an address from the veto list
+    ///
+    /// Only admins can remove veto addresses.
+    ///
+    /// # Arguments
+    /// * `admin` - Address performing the action (must be Admin)
+    /// * `addr` - Address to remove from veto list
+    pub fn remove_veto_address(env: Env, admin: Address, addr: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        let mut config = storage::get_config(&env)?;
+
+        if !config.veto_addresses.contains(&addr) {
+            return Err(VaultError::AddressNotOnList);
+        }
+
+        let mut new_veto_addresses = Vec::new(&env);
+        for veto_addr in config.veto_addresses.iter() {
+            if veto_addr != addr {
+                new_veto_addresses.push_back(veto_addr);
+            }
+        }
+
+        config.veto_addresses = new_veto_addresses;
+        storage::set_config(&env, &config);
+        storage::extend_instance_ttl(&env);
 
         Ok(())
     }
@@ -1305,19 +2333,23 @@ impl VaultDAO {
             return Err(VaultError::ProposalAlreadyCancelled);
         }
 
-        // Guard: only Pending proposals can be cancelled
-        if proposal.status != ProposalStatus::Pending {
+        // Guard: only Pending, Approved, or Scheduled proposals can be cancelled
+        if proposal.status != ProposalStatus::Pending
+            && proposal.status != ProposalStatus::Approved
+            && proposal.status != ProposalStatus::Scheduled
+        {
             return Err(VaultError::ProposalNotPending);
         }
 
         // Authorization: only proposer or Admin
         let role = storage::get_role(&env, &canceller);
-        if role != Role::Admin && canceller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && canceller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
         // Admin acting on *another* proposer's proposal → rejection semantics
-        let is_rejection = role == Role::Admin && canceller != proposal.proposer;
+        let is_rejection =
+            Role::role_satisfies(Role::Admin, role) && canceller != proposal.proposer;
 
         if is_rejection {
             proposal.status = ProposalStatus::Rejected;
@@ -1330,68 +2362,23 @@ impl VaultDAO {
             Self::update_reputation_on_rejection(&env, &proposal.proposer);
 
             // ── Slash insurance ──────────────────────────────────────────────
-            let insurance_config = storage::get_insurance_config(&env);
-            if insurance_config.enabled && proposal.insurance_amount > 0 {
-                let slashed =
-                    proposal.insurance_amount * (insurance_config.slash_percentage as i128) / 100;
-                let kept = proposal.insurance_amount.saturating_sub(slashed);
-                if kept > 0 {
-                    token::transfer(&env, &proposal.token, &proposal.proposer, kept);
-                }
-                if slashed > 0 {
-                    storage::add_to_insurance_pool(&env, &proposal.token, slashed);
-                }
-                events::emit_insurance_slashed(
-                    &env,
-                    proposal_id,
-                    &proposal.proposer,
-                    slashed,
-                    kept,
-                );
-            }
+            Self::slash_insurance_on_rejection(&env, &proposal);
 
             // ── Slash stake ──────────────────────────────────────────────────
-            let staking_config = storage::get_staking_config(&env);
-            if proposal.stake_amount > 0 {
-                if let Some(mut stake_record) = storage::get_stake_record(&env, proposal_id) {
-                    if !stake_record.refunded && !stake_record.slashed {
-                        let slashed_stake = if staking_config.enabled {
-                            proposal.stake_amount * staking_config.slash_percentage as i128 / 100
-                        } else {
-                            0
-                        };
-                        let returned_stake = proposal.stake_amount.saturating_sub(slashed_stake);
-
-                        if returned_stake > 0 {
-                            token::transfer(
-                                &env,
-                                &proposal.token,
-                                &proposal.proposer,
-                                returned_stake,
-                            );
-                        }
-                        if slashed_stake > 0 {
-                            storage::add_to_stake_pool(&env, &proposal.token, slashed_stake);
-                        }
-
-                        stake_record.slashed = slashed_stake > 0;
-                        stake_record.slashed_amount = slashed_stake;
-                        stake_record.released_at = env.ledger().sequence() as u64;
-                        storage::set_stake_record(&env, &stake_record);
-
-                        events::emit_stake_slashed(
-                            &env,
-                            proposal_id,
-                            &proposal.proposer,
-                            slashed_stake,
-                            returned_stake,
-                        );
-                    }
-                }
-            }
+            Self::slash_stake_on_rejection(&env, &proposal);
 
             storage::create_audit_entry(&env, AuditAction::RejectProposal, &canceller, proposal_id);
             events::emit_proposal_rejected(&env, proposal_id, &canceller, &proposal.proposer);
+
+            storage::metrics_on_rejection(&env);
+            let metrics = storage::get_metrics(&env);
+            events::emit_metrics_updated(
+                &env,
+                metrics.executed_count,
+                metrics.rejected_count,
+                metrics.expired_count,
+                metrics.success_rate_bps(),
+            );
         } else {
             // ── Proposer-initiated cancellation ─────────────────────────────
 
@@ -1470,6 +2457,18 @@ impl VaultDAO {
                     }
                 }
             }
+
+            // Clear pending config if this was a config change proposal
+            if proposal.memo == Symbol::new(&env, "config_change") {
+                if let Some(pending_id) = storage::get_pending_config_proposal(&env) {
+                    if pending_id == proposal_id {
+                        storage::clear_pending_config_proposal(&env);
+                        env.storage()
+                            .persistent()
+                            .remove(&crate::storage::FeatureKey::PendingConfig);
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -1494,6 +2493,31 @@ impl VaultDAO {
     ///
     /// Only the original proposer can amend. Approvals and abstentions are reset,
     /// and an amendment record is appended to on-chain history for auditing.
+    /// The new amount is re-validated against spending limits.
+    ///
+    /// # Arguments
+    /// * `proposer` - The original proposer (must authorize and match proposal.proposer)
+    /// * `proposal_id` - ID of the proposal to amend
+    /// * `new_recipient` - New recipient address for the transfer
+    /// * `new_amount` - New transfer amount (must be positive and within limits)
+    /// * `new_memo` - New descriptive symbol for the transaction
+    ///
+    /// # Returns
+    /// `Ok(())` on success
+    ///
+    /// # Errors
+    /// - [`VaultError::Unauthorized`] if caller is not the original proposer
+    /// - [`VaultError::ProposalNotPending`] if proposal is not in Pending status
+    /// - [`VaultError::InvalidAmount`] if new_amount is zero or negative
+    /// - [`VaultError::ExceedsProposalLimit`] if new_amount exceeds spending_limit
+    /// - [`VaultError::ExceedsDailyLimit`] if amendment would exceed daily limit
+    /// - [`VaultError::ExceedsWeeklyLimit`] if amendment would exceed weekly limit
+    ///
+    /// # Behavior
+    /// - Clears all existing approvals and abstentions
+    /// - Adjusts spending limit reservations based on amount change
+    /// - Records amendment in history for audit trail
+    /// - Emits `proposal_amended` event with full diff
     pub fn amend_proposal(
         env: Env,
         proposer: Address,
@@ -1517,40 +2541,68 @@ impl VaultDAO {
         if new_amount <= 0 {
             return Err(VaultError::InvalidAmount);
         }
-        if new_amount > config.spending_limit {
+
+        // Validate new recipient against whitelist/blacklist
+        Self::validate_recipient(&env, &new_recipient)?;
+
+        // Get reputation-adjusted limits for validation
+        let mut rep = storage::get_reputation(&env, &proposer);
+        storage::apply_reputation_decay(&env, &mut rep);
+        
+        let adjusted_spending_limit = if rep.score >= 900 {
+            config.spending_limit * 3
+        } else if rep.score >= 800 {
+            config.spending_limit * 2
+        } else {
+            config.spending_limit
+        };
+        
+        if new_amount > adjusted_spending_limit {
             return Err(VaultError::ExceedsProposalLimit);
         }
 
-        // Keep reserved spending in sync with amended amount.
+        let adjusted_daily_limit = if rep.score >= 750 {
+            (config.daily_limit * 3) / 2
+        } else {
+            config.daily_limit
+        };
+        
+        let adjusted_weekly_limit = if rep.score >= 750 {
+            (config.weekly_limit * 3) / 2
+        } else {
+            config.weekly_limit
+        };
+
+        // Handle spending limit adjustments atomically
         use core::cmp::Ordering;
         match new_amount.cmp(&proposal.amount) {
             Ordering::Greater => {
-                let increase = new_amount - proposal.amount;
+                let delta = new_amount - proposal.amount;
                 let today = storage::get_day_number(&env);
                 let week = storage::get_week_number(&env);
 
                 let spent_today = storage::get_daily_spent(&env, today);
-                if spent_today + increase > config.daily_limit {
+                if spent_today + delta > adjusted_daily_limit {
                     return Err(VaultError::ExceedsDailyLimit);
                 }
                 let spent_week = storage::get_weekly_spent(&env, week);
-                if spent_week + increase > config.weekly_limit {
+                if spent_week + delta > adjusted_weekly_limit {
                     return Err(VaultError::ExceedsWeeklyLimit);
                 }
 
-                storage::add_daily_spent(&env, today, increase);
-                storage::add_weekly_spent(&env, week, increase);
+                storage::add_daily_spent(&env, today, delta);
+                storage::add_weekly_spent(&env, week, delta);
             }
             Ordering::Less => {
-                let decrease = proposal.amount - new_amount;
-                storage::refund_spending_limits(&env, decrease);
+                let delta = proposal.amount - new_amount;
+                storage::refund_spending_limits(&env, delta);
             }
             Ordering::Equal => {}
         }
 
         let amendment = ProposalAmendment {
             proposal_id,
-            amended_by: proposer,
+            amended_by: proposer.clone(),
             amended_at_ledger: env.ledger().sequence() as u64,
             old_recipient: proposal.recipient.clone(),
             new_recipient: new_recipient.clone(),
@@ -1570,6 +2622,15 @@ impl VaultDAO {
 
         storage::set_proposal(&env, &proposal);
         storage::add_amendment_record(&env, &amendment);
+        
+        // Create audit entry for the amendment
+        storage::create_audit_entry(
+            &env,
+            AuditAction::AmendProposal,
+            &proposer,
+            proposal_id,
+        );
+        
         storage::extend_instance_ttl(&env);
 
         events::emit_proposal_amended(&env, &amendment);
@@ -1578,6 +2639,24 @@ impl VaultDAO {
     }
 
     /// Get amendment history for a proposal.
+    ///
+    /// Returns a vector of all amendments made to a proposal, in chronological order.
+    /// Each amendment record contains the old and new values for recipient, amount, and memo,
+    /// along with who made the amendment and when.
+    ///
+    /// # Arguments
+    /// * `proposal_id` - ID of the proposal to retrieve amendments for
+    ///
+    /// # Returns
+    /// A vector of `ProposalAmendment` records, empty if no amendments exist
+    ///
+    /// # Amendment Record Fields
+    /// - `proposal_id` - The proposal being amended
+    /// - `amended_by` - Address that made the amendment
+    /// - `amended_at_ledger` - Ledger when amendment occurred
+    /// - `old_recipient` / `new_recipient` - Recipient change
+    /// - `old_amount` / `new_amount` - Amount change
+    /// - `old_memo` / `new_memo` - Memo change
     pub fn get_proposal_amendments(env: Env, proposal_id: u64) -> Vec<ProposalAmendment> {
         storage::get_amendment_history(&env, proposal_id)
     }
@@ -1592,14 +2671,14 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
         let mut config = storage::get_config(&env)?;
 
         if threshold < 1 {
-            return Err(VaultError::ThresholdTooLow);
+            return Err(VaultError::ThresholdTooHigh);
         }
         if threshold > config.signers.len() {
             return Err(VaultError::ThresholdTooHigh);
@@ -1644,7 +2723,7 @@ impl VaultDAO {
         admin.require_auth();
 
         // Admin-only
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1684,7 +2763,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1706,6 +2785,60 @@ impl VaultDAO {
         Ok(())
     }
 
+    /// Get the current quorum requirement.
+    ///
+    /// Returns a tuple of (quorum, quorum_percentage) representing the current quorum settings.
+    /// This is a read-only function that can be called by anyone without authorization.
+    ///
+    /// # Returns
+    /// A tuple `(quorum, quorum_percentage)` where:
+    /// - `quorum` is the absolute number of votes required (0 = disabled)
+    /// - `quorum_percentage` is the percentage-based quorum (1-100, ignored if quorum > 0)
+    pub fn get_quorum(env: Env) -> (u32, u32) {
+        let config = storage::get_config(&env).unwrap_or_else(|_| {
+            // Return defaults if not initialized
+            Config {
+                signers: Vec::new(&env),
+                threshold: 1,
+                quorum: 0,
+                quorum_percentage: 0,
+                spending_limit: 0,
+                daily_limit: 0,
+                weekly_limit: 0,
+                timelock_threshold: 0,
+                timelock_delay: 0,
+                velocity_limit: VelocityConfig {
+                    limit: 0,
+                    window: 0, per_token_limit: 0 },
+                threshold_strategy: ThresholdStrategy::Fixed,
+                pre_execution_hooks: Vec::new(&env),
+                post_execution_hooks: Vec::new(&env),
+                default_voting_deadline: 0,
+                veto_addresses: Vec::new(&env),
+                retry_config: RetryConfig {
+                    enabled: false,
+                    max_retries: 0,
+                    initial_backoff_ledgers: 0,
+                },
+                recovery_config: RecoveryConfig {
+                    guardians: Vec::new(&env),
+                    threshold: 0,
+                    delay: 0,
+                },
+                staking_config: StakingConfig {
+                    enabled: false,
+                    min_amount: 0,
+                    base_stake_bps: 0,
+                    max_stake_amount: 0,
+                    reputation_discount_threshold: 0,
+                    reputation_discount_percentage: 0,
+                    slash_percentage: 0,
+                },
+            }
+        });
+        (config.quorum, config.quorum_percentage)
+    }
+
     /// Update the voting strategy used for proposal approvals.
     ///
     /// Only Admin can update voting strategy.
@@ -1717,11 +2850,60 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
         storage::set_voting_strategy(&env, &strategy);
+        storage::extend_instance_ttl(&env);
+        events::emit_config_updated(&env, &admin);
+
+        Ok(())
+    }
+
+    /// Update the threshold strategy for the vault.
+    ///
+    /// Validates AmountBased tiers: must be sorted descending by amount,
+    /// approvals must not exceed signer count, and at most 10 tiers allowed.
+    /// Does not affect already-created proposals (snapshot isolation).
+    pub fn set_threshold_strategy(
+        env: Env,
+        admin: Address,
+        strategy: ThresholdStrategy,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let mut config = storage::get_config(&env)?;
+
+        // Validate AmountBased tiers
+        if let ThresholdStrategy::AmountBased(ref tiers) = strategy {
+            if tiers.len() > 10 {
+                return Err(VaultError::InvalidThresholdConfig);
+            }
+            let signer_count = config.signers.len();
+            let mut prev_amount = i128::MAX;
+            for i in 0..tiers.len() {
+                if let Some(tier) = tiers.get(i) {
+                    // Must be sorted descending by amount
+                    if tier.amount >= prev_amount {
+                        return Err(VaultError::InvalidThresholdConfig);
+                    }
+                    // Approvals must not exceed signer count
+                    if tier.approvals > signer_count {
+                        return Err(VaultError::InvalidThresholdConfig);
+                    }
+                    prev_amount = tier.amount;
+                }
+            }
+        }
+
+        config.threshold_strategy = strategy;
+        storage::set_config(&env, &config);
         storage::extend_instance_ttl(&env);
         events::emit_config_updated(&env, &admin);
 
@@ -1738,7 +2920,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1748,9 +2930,23 @@ impl VaultDAO {
             return Err(VaultError::ProposalNotPending);
         }
 
+        // new_deadline must be strictly after the current deadline
+        // and must not exceed the proposal's expiry
+        if new_deadline <= proposal.voting_deadline || new_deadline > proposal.expires_at {
+            return Err(VaultError::InvalidDeadline);
+        }
+
+        // Cap total extensions at 3 per proposal
+        const MAX_DEADLINE_EXTENSIONS: u32 = 3;
+        let extension_count = storage::get_deadline_extension_count(&env, proposal_id);
+        if extension_count >= MAX_DEADLINE_EXTENSIONS {
+            return Err(VaultError::MaxDeadlineExtensionsReached);
+        }
+
         let old_deadline = proposal.voting_deadline;
         proposal.voting_deadline = new_deadline;
         storage::set_proposal(&env, &proposal);
+        storage::increment_deadline_extension_count(&env, proposal_id);
         storage::extend_instance_ttl(&env);
 
         events::emit_voting_deadline_extended(
@@ -1776,7 +2972,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1809,7 +3005,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1837,7 +3033,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -1856,6 +3052,53 @@ impl VaultDAO {
     /// Get proposal by ID
     pub fn get_proposal(env: Env, proposal_id: u64) -> Result<Proposal, VaultError> {
         storage::get_proposal(&env, proposal_id)
+    }
+
+    /// Return the given proposals sorted by execution_ledger (ascending).
+    ///
+    /// Only proposals with status == Executed are included in the sort.
+    /// Proposals that are not yet executed (execution_ledger == 0) are appended
+    /// at the end in their original order.
+    ///
+    /// # Arguments
+    /// * `proposal_ids` - IDs of proposals to sort.
+    pub fn get_execution_order(env: Env, proposal_ids: Vec<u64>) -> Result<Vec<Proposal>, VaultError> {
+        let mut executed: Vec<Proposal> = Vec::new(&env);
+        let mut pending: Vec<Proposal> = Vec::new(&env);
+
+        for i in 0..proposal_ids.len() {
+            let id = proposal_ids.get(i).unwrap();
+            let proposal = storage::get_proposal(&env, id)?;
+            if proposal.status == ProposalStatus::Executed && proposal.execution_ledger > 0 {
+                executed.push_back(proposal);
+            } else {
+                pending.push_back(proposal);
+            }
+        }
+
+        // Insertion sort by execution_ledger (ascending)
+        let n = executed.len();
+        for i in 1..n {
+            let mut j = i;
+            while j > 0 {
+                let a = executed.get(j - 1).unwrap();
+                let b = executed.get(j).unwrap();
+                if a.execution_ledger > b.execution_ledger {
+                    executed.set(j - 1, b);
+                    executed.set(j, a);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Append non-executed proposals at the end
+        for i in 0..pending.len() {
+            executed.push_back(pending.get(i).unwrap());
+        }
+
+        Ok(executed)
     }
 
     /// List proposal IDs in ascending creation order (paginated).
@@ -1903,6 +3146,161 @@ impl VaultDAO {
         storage::get_insurance_pool(&env, &token_addr)
     }
 
+    /// Get the insurance pool balance for a specific token (alias for get_insurance_pool).
+    pub fn get_insurance_pool_balance(env: Env, token_addr: Address) -> i128 {
+        storage::get_insurance_pool(&env, &token_addr)
+    }
+
+    /// Propose a governed withdrawal from the insurance pool.
+    /// Creates a standard proposal with memo = "ins_withdraw".
+    /// Requires super-majority: min(config.threshold + 1, config.signers.len()) approvals.
+    pub fn propose_insurance_withdrawal(
+        env: Env,
+        proposer: Address,
+        token: Address,
+        amount: i128,
+        recipient: Address,
+    ) -> Result<u64, VaultError> {
+        proposer.require_auth();
+
+        let config = storage::get_config(&env)?;
+        let role = storage::get_role(&env, &proposer);
+        if role != Role::Treasurer && role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let pool_balance = storage::get_insurance_pool(&env, &token);
+        if amount > pool_balance {
+            return Err(VaultError::InsurancePoolInsufficient);
+        }
+
+        // Validate recipient
+        Self::validate_recipient(&env, &recipient)?;
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let proposal_id = storage::increment_proposal_id(&env);
+
+        let proposal = Proposal {
+            id: proposal_id,
+            proposer: proposer.clone(),
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount,
+            memo: Symbol::new(&env, "ins_withdraw"),
+            metadata: Map::new(&env),
+            tags: Vec::new(&env),
+            approvals: Vec::new(&env),
+            abstentions: Vec::new(&env),
+            attachments: Vec::new(&env),
+            status: ProposalStatus::Pending,
+            priority: Priority::Normal,
+            conditions: Vec::new(&env),
+            condition_logic: ConditionLogic::And,
+            created_at: current_ledger,
+            expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
+            unlock_ledger: 0,
+            execution_time: None,
+                execution_window_ledgers: 0,
+            insurance_amount: 0,
+            stake_amount: 0,
+            gas_limit: 0,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env),
+            is_swap: false,
+            voting_deadline: if config.default_voting_deadline > 0 {
+                current_ledger + config.default_voting_deadline
+            } else {
+                0
+            },
+            execution_ledger: 0,
+        };
+
+        storage::set_proposal(&env, &proposal);
+        storage::add_to_priority_queue(&env, Priority::Normal as u32, proposal_id);
+        storage::extend_instance_ttl(&env);
+        storage::metrics_on_proposal(&env);
+
+        events::emit_proposal_created(
+            &env,
+            proposal_id,
+            &proposer,
+            &recipient,
+            &token,
+            amount,
+            0,
+        );
+
+        Ok(proposal_id)
+    }
+
+    /// Execute an approved insurance withdrawal proposal.
+    /// Transfers from the insurance pool to the proposal recipient.
+    /// Requires super-majority: min(config.threshold + 1, config.signers.len()) approvals.
+    pub fn execute_insurance_withdrawal(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        // Must be an insurance withdrawal proposal
+        if proposal.memo != Symbol::new(&env, "ins_withdraw") {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if proposal.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        let config = storage::get_config(&env)?;
+
+        // Super-majority check: min(threshold + 1, signers.len())
+        let super_majority = core::cmp::min(
+            config.threshold.saturating_add(1),
+            config.signers.len(),
+        );
+        if proposal.approvals.len() < super_majority {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        let pool_balance = storage::get_insurance_pool(&env, &proposal.token);
+        if proposal.amount > pool_balance {
+            return Err(VaultError::InsurancePoolInsufficient);
+        }
+
+        // Atomically deduct from pool and transfer
+        storage::subtract_from_insurance_pool(&env, &proposal.token, proposal.amount);
+        token::transfer(&env, &proposal.token, &proposal.recipient, proposal.amount);
+
+        proposal.status = ProposalStatus::Executed;
+        storage::set_proposal(&env, &proposal);
+        storage::extend_instance_ttl(&env);
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let execution_time = current_ledger.saturating_sub(proposal.created_at);
+        storage::metrics_on_execution(&env, 0, execution_time);
+
+        events::emit_proposal_executed(
+            &env,
+            proposal_id,
+            &executor,
+            &proposal.recipient,
+            &proposal.token,
+            proposal.amount,
+            current_ledger,
+        );
+
+        Ok(())
+    }
+
     /// Get the current vault configuration.
     ///
     /// Returns the full [`Config`] struct so that frontends and SDKs can read
@@ -1938,6 +3336,116 @@ impl VaultDAO {
         Ok(config.signers)
     }
 
+    /// Propose a configuration change that requires multi-sig approval.
+    ///
+    /// Creates a special proposal with memo = "config_change". The proposed
+    /// config is stored under `FeatureKey::PendingConfig` keyed by proposal ID.
+    /// Only one config change proposal can be active (Pending) at a time.
+    ///
+    /// On execution the new config is validated and applied via `set_config`.
+    ///
+    /// # Errors
+    /// - [`VaultError::ConfigChangeInProgress`] if another config change is already pending.
+    /// - [`VaultError::InsufficientRole`] if proposer is not Treasurer or Admin.
+    pub fn propose_config_change(
+        env: Env,
+        proposer: Address,
+        new_config: Config,
+    ) -> Result<u64, VaultError> {
+        proposer.require_auth();
+
+        let role = storage::get_role(&env, &proposer);
+        if role != Role::Treasurer && role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        // Only one config change proposal can be active at a time
+        if storage::get_pending_config_proposal(&env).is_some() {
+            return Err(VaultError::ConfigChangeInProgress);
+        }
+
+        // Validate the proposed config (same checks as initialize)
+        Self::validate_config(&new_config)?;
+
+        let current_config = storage::get_config(&env)?;
+        let current_ledger = env.ledger().sequence() as u64;
+        let proposal_id = storage::increment_proposal_id(&env);
+
+        let proposal = Proposal {
+            id: proposal_id,
+            proposer: proposer.clone(),
+            recipient: proposer.clone(), // no transfer recipient
+            token: current_config.signers.get(0).unwrap_or(proposer.clone()),
+            amount: 0,
+            memo: Symbol::new(&env, "config_change"),
+            metadata: Map::new(&env),
+            tags: Vec::new(&env),
+            approvals: Vec::new(&env),
+            abstentions: Vec::new(&env),
+            attachments: Vec::new(&env),
+            status: ProposalStatus::Pending,
+            priority: Priority::Normal,
+            conditions: Vec::new(&env),
+            condition_logic: ConditionLogic::And,
+            created_at: current_ledger,
+            expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
+            unlock_ledger: 0,
+            execution_time: None,
+            insurance_amount: 0,
+            stake_amount: 0,
+            gas_limit: 0,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: current_config.signers.clone(),
+            depends_on: Vec::new(&env),
+            is_swap: false,
+            voting_deadline: if current_config.default_voting_deadline > 0 {
+                current_ledger + current_config.default_voting_deadline
+            } else {
+                0
+            },
+            execution_ledger: 0,
+        };
+
+        storage::set_proposal(&env, &proposal);
+        storage::add_to_priority_queue(&env, Priority::Normal as u32, proposal_id);
+
+        // Store the pending config data in persistent storage
+        env.storage()
+            .persistent()
+            .set(&crate::storage::FeatureKey::PendingConfig, &new_config);
+        env.storage()
+            .persistent()
+            .extend_ttl(
+                &crate::storage::FeatureKey::PendingConfig,
+                crate::storage::PROPOSAL_TTL / 2,
+                crate::storage::PROPOSAL_TTL,
+            );
+
+        // Mark that a config change is in progress (stores proposal_id in instance)
+        storage::set_pending_config_proposal(&env, proposal_id);
+        storage::extend_instance_ttl(&env);
+
+        Ok(proposal_id)
+    }
+
+    /// Validate a Config struct using the same rules as initialize.
+    fn validate_config(config: &Config) -> Result<(), VaultError> {
+        if config.signers.is_empty() {
+            return Err(VaultError::NoSigners);
+        }
+        if config.threshold < 1 || config.threshold > config.signers.len() {
+            return Err(VaultError::ThresholdTooHigh);
+        }
+        if config.quorum > config.signers.len() {
+            return Err(VaultError::QuorumTooHigh);
+        }
+        if config.spending_limit <= 0 || config.daily_limit <= 0 || config.weekly_limit <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        Ok(())
+    }
+
     /// Assign a role to an address.
     ///
     /// Only an account with the `Admin` role can call this function.
@@ -1969,8 +3477,14 @@ impl VaultDAO {
         }
 
         // Only Admin may assign roles
-        if storage::get_role(&env, &admin) != Role::Admin {
+        let caller_role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, caller_role) {
             return Err(VaultError::Unauthorized);
+        }
+
+        // Caller must have a strictly higher role than the role being assigned
+        if !Role::role_satisfies(role, caller_role) || caller_role == role {
+            return Err(VaultError::CannotAssignHigherRole);
         }
 
         // Persist the new role
@@ -1984,6 +3498,12 @@ impl VaultDAO {
         storage::create_audit_entry(&env, AuditAction::SetRole, &admin, 0);
 
         Ok(())
+    }
+
+    /// Check if an actual role satisfies a required role level.
+    /// Pure function — no storage access.
+    pub fn role_satisfies(required: Role, actual: Role) -> bool {
+        Role::role_satisfies(required, actual)
     }
 
     /// Get role for an address
@@ -2011,6 +3531,43 @@ impl VaultDAO {
     pub fn is_signer(env: Env, addr: Address) -> Result<bool, VaultError> {
         let config = storage::get_config(&env)?;
         Ok(config.signers.contains(&addr))
+    }
+
+    /// Remove a signer from the vault.
+    ///
+    /// Only Admin can call this. Rejects removal if it would leave fewer signers
+    /// than the current threshold, making the vault unable to reach quorum.
+    pub fn remove_signer(env: Env, admin: Address, signer: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let mut config = storage::get_config(&env)?;
+
+        let mut found_idx: Option<u32> = None;
+        for i in 0..config.signers.len() {
+            if config.signers.get(i).unwrap() == signer {
+                found_idx = Some(i);
+                break;
+            }
+        }
+        found_idx.ok_or(VaultError::SignerNotFound)?;
+
+        // Removing this signer must leave at least `threshold` signers remaining.
+        if config.signers.len().saturating_sub(1) < config.threshold {
+            return Err(VaultError::CannotRemoveSigner);
+        }
+
+        config.signers.remove(found_idx.unwrap());
+        storage::set_config(&env, &config);
+        storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(&env, AuditAction::RemoveSigner, &admin, 0);
+
+        events::emit_config_updated(&env, &admin);
+
+        Ok(())
     }
 
     /// Get currently configured voting strategy.
@@ -2083,11 +3640,12 @@ impl VaultDAO {
         amount: i128,
         memo: Symbol,
         interval: u64,
+        max_missed_payments: u32,
     ) -> Result<u64, VaultError> {
         proposer.require_auth();
 
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -2099,7 +3657,7 @@ impl VaultDAO {
         Self::validate_recipient(&env, &recipient)?;
 
         // Minimum interval check (e.g. 1 hour = 720 ledgers)
-        if interval < 720 {
+        if interval < MIN_RECURRING_INTERVAL {
             return Err(VaultError::IntervalTooShort);
         }
 
@@ -2116,7 +3674,9 @@ impl VaultDAO {
             interval,
             next_payment_ledger: current_ledger + interval,
             payment_count: 0,
-            is_active: true,
+            status: crate::types::RecurringStatus::Active,
+            max_missed_payments,
+            paused_at_ledger: 0,
         };
 
         storage::set_recurring_payment(&env, &payment);
@@ -2130,8 +3690,11 @@ impl VaultDAO {
     pub fn execute_recurring_payment(env: Env, payment_id: u64) -> Result<(), VaultError> {
         let mut payment = storage::get_recurring_payment(&env, payment_id)?;
 
-        if !payment.is_active {
-            return Err(VaultError::ProposalNotFound); // Or specific "NotActive" error
+        if payment.status == crate::types::RecurringStatus::Stopped {
+            return Err(VaultError::ProposalNotFound);
+        }
+        if payment.status == crate::types::RecurringStatus::Paused {
+            return Err(VaultError::RecurringPaymentPaused);
         }
 
         let current_ledger = env.ledger().sequence() as u64;
@@ -2139,61 +3702,71 @@ impl VaultDAO {
             return Err(VaultError::TimelockNotExpired); // Reuse error for "Too Early"
         }
 
-        // Check spending limits (Daily & Weekly)
-        // Note: Recurring payments count towards limits!
+        // Calculate missed payments
+        let missed_payments = if current_ledger >= payment.next_payment_ledger {
+            (current_ledger - payment.next_payment_ledger) / payment.interval
+        } else {
+            0
+        };
+
+        // Check if missed payments exceed cap (if cap > 0)
+        if payment.max_missed_payments > 0 && missed_payments > payment.max_missed_payments as u64 {
+            return Err(VaultError::RecurringPaymentMissedCapExceeded);
+        }
+
+        // Cap missed payments at max_missed_payments if set
+        let capped_missed = if payment.max_missed_payments > 0 {
+            missed_payments.min(payment.max_missed_payments as u64)
+        } else {
+            missed_payments
+        };
+
+        let total_payments = capped_missed + 1; // missed + current payment
+        let total_amount = payment.amount * total_payments as i128;
+
+        // Check spending limits for total amount
         let config = storage::get_config(&env)?;
 
         let today = storage::get_day_number(&env);
         let spent_today = storage::get_daily_spent(&env, today);
-        if spent_today + payment.amount > config.daily_limit {
+        if spent_today + total_amount > config.daily_limit {
             return Err(VaultError::ExceedsDailyLimit);
         }
 
         let week = storage::get_week_number(&env);
         let spent_week = storage::get_weekly_spent(&env, week);
-        if spent_week + payment.amount > config.weekly_limit {
+        if spent_week + total_amount > config.weekly_limit {
             return Err(VaultError::ExceedsWeeklyLimit);
         }
 
-        // Revalidate recipient against current whitelist/blacklist policies.
-        // Policies may have changed since scheduling; block execution if the
-        // recipient is no longer permitted.
-        Self::validate_recipient(&env, &payment.recipient)?;
-
-        // Compute tier-based fee for this recurring payment.
-        // The proposer's cumulative volume drives the tier lookup so that
-        // high-volume treasury operators earn discounted rates.
-        let fee_bps = Self::applicable_fee_bps(&env, &payment.proposer);
-        let fee_amount = if fee_bps > 0 {
-            (payment.amount * fee_bps as i128) / 10_000
-        } else {
-            0
-        };
-
-        // Ensure the vault can cover both the payment and the fee.
+        // Check balance
         let balance = token::balance(&env, &payment.token);
-        if balance < payment.amount + fee_amount {
+        if balance < total_amount {
             return Err(VaultError::InsufficientBalance);
         }
 
-        // Execute payment to recipient
-        token::transfer(&env, &payment.token, &payment.recipient, payment.amount);
+        // Revalidate recipient against current whitelist/blacklist policies.
+        Self::validate_recipient(&env, &payment.recipient)?;
 
-        // Collect fee to the fee structure treasury (if a fee is due)
-        if fee_amount > 0 {
-            let fee_structure = storage::get_fee_structure(&env);
-            token::transfer(&env, &payment.token, &fee_structure.treasury, fee_amount);
-            storage::add_fees_collected(&env, &payment.token, fee_amount);
-            Self::update_cumulative_volume(&env, &payment.proposer, payment.amount);
+        // Execute all payments
+        for i in 0..total_payments {
+            token::transfer(&env, &payment.token, &payment.recipient, payment.amount);
+            
+            // Emit event for each payment with sequential ledger timestamp
+            let payment_ledger = payment.next_payment_ledger + (i * payment.interval);
+            env.events().publish(
+                (Symbol::new(&env, "recurring_payment_executed"),),
+                (payment_id, payment_ledger, payment.amount),
+            );
         }
 
-        // Update limits
-        storage::add_daily_spent(&env, today, payment.amount);
-        storage::add_weekly_spent(&env, week, payment.amount);
+        // Update limits with total amount
+        storage::add_daily_spent(&env, today, total_amount);
+        storage::add_weekly_spent(&env, week, total_amount);
 
         // Update payment schedule
-        payment.next_payment_ledger += payment.interval;
-        payment.payment_count += 1;
+        payment.next_payment_ledger += total_payments * payment.interval;
+        payment.payment_count += total_payments as u32;
         storage::set_recurring_payment(&env, &payment);
         storage::extend_instance_ttl(&env);
 
@@ -2245,47 +3818,181 @@ impl VaultDAO {
         storage::get_recurring_payments_paginated(&env, offset, limit)
     }
 
+    /// Stop (deactivate) a recurring payment.
+    ///
+    /// Only the original proposer or an Admin can stop a payment.
+    /// Sets `is_active = false`; subsequent `execute_recurring_payment` calls will fail.
+    ///
+    /// # Arguments
+    /// * `caller`     - Must be the payment proposer or an Admin (must authorize).
+    /// * `payment_id` - ID of the recurring payment to stop.
+    ///
+    /// # Errors
+    /// - [`VaultError::ProposalNotFound`] if the payment does not exist.
+    /// - [`VaultError::Unauthorized`] if caller is neither proposer nor Admin.
+    pub fn stop_recurring_payment(
+        env: Env,
+        caller: Address,
+        payment_id: u64,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut payment = storage::get_recurring_payment(&env, payment_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if caller != payment.proposer && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        payment.status = crate::types::RecurringStatus::Stopped;
+        storage::set_recurring_payment(&env, &payment);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
+    /// Pause a recurring payment temporarily.
+    ///
+    /// Only the original proposer or an Admin can pause.
+    /// Paused payments cannot be executed; the paused duration does not count
+    /// toward the schedule (next_payment_ledger is advanced on resume).
+    ///
+    /// # Errors
+    /// - [`VaultError::ProposalNotFound`] if the payment does not exist.
+    /// - [`VaultError::Unauthorized`] if caller is neither proposer nor Admin.
+    /// - [`VaultError::RecurringPaymentStopped`] if the payment is already stopped.
+    pub fn pause_recurring_payment(
+        env: Env,
+        caller: Address,
+        payment_id: u64,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut payment = storage::get_recurring_payment(&env, payment_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if caller != payment.proposer && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if payment.status == crate::types::RecurringStatus::Stopped {
+            return Err(VaultError::RecurringPaymentStopped);
+        }
+
+        payment.status = crate::types::RecurringStatus::Paused;
+        payment.paused_at_ledger = env.ledger().sequence() as u64;
+        storage::set_recurring_payment(&env, &payment);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
+    /// Resume a paused recurring payment.
+    ///
+    /// Advances `next_payment_ledger` by the paused duration so the paused
+    /// time does not count toward the schedule.
+    ///
+    /// # Errors
+    /// - [`VaultError::ProposalNotFound`] if the payment does not exist.
+    /// - [`VaultError::Unauthorized`] if caller is neither proposer nor Admin.
+    /// - [`VaultError::RecurringPaymentStopped`] if the payment is stopped.
+    pub fn resume_recurring_payment(
+        env: Env,
+        caller: Address,
+        payment_id: u64,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut payment = storage::get_recurring_payment(&env, payment_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if caller != payment.proposer && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if payment.status == crate::types::RecurringStatus::Stopped {
+            return Err(VaultError::RecurringPaymentStopped);
+        }
+
+        if payment.status == crate::types::RecurringStatus::Active {
+            // Already active — nothing to do
+            return Ok(());
+        }
+
+        // Advance next_payment_ledger by the paused duration
+        let current_ledger = env.ledger().sequence() as u64;
+        let paused_duration = current_ledger.saturating_sub(payment.paused_at_ledger);
+        payment.next_payment_ledger = payment.next_payment_ledger.saturating_add(paused_duration);
+        payment.status = crate::types::RecurringStatus::Active;
+        payment.paused_at_ledger = 0;
+        storage::set_recurring_payment(&env, &payment);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
     //
     // ========================================================================
     // Streaming Payments (feature/streaming-payments)
     // ========================================================================
 
-    /// Create a new token stream.
+    /// Create a new streaming payment.
     ///
-    /// Funds are transferred from sender to contract escrow.
+    /// Transfers `total_amount` tokens from `sender` into the vault escrow and
+    /// starts a continuous stream to `recipient` at `rate` tokens-per-second.
+    ///
+    /// # Arguments
+    /// * `sender`        - Must hold Treasurer or Admin role; funds the stream.
+    /// * `recipient`     - Address that will receive the streamed tokens.
+    /// * `token_addr`    - Token contract address.
+    /// * `rate`          - Tokens per second (must be > 0, scaled to token decimals).
+    /// * `total_amount`  - Total tokens committed (must be > 0).
+    /// * `duration_secs` - Stream duration in seconds (must be > 0).
+    ///
+    /// # Errors
+    /// Returns [`VaultError::InsufficientRole`] if caller lacks Treasurer/Admin role.
+    /// Returns [`VaultError::InvalidAmount`] if `rate`, `total_amount`, or `duration_secs` is zero.
     pub fn create_stream(
         env: Env,
         sender: Address,
         recipient: Address,
         token_addr: Address,
-        amount: i128,
-        duration: u64,
+        rate: i128,
+        total_amount: i128,
+        duration_secs: u64,
     ) -> Result<u64, VaultError> {
         sender.require_auth();
 
-        if amount <= 0 || duration == 0 {
+        // Role check: only Treasurer or Admin may create streams
+        let role = storage::get_role(&env, &sender);
+        if role != Role::Treasurer && role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        // Validate inputs
+        if rate <= 0 || total_amount <= 0 || duration_secs == 0 {
             return Err(VaultError::InvalidAmount);
         }
 
         // Validate recipient against lists
+        Self::validate_recipient(&env, &recipient)?;
 
         let id = storage::increment_stream_id(&env);
         let now = env.ledger().timestamp();
-        let rate = amount / duration as i128;
 
-        // Escrow funds
-        token::transfer_to_vault(&env, &token_addr, &sender, amount);
+        // Escrow the full amount from sender into the vault
+        token::transfer_to_vault(&env, &token_addr, &sender, total_amount);
 
         let stream = StreamingPayment {
             id,
             sender: sender.clone(),
-            recipient,
+            recipient: recipient.clone(),
             token_addr: token_addr.clone(),
             rate,
-            total_amount: amount,
+            total_amount,
             claimed_amount: 0,
             start_timestamp: now,
-            end_timestamp: now + duration,
+            end_timestamp: now + duration_secs,
             last_update_timestamp: now,
             accumulated_seconds: 0,
             status: StreamStatus::Active,
@@ -2294,17 +4001,319 @@ impl VaultDAO {
         storage::set_streaming_payment(&env, &stream);
         storage::extend_instance_ttl(&env);
 
-        events::emit_stream_created(
-            &env,
-            id,
-            &sender,
-            &stream.recipient,
-            &token_addr,
-            amount,
-            rate,
-        );
+        events::emit_stream_created(&env, id, &sender, &recipient, &token_addr, total_amount, rate);
 
         Ok(id)
+    }
+
+    /// Claim accumulated tokens from a stream.
+    ///
+    /// Calculates claimable tokens based on elapsed active seconds since the
+    /// last claim, transfers them to the recipient, and marks the stream
+    /// `Completed` if all tokens have been claimed.
+    ///
+    /// # Arguments
+    /// * `recipient`  - Must be the stream's designated recipient.
+    /// * `stream_id`  - ID of the stream to claim from.
+    ///
+    /// # Errors
+    /// Returns [`VaultError::ProposalNotFound`] if stream does not exist.
+    /// Returns [`VaultError::Unauthorized`] if caller is not the stream recipient.
+    /// Returns [`VaultError::InvalidAmount`] if there is nothing to claim.
+    pub fn claim_stream(
+        env: Env,
+        recipient: Address,
+        stream_id: u64,
+    ) -> Result<i128, VaultError> {
+        recipient.require_auth();
+
+        let mut stream = storage::get_streaming_payment(&env, stream_id)?;
+
+        // Only the designated recipient may claim
+        if stream.recipient != recipient {
+            return Err(VaultError::Unauthorized);
+        }
+
+        // Cannot claim from a cancelled stream
+        if stream.status == StreamStatus::Cancelled {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Calculate elapsed active seconds since last update
+        let elapsed_since_update = if stream.status == StreamStatus::Active {
+            // Cap at end_timestamp so we never over-accrue
+            let effective_now = if now > stream.end_timestamp {
+                stream.end_timestamp
+            } else {
+                now
+            };
+            effective_now.saturating_sub(stream.last_update_timestamp)
+        } else {
+            // Paused: no new seconds accumulate
+            0u64
+        };
+
+        let total_active_seconds = stream.accumulated_seconds + elapsed_since_update;
+
+        // claimable = rate × total_active_seconds − already_claimed
+        let gross_claimable = stream.rate * total_active_seconds as i128;
+        // Never exceed total_amount
+        let gross_claimable = if gross_claimable > stream.total_amount {
+            stream.total_amount
+        } else {
+            gross_claimable
+        };
+        let claimable = gross_claimable - stream.claimed_amount;
+
+        if claimable <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Transfer claimable tokens to recipient
+        if token::try_transfer(&env, &stream.token_addr, &recipient, claimable).is_err() {
+            return Err(VaultError::InsufficientBalance);
+        }
+
+        stream.claimed_amount += claimable;
+        stream.accumulated_seconds = total_active_seconds;
+        stream.last_update_timestamp = now;
+
+        // Mark completed when all tokens are claimed
+        if stream.claimed_amount >= stream.total_amount {
+            stream.status = StreamStatus::Completed;
+        }
+
+        storage::set_streaming_payment(&env, &stream);
+
+        events::emit_stream_claimed(&env, stream_id, &recipient, claimable);
+
+        Ok(claimable)
+    }
+
+    /// Pause an active stream, freezing token accumulation.
+    ///
+    /// Only the stream sender or an Admin may pause a stream.
+    ///
+    /// # Arguments
+    /// * `caller`    - Sender of the stream or an Admin.
+    /// * `stream_id` - ID of the stream to pause.
+    ///
+    /// # Errors
+    /// Returns [`VaultError::ProposalNotFound`] if stream does not exist.
+    /// Returns [`VaultError::Unauthorized`] if caller is not sender or Admin.
+    /// Returns [`VaultError::ProposalNotPending`] if stream is not Active.
+    pub fn pause_stream(env: Env, caller: Address, stream_id: u64) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut stream = storage::get_streaming_payment(&env, stream_id)?;
+
+        // Only sender or Admin may pause
+        let role = storage::get_role(&env, &caller);
+        if stream.sender != caller && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if stream.status != StreamStatus::Active {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Snapshot accumulated seconds up to now before pausing
+        let effective_now = if now > stream.end_timestamp {
+            stream.end_timestamp
+        } else {
+            now
+        };
+        stream.accumulated_seconds +=
+            effective_now.saturating_sub(stream.last_update_timestamp);
+        stream.last_update_timestamp = now;
+        stream.status = StreamStatus::Paused;
+
+        storage::set_streaming_payment(&env, &stream);
+
+        events::emit_stream_status_updated(&env, stream_id, StreamStatus::Paused as u32, &caller);
+
+        Ok(())
+    }
+
+    /// Resume a paused stream.
+    ///
+    /// Only the stream sender or an Admin may resume a stream.
+    ///
+    /// # Arguments
+    /// * `caller`    - Sender of the stream or an Admin.
+    /// * `stream_id` - ID of the stream to resume.
+    ///
+    /// # Errors
+    /// Returns [`VaultError::ProposalNotFound`] if stream does not exist.
+    /// Returns [`VaultError::Unauthorized`] if caller is not sender or Admin.
+    /// Returns [`VaultError::ProposalNotPending`] if stream is not Paused.
+    pub fn resume_stream(env: Env, caller: Address, stream_id: u64) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut stream = storage::get_streaming_payment(&env, stream_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if stream.sender != caller && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if stream.status != StreamStatus::Paused {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        let now = env.ledger().timestamp();
+        // Reset the update timestamp so elapsed time starts from now
+        stream.last_update_timestamp = now;
+        stream.status = StreamStatus::Active;
+
+        storage::set_streaming_payment(&env, &stream);
+
+        events::emit_stream_status_updated(&env, stream_id, StreamStatus::Active as u32, &caller);
+
+        Ok(())
+    }
+
+    /// Cancel a stream and return unclaimed tokens to the sender.
+    ///
+    /// Only the stream sender or an Admin may cancel a stream.
+    /// Any tokens already claimed by the recipient are kept; the remainder
+    /// is returned to the sender.
+    ///
+    /// # Arguments
+    /// * `caller`    - Sender of the stream or an Admin.
+    /// * `stream_id` - ID of the stream to cancel.
+    ///
+    /// # Errors
+    /// Returns [`VaultError::ProposalNotFound`] if stream does not exist.
+    /// Returns [`VaultError::Unauthorized`] if caller is not sender or Admin.
+    /// Returns [`VaultError::ProposalAlreadyCancelled`] if already cancelled.
+    pub fn cancel_stream(env: Env, caller: Address, stream_id: u64) -> Result<i128, VaultError> {
+        caller.require_auth();
+
+        let mut stream = storage::get_streaming_payment(&env, stream_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if stream.sender != caller && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if stream.status == StreamStatus::Cancelled {
+            return Err(VaultError::ProposalAlreadyCancelled);
+        }
+
+        if stream.status == StreamStatus::Completed {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Snapshot any newly accumulated seconds (if active) before cancelling
+        if stream.status == StreamStatus::Active {
+            let effective_now = if now > stream.end_timestamp {
+                stream.end_timestamp
+            } else {
+                now
+            };
+            stream.accumulated_seconds +=
+                effective_now.saturating_sub(stream.last_update_timestamp);
+        }
+
+        // Tokens earned by recipient up to this point (but not yet claimed)
+        let gross_earned = stream.rate * stream.accumulated_seconds as i128;
+        let gross_earned = if gross_earned > stream.total_amount {
+            stream.total_amount
+        } else {
+            gross_earned
+        };
+
+        // Refund = total committed − everything earned (claimed + unclaimed earned)
+        let refund_amount = stream.total_amount - gross_earned;
+
+        if refund_amount > 0 {
+            if token::try_transfer(&env, &stream.token_addr, &stream.sender, refund_amount)
+                .is_err()
+            {
+                return Err(VaultError::InsufficientBalance);
+            }
+        }
+
+        stream.last_update_timestamp = now;
+        stream.status = StreamStatus::Cancelled;
+
+        storage::set_streaming_payment(&env, &stream);
+
+        events::emit_stream_status_updated(
+            &env,
+            stream_id,
+            StreamStatus::Cancelled as u32,
+            &caller,
+        );
+
+        Ok(refund_amount)
+    }
+
+    /// Get a streaming payment by ID.
+    pub fn get_stream(env: Env, stream_id: u64) -> Result<StreamingPayment, VaultError> {
+        storage::get_streaming_payment(&env, stream_id)
+    }
+
+    /// Adjust the rate of an active or paused stream.
+    ///
+    /// Snapshots accumulated seconds and claimed amount before changing the rate
+    /// so that accrual history is preserved. Recalculates end_timestamp based on
+    /// the remaining unclaimed amount and the new rate.
+    ///
+    /// Only the stream sender or an Admin may call this.
+    pub fn adjust_stream_rate(
+        env: Env,
+        sender: Address,
+        stream_id: u64,
+        new_rate: i128,
+    ) -> Result<(), VaultError> {
+        sender.require_auth();
+
+        if new_rate <= 0 {
+            return Err(VaultError::InvalidStreamRate);
+        }
+
+        let mut stream = storage::get_streaming_payment(&env, stream_id)?;
+
+        let role = storage::get_role(&env, &sender);
+        if stream.sender != sender && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if stream.status == StreamStatus::Cancelled || stream.status == StreamStatus::Completed {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Snapshot accumulated seconds up to now (if active)
+        if stream.status == StreamStatus::Active {
+            let effective_now = if now > stream.end_timestamp { stream.end_timestamp } else { now };
+            stream.accumulated_seconds += effective_now.saturating_sub(stream.last_update_timestamp);
+        }
+        stream.last_update_timestamp = now;
+
+        let old_rate = stream.rate;
+        stream.rate = new_rate;
+
+        // Recalculate end_timestamp: remaining = total - claimed, new_duration = remaining / new_rate
+        let remaining = stream.total_amount - stream.claimed_amount;
+        if remaining > 0 {
+            let new_duration_secs = (remaining / new_rate) as u64;
+            stream.end_timestamp = now + new_duration_secs;
+        }
+
+        storage::set_streaming_payment(&env, &stream);
+        events::emit_stream_rate_adjusted(&env, stream_id, old_rate, new_rate, &sender);
+
+        Ok(())
     }
     // ========================================================================
     // Recipient List Management
@@ -2317,7 +4326,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2339,7 +4348,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2364,7 +4373,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2390,7 +4399,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2415,7 +4424,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2434,6 +4443,142 @@ impl VaultDAO {
         storage::is_blacklisted(&env, &addr)
     }
 
+    /// Bulk add addresses to the whitelist (up to 50). Duplicates are silently skipped.
+    pub fn bulk_add_to_whitelist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if addresses.len() > 50 {
+            return Err(VaultError::BatchTooLarge);
+        }
+        for i in 0..addresses.len() {
+            if let Some(addr) = addresses.get(i) {
+                if !storage::is_whitelisted(&env, &addr) {
+                    storage::add_to_whitelist(&env, &addr);
+                }
+            }
+        }
+        events::emit_config_updated(&env, &admin);
+        Ok(())
+    }
+
+    /// Bulk remove addresses from the whitelist. Missing addresses are silently skipped.
+    pub fn bulk_remove_from_whitelist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if addresses.len() > 50 {
+            return Err(VaultError::BatchTooLarge);
+        }
+        for i in 0..addresses.len() {
+            if let Some(addr) = addresses.get(i) {
+                if storage::is_whitelisted(&env, &addr) {
+                    storage::remove_from_whitelist(&env, &addr);
+                }
+            }
+        }
+        events::emit_config_updated(&env, &admin);
+        Ok(())
+    }
+
+    /// Bulk add addresses to the blacklist (up to 50). Duplicates are silently skipped.
+    pub fn bulk_add_to_blacklist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if addresses.len() > 50 {
+            return Err(VaultError::BatchTooLarge);
+        }
+        for i in 0..addresses.len() {
+            if let Some(addr) = addresses.get(i) {
+                if !storage::is_blacklisted(&env, &addr) {
+                    storage::add_to_blacklist(&env, &addr);
+                }
+            }
+        }
+        events::emit_config_updated(&env, &admin);
+        Ok(())
+    }
+
+    /// Bulk remove addresses from the blacklist. Missing addresses are silently skipped.
+    pub fn bulk_remove_from_blacklist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if addresses.len() > 50 {
+            return Err(VaultError::BatchTooLarge);
+        }
+        for i in 0..addresses.len() {
+            if let Some(addr) = addresses.get(i) {
+                if storage::is_blacklisted(&env, &addr) {
+                    storage::remove_from_blacklist(&env, &addr);
+                }
+            }
+        }
+        events::emit_config_updated(&env, &admin);
+        Ok(())
+    }
+
+    /// Get paginated whitelist entries (capped at 100 per page).
+    pub fn get_whitelist_paginated(env: Env, offset: u64, limit: u64) -> Vec<Address> {
+        storage::get_whitelist_paginated(&env, offset, limit)
+    }
+
+    /// Get paginated blacklist entries (capped at 100 per page).
+    pub fn get_blacklist_paginated(env: Env, offset: u64, limit: u64) -> Vec<Address> {
+        storage::get_blacklist_paginated(&env, offset, limit)
+    }
+
+    /// Get proposal IDs filtered by status (capped at 50 per page).
+    pub fn get_proposals_by_status(
+        env: Env,
+        status: ProposalStatus,
+        offset: u64,
+        limit: u64,
+    ) -> Vec<u64> {
+        storage::get_proposals_by_status(&env, status as u32, offset, limit)
+    }
+
+    /// Get proposal IDs created within a ledger range (capped at 50 per page).
+    pub fn get_proposals_by_ledger_range(
+        env: Env,
+        from_ledger: u64,
+        to_ledger: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<u64>, VaultError> {
+        if from_ledger > to_ledger {
+            return Err(VaultError::InvalidLedgerRange);
+        }
+        Ok(storage::get_proposals_by_ledger_range(&env, from_ledger, to_ledger, offset, limit))
+    }
+
+    /// Get the configured proposal ID namespace prefix.
+    pub fn get_vault_namespace(env: Env) -> Result<u64, VaultError> {
+        let config = storage::get_config(&env)?;
+        Ok(config.proposal_id_prefix)
+    }
+
     /// Validate if a recipient is allowed based on current list mode
     fn validate_recipient(env: &Env, recipient: &Address) -> Result<(), VaultError> {
         let mode = storage::get_list_mode(env);
@@ -2444,7 +4589,7 @@ impl VaultDAO {
                 if storage::is_whitelisted(env, recipient) {
                     Ok(())
                 } else {
-                    Err(VaultError::RecipientNotWhitelisted)
+                    Err(VaultError::RecipientBlacklisted)
                 }
             }
             ListMode::Blacklist => {
@@ -2550,9 +4695,115 @@ impl VaultDAO {
         storage::get_comment(&env, comment_id)
     }
 
+    /// Soft-delete a comment. Caller must be the author or an Admin.
+    /// Sets text to "deleted" and preserves id/parent_id for thread integrity.
+    pub fn delete_comment(
+        env: Env,
+        caller: Address,
+        comment_id: u64,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut comment = storage::get_comment(&env, comment_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if comment.author != caller && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        comment.text = Symbol::new(&env, "deleted");
+        storage::set_comment(&env, &comment);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_comment_deleted(&env, comment_id, &caller);
+
+        Ok(())
+    }
+
+    /// Get threaded comments for a proposal under a given parent (0 = top-level).
+    /// Returns comments in creation order. Capped at `limit` (max 50).
+    /// Returns VaultError::ThreadDepthExceeded if parent_id is at depth >= 5.
+    pub fn get_comment_thread(
+        env: Env,
+        proposal_id: u64,
+        parent_id: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Comment>, VaultError> {
+        // Enforce max thread depth: walk up from parent_id counting levels
+        if parent_id > 0 {
+            let mut depth: u32 = 0;
+            let mut current_id = parent_id;
+            loop {
+                let c = storage::get_comment(&env, current_id)?;
+                if c.parent_id == 0 {
+                    break;
+                }
+                depth += 1;
+                if depth >= 5 {
+                    return Err(VaultError::ThreadDepthExceeded);
+                }
+                current_id = c.parent_id;
+            }
+        }
+
+        let cap: u32 = if limit > 50 { 50 } else { limit };
+        let comment_ids = storage::get_proposal_comments(&env, proposal_id);
+        let mut result: Vec<Comment> = Vec::new(&env);
+        let mut skipped: u32 = 0;
+
+        for i in 0..comment_ids.len() {
+            if result.len() >= cap {
+                break;
+            }
+            if let Some(cid) = comment_ids.get(i) {
+                if let Ok(comment) = storage::get_comment(&env, cid) {
+                    if comment.parent_id == parent_id {
+                        if skipped < offset {
+                            skipped += 1;
+                            continue;
+                        }
+                        result.push_back(comment);
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
     // ========================================================================
     // Audit Trail
     // ========================================================================
+
+    /// Get a page of audit entries in ascending ID order.
+    ///
+    /// `offset` is zero-based and `limit` is capped at 50 entries per call.
+    pub fn get_audit_trail(env: Env, offset: u64, limit: u32) -> Vec<AuditEntry> {
+        let capped_limit = core::cmp::min(limit, 50);
+        let mut entries = Vec::new(&env);
+        if capped_limit == 0 {
+            return entries;
+        }
+
+        let last_audit_id = storage::get_next_audit_id(&env).saturating_sub(1);
+        let start_id = offset.saturating_add(1);
+        if start_id == 0 || start_id > last_audit_id {
+            return entries;
+        }
+
+        let end_id = core::cmp::min(
+            last_audit_id,
+            start_id.saturating_add(capped_limit as u64).saturating_sub(1),
+        );
+
+        for entry_id in start_id..=end_id {
+            if let Ok(entry) = storage::get_audit_entry(&env, entry_id) {
+                entries.push_back(entry);
+            }
+        }
+
+        entries
+    }
 
     /// Get audit entry by ID
     pub fn get_audit_entry(env: Env, entry_id: u64) -> Result<AuditEntry, VaultError> {
@@ -2561,7 +4812,60 @@ impl VaultDAO {
 
     /// Get the total number of audit entries
     pub fn get_audit_entry_count(env: Env) -> u64 {
-        storage::get_next_audit_id(&env)
+        storage::get_next_audit_id(&env).saturating_sub(1)
+    }
+
+    /// Verify audit trail integrity across an inclusive range of entry IDs.
+    /// Verify audit chain integrity from from_id to to_id (inclusive)
+    /// 
+    /// This is a read-only function callable by anyone to verify chain integrity.
+    /// Returns VaultError::AuditChainBroken if any hash mismatch is found.
+    pub fn verify_audit_chain(env: Env, from_id: u64, to_id: u64) -> Result<(), VaultError> {
+        if from_id == 0 || from_id > to_id {
+            return Err(VaultError::AuditChainBroken);
+        }
+
+        let last_audit_id = storage::get_next_audit_id(&env).saturating_sub(1);
+        if to_id > last_audit_id {
+            return Err(VaultError::AuditChainBroken);
+        }
+
+        let mut expected_prev_hash = if from_id == 1 {
+            0
+        } else if let Ok(prev_entry) = storage::get_audit_entry(&env, from_id - 1) {
+            prev_entry.hash
+        } else {
+            return Err(VaultError::AuditChainBroken);
+        };
+
+        for id in from_id..=to_id {
+            let entry = if let Ok(entry) = storage::get_audit_entry(&env, id) {
+                entry
+            } else {
+                return Err(VaultError::AuditChainBroken);
+            };
+
+            if entry.prev_hash != expected_prev_hash {
+                return Err(VaultError::AuditChainBroken);
+            }
+
+            let computed_hash = storage::compute_audit_hash(
+                &env,
+                entry.id,
+                &entry.action,
+                &entry.actor,
+                entry.target,
+                entry.timestamp,
+                entry.prev_hash,
+            );
+            if computed_hash != entry.hash {
+                return Err(VaultError::AuditChainBroken);
+            }
+
+            expected_prev_hash = entry.hash;
+        }
+
+        Ok(())
     }
 
     /// Verify audit trail integrity
@@ -2569,36 +4873,45 @@ impl VaultDAO {
     /// Validates the hash chain from start_id to end_id.
     /// Returns true if the chain is valid, false otherwise.
     pub fn verify_audit_trail(env: Env, start_id: u64, end_id: u64) -> Result<bool, VaultError> {
-        if start_id > end_id {
-            return Err(VaultError::InvalidAmount);
-        }
-        for id in start_id..=end_id {
-            let entry = storage::get_audit_entry(&env, id)?;
+        Ok(Self::verify_audit_chain(env, start_id, end_id))
+    }
 
-            // Verify hash computation
-            let computed_hash = storage::compute_audit_hash(
+    /// Walk the full audit trail from entry 1 to the latest entry and verify
+    /// each hash links correctly to the previous entry.
+    ///
+    /// Returns `Ok(None)` when the chain is intact, or `Ok(Some(id))` with the
+    /// ID of the first entry whose hash does not match.  Callable by any
+    /// address (read-only, no `require_auth`).
+    pub fn verify_audit_trail_full(env: Env) -> Result<Option<u64>, VaultError> {
+        let count = storage::get_next_audit_id(&env);
+        // next_audit_id starts at 1 and is incremented before use, so the
+        // highest written ID is count - 1.  If nothing has been written yet,
+        // return intact immediately.
+        if count <= 1 {
+            return Ok(None);
+        }
+        for id in 1..count {
+            let entry = storage::get_audit_entry(&env, id)?;
+            let computed = storage::compute_audit_hash(
                 &env,
+                entry.id,
                 &entry.action,
                 &entry.actor,
                 entry.target,
                 entry.timestamp,
                 entry.prev_hash,
             );
-
-            if computed_hash != entry.hash {
-                return Ok(false);
+            if computed != entry.hash {
+                return Ok(Some(id));
             }
-
-            // Verify chain linkage (except for first entry)
             if id > 1 {
-                let prev_entry = storage::get_audit_entry(&env, id - 1)?;
-                if entry.prev_hash != prev_entry.hash {
-                    return Ok(false);
+                let prev = storage::get_audit_entry(&env, id - 1)?;
+                if entry.prev_hash != prev.hash {
+                    return Ok(Some(id));
                 }
             }
         }
-
-        Ok(true)
+        Ok(None)
     }
 
     // ========================================================================
@@ -2648,6 +4961,18 @@ impl VaultDAO {
             if current_ledger > proposal.expires_at {
                 proposal.status = ProposalStatus::Expired;
                 storage::set_proposal(&env, &proposal);
+                storage::metrics_on_expiry(&env);
+                events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
+
+                let metrics = storage::get_metrics(&env);
+                events::emit_metrics_updated(
+                    &env,
+                    metrics.executed_count,
+                    metrics.rejected_count,
+                    metrics.expired_count,
+                    metrics.success_rate_bps(),
+                );
+
                 failed_count += 1;
                 continue;
             }
@@ -2777,7 +5102,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -2816,15 +5141,35 @@ impl VaultDAO {
 
         let proposal = storage::get_proposal(&env, proposal_id)?;
 
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
-        // IPFS CID v0 is 46 chars; CIDv1 base32 is 59+ chars; reject anything
-        // outside the valid range with a dedicated error code.
         let alen = attachment.len();
         if !(MIN_ATTACHMENT_LEN..=MAX_ATTACHMENT_LEN).contains(&alen) {
+            return Err(VaultError::AttachmentHashInvalid);
+        }
+
+        // Validate CID prefix: CIDv0 starts with "Qm", CIDv1 base32 starts with "bafy".
+        // Copy the first 4 bytes into a stack buffer for prefix comparison.
+        let mut prefix = [0u8; 4];
+        {
+            // copy_into_slice requires exact length — copy full string into a
+            // MAX_ATTACHMENT_LEN-sized buffer and read the first 4 bytes.
+            let mut buf = [0u8; MAX_ATTACHMENT_LEN as usize];
+            let buf_slice = &mut buf[..alen as usize];
+            attachment.copy_into_slice(buf_slice);
+            prefix.copy_from_slice(&buf_slice[..4]);
+        }
+        // "Qm" = [0x51, 0x6d], "bafy" = [0x62, 0x61, 0x66, 0x79]
+        let is_cidv0 = prefix[0] == b'Q' && prefix[1] == b'm';
+        let is_cidv1 = prefix == *b"bafy";
+        if !is_cidv0 && !is_cidv1 {
             return Err(VaultError::AttachmentHashInvalid);
         }
 
@@ -2832,8 +5177,9 @@ impl VaultDAO {
         if attachments.len() >= MAX_ATTACHMENTS {
             return Err(VaultError::TooManyAttachments);
         }
+        // O(n) duplicate check over MAX_ATTACHMENTS = 10 entries.
         if attachments.contains(attachment.clone()) {
-            return Err(VaultError::AlreadyApproved); // duplicate attachment
+            return Err(VaultError::AttachmentAlreadyExists);
         }
         attachments.push_back(attachment);
         storage::set_attachments(&env, proposal_id, &attachments);
@@ -2842,31 +5188,47 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Remove an attachment by index.
+    /// Remove an attachment by CID value from a pending proposal.
+    ///
+    /// Only the original proposer or an Admin may remove attachments.
     pub fn remove_attachment(
         env: Env,
         caller: Address,
         proposal_id: u64,
-        index: u32,
+        cid: String,
     ) -> Result<(), VaultError> {
         caller.require_auth();
 
         let proposal = storage::get_proposal(&env, proposal_id)?;
 
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
         let mut attachments = storage::get_attachments(&env, proposal_id);
-        if index >= attachments.len() {
-            return Err(VaultError::ProposalNotFound); // reuse as "index out of range"
+        let mut found: Option<u32> = None;
+        for i in 0..attachments.len() {
+            if attachments.get(i).unwrap() == cid {
+                found = Some(i);
+                break;
+            }
         }
-        attachments.remove(index);
+        let idx = found.ok_or(VaultError::ProposalNotFound)?;
+        attachments.remove(idx);
         storage::set_attachments(&env, proposal_id, &attachments);
         storage::extend_instance_ttl(&env);
 
         Ok(())
+    }
+
+    /// Get all IPFS attachment hashes for a proposal (public read).
+    pub fn get_attachments(env: Env, proposal_id: u64) -> Vec<String> {
+        storage::get_attachments(&env, proposal_id)
     }
 
     // ========================================================================
@@ -2875,7 +5237,7 @@ impl VaultDAO {
 
     /// Set or update a metadata key for a proposal.
     ///
-    /// Only Admin or the original proposer can update metadata.
+    /// Only Admin or the original proposer can update metadata on a Pending proposal.
     pub fn set_proposal_metadata(
         env: Env,
         caller: Address,
@@ -2888,8 +5250,18 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
+        }
+
+        // Only allow metadata changes on Pending proposals
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        // Validate key: must be non-empty
+        if key == Symbol::new(&env, "") {
+            return Err(VaultError::MetadataValueInvalid);
         }
 
         // Metadata validation: non-empty bounded value and bounded entry count.
@@ -2912,7 +5284,7 @@ impl VaultDAO {
 
     /// Remove a metadata key from a proposal.
     ///
-    /// Only Admin or the original proposer can remove metadata.
+    /// Only Admin or the original proposer can remove metadata on a Pending proposal.
     pub fn remove_proposal_metadata(
         env: Env,
         caller: Address,
@@ -2924,8 +5296,13 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
+        }
+
+        // Only allow metadata changes on Pending proposals
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
         }
 
         proposal.metadata.remove(key);
@@ -2954,6 +5331,48 @@ impl VaultDAO {
         Ok(proposal.metadata)
     }
 
+    /// Search proposals by a metadata key-value pair.
+    ///
+    /// Scans all proposals and returns IDs where `proposal.metadata[key] == value`.
+    /// Results are paginated via `offset` and `limit` (capped at 50).
+    ///
+    /// # Arguments
+    /// * `key`    - Metadata key to match
+    /// * `value`  - Metadata value to match
+    /// * `offset` - Number of matching proposals to skip
+    /// * `limit`  - Maximum number of IDs to return (capped at 50)
+    pub fn get_proposals_by_metadata(
+        env: Env,
+        key: Symbol,
+        value: String,
+        offset: u64,
+        limit: u64,
+    ) -> Vec<u64> {
+        let cap: u64 = if limit > 50 { 50 } else { limit };
+        let next_id = storage::get_next_proposal_id(&env);
+        let mut results: Vec<u64> = Vec::new(&env);
+        let mut skipped: u64 = 0;
+
+        for id in 1..next_id {
+            if results.len() as u64 >= cap {
+                break;
+            }
+            if let Ok(proposal) = storage::get_proposal(&env, id) {
+                if let Some(v) = proposal.metadata.get(key.clone()) {
+                    if v == value {
+                        if skipped < offset {
+                            skipped += 1;
+                        } else {
+                            results.push_back(id);
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
     // ========================================================================
     // Tag Management
     // ========================================================================
@@ -2972,20 +5391,27 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
+        // Reject empty tags - Symbol("") is invalid per SDK
+        if tag == Symbol::new(&env, "") {
+            return Err(VaultError::MetadataValueInvalid);
+        }
+
         if proposal.tags.contains(&tag) {
-            return Err(VaultError::AlreadyApproved); // duplicate tag
+            // Duplicate tag — silently ignored per spec
+            return Ok(());
         }
 
         if proposal.tags.len() >= MAX_TAGS {
             return Err(VaultError::TooManyTags);
         }
 
-        proposal.tags.push_back(tag);
+        proposal.tags.push_back(tag.clone());
         storage::set_proposal(&env, &proposal);
+        storage::tag_index_add(&env, &tag, proposal_id);
         storage::extend_instance_ttl(&env);
 
         Ok(())
@@ -3005,7 +5431,7 @@ impl VaultDAO {
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
         let role = storage::get_role(&env, &caller);
-        if role != Role::Admin && caller != proposal.proposer {
+        if !Role::role_satisfies(Role::Admin, role) && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3019,10 +5445,11 @@ impl VaultDAO {
         }
 
         if !found {
-            return Err(VaultError::ProposalNotFound); // tag not found
+            return Err(VaultError::TagNotFound);
         }
 
         storage::set_proposal(&env, &proposal);
+        storage::tag_index_remove(&env, &tag, proposal_id);
         storage::extend_instance_ttl(&env);
 
         Ok(())
@@ -3034,20 +5461,68 @@ impl VaultDAO {
         Ok(proposal.tags)
     }
 
-    /// Get proposal IDs that include a specific tag.
-    pub fn get_proposals_by_tag(env: Env, tag: Symbol) -> Vec<u64> {
-        let mut proposal_ids = Vec::new(&env);
-        let next_id = storage::get_next_proposal_id(&env);
+    /// Get proposal IDs tagged with `tag`, with pagination.
+    ///
+    /// Results are capped at 50. Pass `offset` and `limit` (max 50) to paginate.
+    pub fn get_proposals_by_tag(env: Env, tag: Symbol, offset: u32, limit: u32) -> Vec<u64> {
+        const MAX_RESULTS: u32 = 50;
+        let cap = if limit == 0 || limit > MAX_RESULTS { MAX_RESULTS } else { limit };
 
-        for proposal_id in 1..next_id {
-            if let Ok(proposal) = storage::get_proposal(&env, proposal_id) {
-                if proposal.tags.contains(&tag) {
-                    proposal_ids.push_back(proposal_id);
-                }
+        let ids = storage::get_tag_index(&env, &tag);
+        let mut result = Vec::new(&env);
+        let mut count: u32 = 0;
+        let mut skipped: u32 = 0;
+
+        for id in ids.iter() {
+            if skipped < offset {
+                skipped += 1;
+                continue;
             }
+            if count >= cap {
+                break;
+            }
+            result.push_back(id);
+            count += 1;
         }
 
-        proposal_ids
+        result
+    }
+
+    /// Batch-add multiple tags to a proposal.
+    ///
+    /// Only Admin or the original proposer can add tags.
+    /// Stops and returns `TooManyTags` if the limit would be exceeded.
+    pub fn bulk_add_tags(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+        tags: Vec<Symbol>,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::Unauthorized);
+        }
+
+        for tag in tags.iter() {
+            if tag == Symbol::new(&env, "") {
+                return Err(VaultError::MetadataValueInvalid);
+            }
+            if proposal.tags.contains(&tag) {
+                continue;
+            }
+            if proposal.tags.len() >= MAX_TAGS {
+                return Err(VaultError::TooManyTags);
+            }
+            proposal.tags.push_back(tag.clone());
+            storage::tag_index_add(&env, &tag, proposal_id);
+        }
+
+        storage::set_proposal(&env, &proposal);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
     }
 
     // ========================================================================
@@ -3101,7 +5576,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3110,11 +5585,11 @@ impl VaultDAO {
             return Err(VaultError::InvalidAmount);
         }
 
-        // Validate tiers are sorted by volume_threshold
+        // Validate tiers are sorted by min_volume
         for i in 1..fee_structure.tiers.len() {
             let prev = fee_structure.tiers.get(i - 1).unwrap();
             let curr = fee_structure.tiers.get(i).unwrap();
-            if curr.volume_threshold <= prev.volume_threshold {
+            if curr.min_volume <= prev.min_volume {
                 return Err(VaultError::InvalidAmount);
             }
             if curr.fee_bps > 10_000 {
@@ -3157,6 +5632,61 @@ impl VaultDAO {
         Self::calculate_fee_internal(&env, &user, &token, amount)
     }
 
+    /// Collect an execution fee from the caller for a given token and amount.
+    ///
+    /// Computes `fee = amount * fee_bps / 10_000` after applying volume-based
+    /// tier discounts and reputation discounts. Transfers the fee from `user`
+    /// into the vault, updates `FeesCollected` and `UserVolume`, and emits
+    /// `fee_collected`.
+    ///
+    /// If `FeeStructure::enabled = false`, returns `Ok(0)` immediately.
+    ///
+    /// # Arguments
+    /// * `user`   - The user paying the fee (must authorize)
+    /// * `token`  - Token in which the fee is collected
+    /// * `amount` - The transaction amount on which the fee is based
+    ///
+    /// # Returns
+    /// The fee amount collected (0 if fees are disabled or fee rounds to zero).
+    pub fn collect_execution_fee(
+        env: Env,
+        user: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<i128, VaultError> {
+        user.require_auth();
+
+        let fee_structure = storage::get_fee_structure(&env);
+        if !fee_structure.enabled {
+            return Ok(0);
+        }
+
+        let fee_calc = Self::calculate_fee_internal(&env, &user, &token, amount);
+        if fee_calc.final_fee == 0 {
+            return Ok(0);
+        }
+
+        // Transfer fee from user into vault
+        token::transfer_to_vault(&env, &token, &user, fee_calc.final_fee);
+
+        // Update accounting
+        storage::add_fees_collected(&env, &token, fee_calc.final_fee);
+        storage::add_user_volume(&env, &user, &token, amount);
+
+        events::emit_fee_collected(
+            &env,
+            &user,
+            &token,
+            amount,
+            fee_calc.final_fee,
+            fee_calc.fee_bps,
+            fee_calc.reputation_discount_applied,
+        );
+
+        storage::extend_instance_ttl(&env);
+        Ok(fee_calc.final_fee)
+    }
+
     /// Get total fees collected for a specific token.
     pub fn get_fees_collected(env: Env, token: Address) -> i128 {
         storage::get_fees_collected(&env, &token)
@@ -3167,68 +5697,39 @@ impl VaultDAO {
         storage::get_user_volume(&env, &user, &token)
     }
 
-    // ========================================================================
-    // Tiered Recurring-Payment Fee System (Issue: feature/tiered-fee-system)
-    // ========================================================================
-
-    /// Configure fee tiers for the recurring-payment fee system.
+    /// Withdraw accumulated protocol fees for a specific token to a recipient.
     ///
-    /// Tiers must be sorted ascending by `volume_threshold`.  Each tier's
-    /// `fee_bps` must be in the range [1, 10_000].  A maximum of 5 tiers is
-    /// allowed.  Pass an empty Vec to disable fee collection for recurring
-    /// payments.  `volume_window` is in ledgers; 0 selects the 30-day default.
-    pub fn set_fee_tiers(
+    /// Only Admin can call this. Transfers the full accumulated fee balance for
+    /// `token` from the vault to `recipient` and resets the counter to zero.
+    ///
+    /// # Arguments
+    /// * `admin`     - Admin address (must authorize)
+    /// * `token`     - Token contract address whose fees to withdraw
+    /// * `recipient` - Address that receives the fees
+    pub fn withdraw_fees(
         env: Env,
         admin: Address,
-        tiers: Vec<FeeTier>,
-        volume_window: u64,
-    ) -> Result<(), VaultError> {
+        token: Address,
+        recipient: Address,
+    ) -> Result<i128, VaultError> {
         admin.require_auth();
-        let role = storage::get_role(&env, &admin);
-        if role != types::Role::Admin {
+        if storage::get_role(&env, &admin) != Role::Admin {
             return Err(VaultError::Unauthorized);
         }
 
-        if tiers.len() > 5 {
-            return Err(VaultError::InvalidAmount); // Exceeds max 5 tiers
+        let amount = storage::get_fees_collected(&env, &token);
+        if amount == 0 {
+            return Ok(0);
         }
 
-        for i in 0..tiers.len() {
-            let tier = tiers.get(i).unwrap();
-            if tier.fee_bps < 1 || tier.fee_bps > 10_000 {
-                return Err(VaultError::InvalidAmount);
-            }
-            if tier.volume_threshold < 0 {
-                return Err(VaultError::InvalidAmount);
-            }
-            if i > 0 {
-                let prev = tiers.get(i - 1).unwrap();
-                if tier.volume_threshold <= prev.volume_threshold {
-                    return Err(VaultError::InvalidAmount); // Must be strictly ascending
-                }
-            }
-        }
+        // Reset collected balance before transfer (checks-effects-interactions)
+        let key = crate::storage::FeatureKey::FeesCollected(token.clone());
+        env.storage().persistent().set(&key, &0i128);
 
-        let config = TierFeeConfig {
-            tiers,
-            volume_window,
-        };
-        storage::set_tier_fee_config(&env, &config);
+        token::transfer(&env, &token, &recipient, amount);
+
         storage::extend_instance_ttl(&env);
-        Ok(())
-    }
-
-    /// Return the current tier fee configuration, or None if not yet set.
-    pub fn get_fee_tiers(env: Env) -> Option<TierFeeConfig> {
-        storage::get_tier_fee_config(&env)
-    }
-
-    /// Return the fee rate (in basis points) that applies to `payer` right now,
-    /// based on their cumulative volume within the current window.
-    ///
-    /// Returns 0 if no tier configuration is set.
-    pub fn get_applicable_fee(env: Env, payer: Address) -> u32 {
-        Self::applicable_fee_bps(&env, &payer)
+        Ok(amount)
     }
 
     // ========================================================================
@@ -3236,9 +5737,36 @@ impl VaultDAO {
     // ========================================================================
 
     /// Get the reputation record for an address.
+    ///
+    /// Retrieves the reputation score and statistics for a given address.
+    /// Automatically applies reputation decay based on the time since last participation.
+    /// The returned reputation is updated in storage after decay is applied.
+    ///
+    /// # Arguments
+    /// * `addr` - The address to retrieve reputation for
+    ///
+    /// # Returns
+    /// A `Reputation` struct containing:
+    /// - `score` - Composite reputation score (0-1000, higher = more trusted)
+    /// - `proposals_executed` - Total proposals successfully executed by this address
+    /// - `proposals_rejected` - Total proposals rejected
+    /// - `proposals_created` - Total proposals created
+    /// - `approvals_given` - Total approvals given
+    /// - `abstentions_given` - Total abstentions recorded
+    /// - `participation_count` - Total governance votes cast
+    /// - `last_participation_ledger` - Ledger of last governance vote
+    /// - `last_decay_ledger` - Ledger when reputation was last decayed
+    ///
+    /// # Reputation Scoring
+    /// - Proposer execution: +10 points
+    /// - Approver execution: +5 points per approver
+    /// - Approval vote: +2 points
+    /// - Rejection penalty: -20 points
+    /// - Decay: Score decreases over time without participation
     pub fn get_reputation(env: Env, addr: Address) -> Reputation {
         let mut rep = storage::get_reputation(&env, &addr);
         storage::apply_reputation_decay(&env, &mut rep);
+        storage::set_reputation(&env, &addr, &rep);
         rep
     }
 
@@ -3279,6 +5807,45 @@ impl VaultDAO {
         storage::get_notification_prefs(&env, &addr)
     }
 
+    /// Get addresses subscribed to a specific notification event type.
+    /// Scans the role index and returns up to 100 addresses that have the given
+    /// notification type enabled. `event_type` must be one of:
+    /// "proposal", "approval", "execution", "rejection", "expiry".
+    pub fn get_addresses_subscribed_to(
+        env: Env,
+        event_type: Symbol,
+    ) -> Vec<Address> {
+        let index = storage::get_role_index(&env);
+        let mut result: Vec<Address> = Vec::new(&env);
+        let cap: u32 = 100;
+
+        for i in 0..index.len() {
+            if result.len() >= cap {
+                break;
+            }
+            if let Some(addr) = index.get(i) {
+                let prefs = storage::get_notification_prefs(&env, &addr);
+                let subscribed = if event_type == Symbol::new(&env, "proposal") {
+                    prefs.notify_on_proposal
+                } else if event_type == Symbol::new(&env, "approval") {
+                    prefs.notify_on_approval
+                } else if event_type == Symbol::new(&env, "execution") {
+                    prefs.notify_on_execution
+                } else if event_type == Symbol::new(&env, "rejection") {
+                    prefs.notify_on_rejection
+                } else if event_type == Symbol::new(&env, "expiry") {
+                    prefs.notify_on_expiry
+                } else {
+                    false
+                };
+                if subscribed {
+                    result.push_back(addr);
+                }
+            }
+        }
+        result
+    }
+
     // ========================================================================
     // Gas Limit Configuration (Issue: feature/gas-limits)
     // ========================================================================
@@ -3290,7 +5857,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -3326,8 +5893,47 @@ impl VaultDAO {
     // ========================================================================
 
     /// Get vault-wide performance metrics.
+    ///
+    /// # Returns
+    /// `VaultMetrics` struct containing cumulative performance data:
+    /// - `total_proposals`: Total proposals ever created
+    /// - `executed_count`: Successfully executed proposals
+    /// - `rejected_count`: Rejected proposals
+    /// - `expired_count`: Proposals that expired without execution
+    /// - `total_execution_time_ledgers`: Cumulative ledgers from creation to execution
+    /// - `total_gas_used`: Total gas consumed across all executions
+    /// - `last_updated_ledger`: Ledger sequence when metrics were last updated
+    ///
+    /// # Derived Metrics
+    /// - `success_rate_bps()`: Success rate in basis points (0-10000 = 0-100%)
+    /// - `avg_execution_time_ledgers()`: Average ledgers per execution (0 if none executed)
+    ///
+    /// # Behavior
+    /// - Returns default metrics (all zeros) if no proposals have been created
+    /// - Metrics are cumulative and never reset
+    /// - Updated on proposal creation, execution, rejection, and expiration
+    /// - Thread-safe: uses instance storage with atomic updates
+    ///
+    /// # Units & Scaling
+    /// - Ledger times: Soroban ledger sequence numbers (1 ledger ≈ 5 seconds)
+    /// - Gas units: Soroban gas units (varies by operation)
+    /// - Basis points: 0-10000 (0-100%), 100 bps = 1%
+    ///
+    /// # Example
+    /// ```ignore
+    /// let metrics = VaultDAO::get_metrics(env);
+    /// let success_rate = metrics.success_rate_bps(); // 0-10000
+    /// let avg_time = metrics.avg_execution_time_ledgers(); // ledgers
+    /// ```
     pub fn get_metrics(env: Env) -> VaultMetrics {
         storage::get_metrics(&env)
+    }
+
+    /// Get aggregated metrics for a range of weeks (inclusive).
+    /// Week numbers use the same formula as spending limits: timestamp / 604800.
+    /// Returns cumulative totals across all stored buckets in the range.
+    pub fn get_metrics_for_period(env: Env, from_week: u64, to_week: u64) -> VaultMetrics {
+        storage::get_metrics_for_period(&env, from_week, to_week)
     }
 
     // ========================================================================
@@ -3335,30 +5941,35 @@ impl VaultDAO {
     // ========================================================================
 
     /// Validate dependency IDs for a new proposal.
-    fn validate_dependencies(
-        env: &Env,
+    /// Returns `DependencyDepthExceeded` on cycles or chains that exceed the depth limit.
+    pub fn validate_dependencies(
+        env: Env,
         proposal_id: u64,
-        depends_on: &Vec<u64>,
+        depends_on: Vec<u64>,
     ) -> Result<(), VaultError> {
-        let mut seen = Vec::new(env);
+        let mut seen = Vec::new(&env);
 
         for i in 0..depends_on.len() {
             let dependency_id = depends_on.get(i).unwrap();
 
+            // Direct self-reference
             if dependency_id == proposal_id {
-                return Err(VaultError::InvalidAmount);
+                return Err(VaultError::DependencyDepthExceeded);
             }
             if seen.contains(dependency_id) {
-                return Err(VaultError::InvalidAmount);
+                return Err(VaultError::DependencyDepthExceeded);
             }
-            if !storage::proposal_exists(env, dependency_id) {
+            if !storage::proposal_exists(&env, dependency_id) {
                 return Err(VaultError::ProposalNotFound);
             }
 
-            // If any dependency can reach this proposal ID, adding the edge would form a cycle.
-            let mut visited = Vec::new(env);
-            if Self::has_dependency_path(env, dependency_id, proposal_id, &mut visited)? {
-                return Err(VaultError::InvalidAmount);
+            // Transitive cycle check: walk the existing dep graph from this
+            // dependency; if it can reach proposal_id, adding this edge forms a cycle.
+            let mut visited = Vec::new(&env);
+            match Self::has_dependency_path(&env, dependency_id, proposal_id, &mut visited) {
+                Ok(true) => return Err(VaultError::DependencyDepthExceeded),
+                Err(e) => return Err(e),
+                _ => {}
             }
 
             seen.push_back(dependency_id);
@@ -3369,22 +5980,28 @@ impl VaultDAO {
 
     /// Ensure all dependencies are executed and no circular references exist.
     fn ensure_dependencies_executable(env: &Env, proposal: &Proposal) -> Result<(), VaultError> {
+        let current_ledger = env.ledger().sequence() as u64;
         for i in 0..proposal.depends_on.len() {
             let dependency_id = proposal.depends_on.get(i).unwrap();
 
             if dependency_id == proposal.id {
-                return Err(VaultError::InvalidAmount);
+                return Err(VaultError::DependencyDepthExceeded);
             }
 
             let mut visited = Vec::new(env);
-            if Self::has_dependency_path(env, dependency_id, proposal.id, &mut visited)? {
-                return Err(VaultError::InvalidAmount);
+            match Self::has_dependency_path(env, dependency_id, proposal.id, &mut visited) {
+                Ok(true) => return Err(VaultError::DependencyDepthExceeded),
+                Err(e) => return Err(e),
+                _ => {}
             }
 
             let dependency = storage::get_proposal(env, dependency_id)
                 .map_err(|_| VaultError::ProposalNotFound)?;
             if dependency.status != ProposalStatus::Executed {
                 return Err(VaultError::ProposalNotApproved);
+            }
+            if dependency.execution_ledger == 0 || dependency.execution_ledger >= current_ledger {
+                return Err(VaultError::DependencyNotExecuted);
             }
         }
 
@@ -3400,6 +6017,11 @@ impl VaultDAO {
     ) -> Result<bool, VaultError> {
         if from_id == target_id {
             return Ok(true);
+        }
+        // Enforce traversal depth cap to avoid deep recursion/DoS
+        const MAX_DEP_DEPTH: u32 = 16;
+        if visited.len() as u32 >= MAX_DEP_DEPTH {
+            return Err(VaultError::DependencyDepthExceeded);
         }
         if visited.contains(from_id) {
             return Ok(false);
@@ -3419,8 +6041,108 @@ impl VaultDAO {
         Ok(false)
     }
 
+    /// Validate that a proposal status transition is allowed by the state machine.
+    ///
+    /// Valid transitions:
+    ///   Pending  → Approved, Expired, Cancelled, Rejected, Vetoed
+    ///   Approved → Executed, Scheduled, Cancelled
+    ///   Scheduled → Executed, Cancelled
+    ///
+    /// All other transitions return `VaultError::InvalidStatusTransition`.
+    /// This is a pure function with no storage access.
+    pub fn validate_status_transition(
+        from: ProposalStatus,
+        to: ProposalStatus,
+    ) -> Result<(), VaultError> {
+        let valid = match (&from, &to) {
+            (ProposalStatus::Pending, ProposalStatus::Approved) => true,
+            (ProposalStatus::Pending, ProposalStatus::Expired) => true,
+            (ProposalStatus::Pending, ProposalStatus::Cancelled) => true,
+            (ProposalStatus::Pending, ProposalStatus::Rejected) => true,
+            (ProposalStatus::Pending, ProposalStatus::Vetoed) => true,
+            (ProposalStatus::Approved, ProposalStatus::Executed) => true,
+            (ProposalStatus::Approved, ProposalStatus::Scheduled) => true,
+            (ProposalStatus::Approved, ProposalStatus::Cancelled) => true,
+            (ProposalStatus::Scheduled, ProposalStatus::Executed) => true,
+            (ProposalStatus::Scheduled, ProposalStatus::Cancelled) => true,
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(VaultError::InvalidStatusTransition)
+        }
+    }
+
+    /// Slash (or fully return) insurance on proposal rejection.
+    /// Slashed portion goes to the insurance pool counter; remainder is returned to proposer.
+    fn slash_insurance_on_rejection(env: &Env, proposal: &Proposal) {
+        let insurance_config = storage::get_insurance_config(env);
+        if insurance_config.enabled && proposal.insurance_amount > 0 {
+            let slashed =
+                proposal.insurance_amount * (insurance_config.slash_percentage as i128) / 100;
+            let kept = proposal.insurance_amount.saturating_sub(slashed);
+            if kept > 0 {
+                token::transfer(env, &proposal.token, &proposal.proposer, kept);
+            }
+            if slashed > 0 {
+                storage::add_to_insurance_pool(env, &proposal.token, slashed);
+            }
+            events::emit_insurance_slashed(env, proposal.id, &proposal.proposer, slashed, kept);
+        } else if proposal.insurance_amount > 0 {
+            // Insurance disabled — return in full
+            token::transfer(
+                env,
+                &proposal.token,
+                &proposal.proposer,
+                proposal.insurance_amount,
+            );
+            events::emit_insurance_returned(
+                env,
+                proposal.id,
+                &proposal.proposer,
+                proposal.insurance_amount,
+            );
+        }
+    }
+
+    fn slash_stake_on_rejection(env: &Env, proposal: &Proposal) {
+        if proposal.stake_amount == 0 {
+            return;
+        }
+        if let Some(mut stake_record) = storage::get_stake_record(env, proposal.id) {
+            if stake_record.refunded || stake_record.slashed {
+                return;
+            }
+            let staking_config = storage::get_staking_config(env);
+            let slash_amount = if staking_config.enabled {
+                proposal.stake_amount * staking_config.slash_percentage as i128 / 100
+            } else {
+                0
+            };
+            let remainder = proposal.stake_amount.saturating_sub(slash_amount);
+            if remainder > 0 {
+                token::transfer(env, &proposal.token, &proposal.proposer, remainder);
+            }
+            if slash_amount > 0 {
+                storage::add_to_stake_pool(env, &proposal.token, slash_amount);
+            }
+            stake_record.slashed = slash_amount > 0;
+            stake_record.slashed_amount = slash_amount;
+            stake_record.released_at = env.ledger().sequence() as u64;
+            storage::set_stake_record(env, &stake_record);
+            events::emit_stake_slashed(
+                env,
+                proposal.id,
+                &proposal.proposer,
+                slash_amount,
+                remainder,
+            );
+        }
+    }
+
     /// Calculate effective threshold based on the configured ThresholdStrategy.
-    fn calculate_threshold(config: &Config, amount: &i128) -> u32 {
+    fn calculate_threshold(env: &Env, config: &Config, amount: &i128, created_at: u64) -> u32 {
         match &config.threshold_strategy {
             ThresholdStrategy::Fixed => config.threshold,
             ThresholdStrategy::Percentage(pct) => {
@@ -3442,12 +6164,17 @@ impl VaultDAO {
                 threshold
             }
             ThresholdStrategy::TimeBased(tb) => {
-                // Simplified: use initial threshold (reduction checked at execution time)
-                tb.initial_threshold
+                let current_ledger = env.ledger().sequence() as u64;
+                if current_ledger >= created_at + tb.reduction_delay {
+                    tb.reduced_threshold
+                } else {
+                    tb.initial_threshold
+                }
             }
         }
     }
 
+    #[allow(dead_code)]
     fn integer_sqrt(value: i128) -> u32 {
         if value <= 0 {
             return 0;
@@ -3461,6 +6188,7 @@ impl VaultDAO {
         x as u32
     }
 
+    #[allow(dead_code)]
     fn validate_voting_strategy(strategy: &VotingStrategy) -> Result<(), VaultError> {
         match strategy {
             VotingStrategy::Simple => Ok(()),
@@ -3470,23 +6198,132 @@ impl VaultDAO {
         }
     }
 
+    /// Returns the effective quorum: absolute takes precedence; falls back to percentage-derived.
+    fn effective_quorum(config: &Config) -> u32 {
+        if config.quorum > 0 {
+            return config.quorum;
+        }
+        if config.quorum_percentage > 0 {
+            let n = config.signers.len();
+            return (n * config.quorum_percentage).div_ceil(100);
+        }
+        0
+    }
+
+    fn remove_address_from_vec(env: &Env, values: &Vec<Address>, target: &Address) -> Vec<Address> {
+        let mut updated = Vec::new(env);
+        for value in values.iter() {
+            if value != *target {
+                updated.push_back(value);
+            }
+        }
+        updated
+    }
+
+    fn reevaluate_vote_state(
+        env: &Env,
+        config: &Config,
+        proposal_id: u64,
+        proposal: &mut Proposal,
+        current_ledger: u64,
+        previous_quorum_votes: u32,
+    ) {
+        let required_quorum = Self::effective_quorum(config);
+        let approval_count = proposal.approvals.len();
+        let quorum_votes = approval_count + proposal.abstentions.len();
+        let was_quorum_reached = required_quorum == 0 || previous_quorum_votes >= required_quorum;
+        let quorum_reached = required_quorum == 0 || quorum_votes >= required_quorum;
+        let threshold_reached = Self::is_threshold_reached(env, config, proposal);
+        let previous_status = proposal.status.clone();
+
+        if required_quorum > 0 && !was_quorum_reached && quorum_reached {
+            events::emit_quorum_reached(env, proposal_id, quorum_votes, required_quorum);
+        }
+
+        if threshold_reached && quorum_reached {
+            if let Some(execution_time) = proposal.execution_time {
+                proposal.status = ProposalStatus::Scheduled;
+                proposal.unlock_ledger = 0;
+                if previous_status != ProposalStatus::Scheduled {
+                    events::emit_proposal_scheduled(env, proposal_id, execution_time, current_ledger);
+                }
+            } else {
+                proposal.status = ProposalStatus::Approved;
+                proposal.unlock_ledger = if proposal.amount >= config.timelock_threshold {
+                    current_ledger + config.timelock_delay
+                } else {
+                    0
+                };
+                if previous_status != ProposalStatus::Approved {
+                    events::emit_proposal_ready(env, proposal_id, proposal.unlock_ledger);
+                }
+            }
+        } else {
+            proposal.status = ProposalStatus::Pending;
+            proposal.unlock_ledger = 0;
+        }
+    }
+
     fn is_threshold_reached(env: &Env, config: &Config, proposal: &Proposal) -> bool {
         let strategy = storage::get_voting_strategy(env);
-        match strategy {
-            VotingStrategy::Simple => {
-                proposal.approvals.len() >= Self::calculate_threshold(config, &proposal.amount)
+        
+        // Check if this is a time-based strategy and threshold should be reduced
+        if let ThresholdStrategy::TimeBased(tb) = &config.threshold_strategy {
+            let current_ledger = env.ledger().sequence() as u64;
+            let reduction_eligible = current_ledger >= proposal.created_at + tb.reduction_delay;
+            let already_reduced = storage::is_threshold_reduced(env, proposal.id);
+            
+            if reduction_eligible && !already_reduced {
+                // First time this proposal qualifies for reduction - emit event and mark as reduced
+                let old_threshold = tb.initial_threshold;
+                let new_threshold = tb.reduced_threshold;
+                
+                storage::set_threshold_reduced(env, proposal.id);
+                events::emit_threshold_reduced(env, proposal.id, old_threshold, new_threshold);
             }
-            VotingStrategy::Weighted => {
-                let required = Self::calculate_threshold(config, &proposal.amount);
+        }
+        
+        // Calculate threshold (this will now use the reduced threshold if applicable)
+        let required = Self::calculate_threshold(env, config, &proposal.amount, proposal.created_at);
+
+        match strategy {
+            VotingStrategy::Simple | VotingStrategy::Weighted | VotingStrategy::Conviction => {
                 proposal.approvals.len() >= required
             }
             VotingStrategy::Quadratic => {
-                let required = Self::calculate_threshold(config, &proposal.amount);
-                proposal.approvals.len() >= required
-            }
-            VotingStrategy::Conviction => {
-                let required = Self::calculate_threshold(config, &proposal.amount);
-                proposal.approvals.len() >= required
+                // Each voter's weight = isqrt(token_lock.amount).
+                // Threshold check: weighted_approvals >= required * avg_weight
+                // where avg_weight = total_weighted_votes / total_voters (or 1 if no locks).
+                //
+                // Uses u128 intermediate arithmetic to prevent overflow.
+                let mut weighted_approvals: u128 = 0;
+                let mut total_weighted: u128 = 0;
+                let total_voters = proposal.snapshot_signers.len() as u128;
+
+                for i in 0..proposal.approvals.len() {
+                    if let Some(voter) = proposal.approvals.get(i) {
+                        let w = Self::get_snapshot_voting_power(env, &voter) as u128;
+                        weighted_approvals = weighted_approvals.saturating_add(w);
+                    }
+                }
+
+                // Compute average weight across all snapshot signers
+                for i in 0..proposal.snapshot_signers.len() {
+                    if let Some(signer) = proposal.snapshot_signers.get(i) {
+                        let w = Self::get_snapshot_voting_power(env, &signer) as u128;
+                        total_weighted = total_weighted.saturating_add(w);
+                    }
+                }
+
+                let avg_weight = if total_voters > 0 {
+                    total_weighted / total_voters
+                } else {
+                    1
+                };
+                let avg_weight = avg_weight.max(1);
+
+                // weighted_approvals >= required * avg_weight
+                weighted_approvals >= (required as u128).saturating_mul(avg_weight)
             }
         }
     }
@@ -3510,65 +6347,135 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Evaluate whether all/any execution conditions are satisfied.
+    /// Evaluate whether execution conditions are satisfied using short-circuit logic.
+    ///
+    /// # Short-Circuit Behavior (gas savings)
+    /// - `And`: returns false immediately on the first failing condition — no further oracle
+    ///   calls are made once the outcome is determined.
+    /// - `Or`: returns true immediately on the first passing condition — remaining conditions
+    ///   (and their oracle calls) are skipped.
+    /// - `Majority`: evaluates all conditions but stops early once a majority is impossible
+    ///   or already guaranteed.
+    /// - `None`: always passes without evaluating any condition.
+    ///
+    /// Oracle calls are deduplicated per unique asset address: each asset is queried at most
+    /// once per evaluation, with the result cached in a local map.
     fn evaluate_conditions(env: &Env, proposal: &Proposal) -> Result<(), VaultError> {
-        let current_ledger = env.ledger().sequence() as u64;
-        let mut results = Vec::new(env);
-
-        for i in 0..proposal.conditions.len() {
-            if let Some(cond) = proposal.conditions.get(i) {
-                let satisfied = match cond {
-                    Condition::BalanceAbove(min_balance) => {
-                        token::balance(env, &proposal.token) > min_balance
-                    }
-                    Condition::DateAfter(after_ledger) => current_ledger > after_ledger,
-                    Condition::DateBefore(before_ledger) => current_ledger < before_ledger,
-                    Condition::PriceAbove(asset, threshold) => {
-                        if let Ok(price) = Self::get_asset_price(env, asset.clone()) {
-                            price >= threshold
-                        } else {
-                            false
-                        }
-                    }
-                    Condition::PriceBelow(asset, threshold) => {
-                        if let Ok(price) = Self::get_asset_price(env, asset.clone()) {
-                            price <= threshold
-                        } else {
-                            false
-                        }
-                    }
-                };
-                results.push_back(satisfied);
-            }
+        // ConditionLogic::None always passes — no evaluation needed.
+        if proposal.condition_logic == ConditionLogic::None || proposal.conditions.is_empty() {
+            return Ok(());
         }
 
-        let all_passed = match proposal.condition_logic {
-            ConditionLogic::And => {
-                let mut all = true;
-                for i in 0..results.len() {
-                    if !results.get(i).unwrap_or(false) {
-                        all = false;
-                        break;
-                    }
-                }
-                all
-            }
-            ConditionLogic::Or => {
-                let mut any = false;
-                for i in 0..results.len() {
-                    if results.get(i).unwrap_or(false) {
-                        any = true;
-                        break;
-                    }
-                }
-                any
-            }
-        };
+        let current_ledger = env.ledger().sequence() as u64;
+        // Cache oracle prices per asset to avoid redundant cross-contract calls.
+        let mut price_cache: Map<Address, i128> = Map::new(env);
 
-        if all_passed {
-            Ok(())
-        } else {
-            Err(VaultError::ProposalNotApproved) // repurpose for "conditions not met"
+        // Helper closure: resolve price with cache.
+        // Returns Ok(price) or Err on oracle failure.
+        let get_price =
+            |cache: &mut Map<Address, i128>, asset: &Address| -> Result<i128, VaultError> {
+                if let Some(cached) = cache.get(asset.clone()) {
+                    return Ok(cached);
+                }
+                let price = Self::get_asset_price(env, asset.clone())?;
+                cache.set(asset.clone(), price);
+                Ok(price)
+            };
+
+        let total = proposal.conditions.len();
+
+        match proposal.condition_logic {
+            // Short-circuit And: fail fast on first false condition.
+            ConditionLogic::And => {
+                for i in 0..total {
+                    if let Some(cond) = proposal.conditions.get(i) {
+                        let satisfied = match cond {
+                            Condition::BalanceAbove(min) => {
+                                token::balance(env, &proposal.token) > min
+                            }
+                            Condition::DateAfter(after) => current_ledger > after,
+                            Condition::DateBefore(before) => current_ledger < before,
+                            Condition::PriceAbove(asset, threshold) => {
+                                get_price(&mut price_cache, &asset)? >= threshold
+                            }
+                            Condition::PriceBelow(asset, threshold) => {
+                                get_price(&mut price_cache, &asset)? <= threshold
+                            }
+                        };
+                        if !satisfied {
+                            return Err(VaultError::ConditionsNotMet);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            // Short-circuit Or: succeed fast on first true condition.
+            ConditionLogic::Or => {
+                for i in 0..total {
+                    if let Some(cond) = proposal.conditions.get(i) {
+                        let satisfied = match cond {
+                            Condition::BalanceAbove(min) => {
+                                token::balance(env, &proposal.token) > min
+                            }
+                            Condition::DateAfter(after) => current_ledger > after,
+                            Condition::DateBefore(before) => current_ledger < before,
+                            Condition::PriceAbove(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MIN) >= threshold
+                            }
+                            Condition::PriceBelow(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MAX) <= threshold
+                            }
+                        };
+                        if satisfied {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(VaultError::ConditionsNotMet)
+            }
+            // Majority: more than half must pass. Short-circuits when majority is impossible
+            // or already guaranteed.
+            ConditionLogic::Majority => {
+                let needed = total / 2 + 1;
+                let mut passed: u32 = 0;
+                let mut failed: u32 = 0;
+                for i in 0..total {
+                    if let Some(cond) = proposal.conditions.get(i) {
+                        let satisfied = match cond {
+                            Condition::BalanceAbove(min) => {
+                                token::balance(env, &proposal.token) > min
+                            }
+                            Condition::DateAfter(after) => current_ledger > after,
+                            Condition::DateBefore(before) => current_ledger < before,
+                            Condition::PriceAbove(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MIN) >= threshold
+                            }
+                            Condition::PriceBelow(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MAX) <= threshold
+                            }
+                        };
+                        if satisfied {
+                            passed += 1;
+                            if passed >= needed {
+                                return Ok(());
+                            }
+                        } else {
+                            failed += 1;
+                            // Remaining conditions cannot make up a majority.
+                            if failed > total - needed {
+                                return Err(VaultError::ConditionsNotMet);
+                            }
+                        }
+                    }
+                }
+                if passed >= needed {
+                    Ok(())
+                } else {
+                    Err(VaultError::ConditionsNotMet)
+                }
+            }
+            // None always passes — handled above, but exhaustive match requires this arm.
+            ConditionLogic::None => Ok(()),
         }
     }
 
@@ -3579,8 +6486,11 @@ impl VaultDAO {
         oracle_config: crate::VaultOracleConfig,
     ) -> Result<(), VaultError> {
         admin.require_auth();
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::InsufficientRole);
+        }
+        if oracle_config.max_staleness == 0 {
+            return Err(VaultError::InvalidAmount);
         }
         storage::set_oracle_config(
             &env,
@@ -3590,11 +6500,23 @@ impl VaultDAO {
         Ok(())
     }
 
+    /// Set oracle configuration (alias for `update_oracle_config`).
+    ///
+    /// Stores the oracle address and staleness threshold used by
+    /// `PriceAbove` / `PriceBelow` condition evaluation.
+    pub fn set_oracle_config(
+        env: Env,
+        admin: Address,
+        oracle_config: crate::VaultOracleConfig,
+    ) -> Result<(), VaultError> {
+        Self::update_oracle_config(env, admin, oracle_config)
+    }
+
     /// Get the current price of an asset in USD from the configured oracle.
     pub fn get_asset_price(env: &Env, asset: Address) -> Result<i128, VaultError> {
         let oracle_cfg = match storage::get_oracle_config(env) {
             crate::OptionalVaultOracleConfig::Some(cfg) => cfg,
-            crate::OptionalVaultOracleConfig::None => return Err(VaultError::NotInitialized),
+            crate::OptionalVaultOracleConfig::None => return Err(VaultError::OracleNotConfigured),
         };
 
         // Interface with standard Oracle contract
@@ -3602,14 +6524,17 @@ impl VaultDAO {
         let price_data: Option<VaultPriceData> = env.invoke_contract(
             &oracle_cfg.address,
             &Symbol::new(env, "lastprice"),
-            Vec::from_array(env, [asset.into_val(env)]),
+            Vec::from_array(env, [asset.clone().into_val(env)]),
         );
 
         match price_data {
             Some(data) => {
+                // Compare ledger sequences: max_staleness is in ledgers, data.timestamp is the
+                // ledger sequence at which the price was recorded.
                 let current_ledger = env.ledger().sequence() as u64;
                 if current_ledger.saturating_sub(data.timestamp) > oracle_cfg.max_staleness as u64 {
-                    return Err(VaultError::RetryError); // Staleness error
+                    events::emit_oracle_price_stale(env, &asset, data.timestamp, current_ledger);
+                    return Err(VaultError::OraclePriceStale);
                 }
                 Ok(data.price)
             }
@@ -3618,18 +6543,69 @@ impl VaultDAO {
     }
 
     /// Convert a token amount to USD using the oracle price.
+    ///
+    /// # Units & Scaling
+    /// - Input `amount`: Token amount in stroops (smallest unit, 7 decimals)
+    /// - Oracle price: USD price scaled by 10^7 (standard Stellar convention)
+    /// - Output: USD value in cents (scaled by 10^7 for precision)
+    /// - Formula: `(amount * price) / 10_000_000`
+    ///
+    /// # Errors
+    /// - `NotInitialized` - Oracle not configured
+    /// - `InvalidAmount` - Asset price not found
+    /// - `RetryError` - Price data is stale
     pub fn convert_to_usd(env: &Env, asset: Address, amount: i128) -> Result<i128, VaultError> {
+        if amount == 0 {
+            return Ok(0);
+        }
         let price = Self::get_asset_price(env, asset)?;
-        // Assuming price is scaled by some fixed decimals (e.g. 7 or 14)
-        // result = amount * price / 10^decimals
+        // Price is in USD scaled by 10^7, amount is in stroops (10^-7 units)
+        // Result: (amount * price) / 10^7 = USD value in cents
         Ok(amount.saturating_mul(price) / 10_000_000)
     }
 
+    /// Get the total USD valuation of the vault's holdings across multiple assets.
+    ///
+    /// # Parameters
+    /// - `assets`: Vector of token contract addresses to include in valuation
+    ///
+    /// # Returns
+    /// Total portfolio value in USD (scaled by 10^7 for precision)
+    ///
+    /// # Behavior
+    /// - Skips assets with zero balance
+    /// - Uses saturating arithmetic to prevent overflow
+    /// - Queries oracle for current price of each asset
+    /// - Returns error if any asset price cannot be determined
+    ///
+    /// # Units & Scaling
+    /// - Input: Asset addresses (any token contract)
+    /// - Output: Total USD value (scaled by 10^7)
+    /// - Each asset balance: stroops (10^-7 units)
+    /// - Each asset price: USD per token (scaled by 10^7)
+    ///
+    /// # Errors
+    /// - `NotInitialized` - Oracle not configured
+    /// - `InvalidAmount` - Any asset price not found
+    /// - `RetryError` - Any asset price is stale
+    ///
+    /// # Example
+    /// ```ignore
+    /// let assets = vec![usdc_address, xlm_address];
+    /// let total_usd = VaultDAO::get_portfolio_valuation(env, assets)?;
+    /// // total_usd is in USD cents (scaled by 10^7)
+    /// ```
     pub fn get_portfolio_valuation(env: Env, assets: Vec<Address>) -> Result<i128, VaultError> {
+        // Empty asset list is valid and returns 0
+        if assets.is_empty() {
+            return Ok(0);
+        }
+
         let mut total_usd = 0i128;
 
         for asset in assets.into_iter() {
             let balance = token::balance(&env, &asset);
+            // Skip zero balances to avoid unnecessary oracle queries
             if balance > 0 {
                 let usd_value = Self::convert_to_usd(&env, asset, balance)?;
                 total_usd = total_usd.saturating_add(usd_value);
@@ -3744,75 +6720,6 @@ impl VaultDAO {
     }
 
     // ========================================================================
-    // Tiered Fee Private Helpers
-    // ========================================================================
-
-    /// Returns the fee rate (bps) applicable to `payer` at the current ledger.
-    /// Walks the tier list (sorted ascending by volume_threshold) and returns
-    /// the highest tier whose threshold the payer's effective window volume meets.
-    /// Falls back to the first tier's fee if no threshold is crossed.
-    /// Returns 0 when no TierFeeConfig exists.
-    fn applicable_fee_bps(env: &Env, payer: &Address) -> u32 {
-        let Some(tier_config) = storage::get_tier_fee_config(env) else {
-            return 0;
-        };
-        if tier_config.tiers.is_empty() {
-            return 0;
-        }
-
-        let cv = storage::get_cumulative_volume(env, payer);
-        let current_ledger = env.ledger().sequence() as u64;
-        let window = if tier_config.volume_window == 0 {
-            storage::VOLUME_WINDOW_DEFAULT
-        } else {
-            tier_config.volume_window
-        };
-
-        let effective_volume = if current_ledger.saturating_sub(cv.window_start) >= window {
-            0 // Window expired; tier resets to default on next write
-        } else {
-            cv.volume
-        };
-
-        // Start with the first tier as the fallback (default rate)
-        let mut fee_bps = tier_config.tiers.get(0).unwrap().fee_bps;
-        for tier in tier_config.tiers.iter() {
-            if effective_volume >= tier.volume_threshold {
-                fee_bps = tier.fee_bps;
-            } else {
-                break; // Tiers are sorted ascending; no further matches possible
-            }
-        }
-        fee_bps
-    }
-
-    /// Accumulates `amount` into the payer's CumulativeVolume for the current
-    /// fee window.  Rolls the window over (resetting to 0) if the configured
-    /// window duration has elapsed since `window_start`.
-    fn update_cumulative_volume(env: &Env, payer: &Address, amount: i128) {
-        let Some(tier_config) = storage::get_tier_fee_config(env) else {
-            return;
-        };
-        let window = if tier_config.volume_window == 0 {
-            storage::VOLUME_WINDOW_DEFAULT
-        } else {
-            tier_config.volume_window
-        };
-
-        let mut cv = storage::get_cumulative_volume(env, payer);
-        let current_ledger = env.ledger().sequence() as u64;
-
-        if current_ledger.saturating_sub(cv.window_start) >= window {
-            // Window rolled over: start a fresh window
-            cv.volume = amount;
-            cv.window_start = current_ledger;
-        } else {
-            cv.volume = cv.volume.saturating_add(amount);
-        }
-        storage::set_cumulative_volume(env, payer, &cv, window);
-    }
-
-    // ========================================================================
     // Dynamic Fee System (Issue: feature/dynamic-fees)
     // ========================================================================
 
@@ -3851,7 +6758,7 @@ impl VaultDAO {
         let mut fee_bps = fee_structure.base_fee_bps;
         for i in 0..fee_structure.tiers.len() {
             if let Some(tier) = fee_structure.tiers.get(i) {
-                if user_volume >= tier.volume_threshold {
+                if user_volume >= tier.min_volume {
                     fee_bps = tier.fee_bps;
                 } else {
                     break; // Tiers are sorted, so we can stop
@@ -3941,7 +6848,7 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
         storage::set_dex_config(&env, &dex_config);
@@ -3966,7 +6873,7 @@ impl VaultDAO {
         proposer.require_auth();
         let config = storage::get_config(&env)?;
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -4005,6 +6912,7 @@ impl VaultDAO {
             expires_at: calculate_expiration_ledger(&config, &priority, current_ledger),
             unlock_ledger: 0,
             execution_time: None,
+                execution_window_ledgers: 0,
             insurance_amount,
             stake_amount: 0,
             gas_limit: 0,
@@ -4018,6 +6926,7 @@ impl VaultDAO {
             } else {
                 0
             },
+            execution_ledger: 0,
         };
 
         storage::set_proposal(&env, &proposal);
@@ -4036,7 +6945,473 @@ impl VaultDAO {
         Self::update_reputation_on_propose(&env, &proposer);
         storage::metrics_on_proposal(&env);
 
+        // Emit metrics update event
+        let metrics = storage::get_metrics(&env);
+        events::emit_metrics_updated(
+            &env,
+            metrics.executed_count,
+            metrics.rejected_count,
+            metrics.expired_count,
+            metrics.success_rate_bps(),
+        );
+
         Ok(proposal_id)
+    }
+
+    pub fn register_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::Unauthorized);
+        }
+    /// Execute a swap proposal (executors only)
+    /// Execute a swap proposal with proper validation and cross-contract invocation
+    /// 
+    /// This function validates:
+    /// - DEX address is in the enabled_dexs whitelist
+    /// - Price impact is within max_price_impact_bps limits using oracle prices
+    /// - Slippage protection via min_amount_out validation
+    /// 
+    /// Supports all SwapProposal variants:
+    /// - Swap: Token-to-token swaps with slippage protection
+    /// - AddLiquidity: Adding liquidity to DEX pools
+    /// - RemoveLiquidity: Removing liquidity from DEX pools  
+    /// - StakeLp: Staking LP tokens in farms
+    /// - UnstakeLp: Unstaking LP tokens from farms
+    /// - ClaimRewards: Claiming farming rewards
+    pub fn execute_swap_proposal(env: Env, executor: Address, proposal_id: u64) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        // Get proposal
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        // Validate state
+        if !proposal.is_swap {
+            return Err(VaultError::DexError);
+        }
+        if proposal.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+        if proposal.status == ProposalStatus::Executed {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        // Check expiration
+        let current_ledger = env.ledger().sequence() as u64;
+        if current_ledger > proposal.expires_at {
+            proposal.status = ProposalStatus::Expired;
+            storage::set_proposal(&env, &proposal);
+            storage::metrics_on_expiry(&env);
+            events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
+            return Err(VaultError::PermissionExpired);
+        }
+
+        // Check Timelock
+        if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
+            return Err(VaultError::TimelockNotExpired);
+        }
+
+        // Get DEX config and swap details
+        let dex_config = storage::get_dex_config(&env).ok_or(VaultError::DexError)?;
+        let swap_proposal =
+            storage::get_swap_proposal(&env, proposal_id).ok_or(VaultError::DexError)?;
+
+        // Perform the swap with proper validation and cross-contract invocation
+        let swap_result = Self::perform_swap(&env, &dex_config, &swap_proposal, proposal_id)?;
+
+        // Store result
+        storage::set_swap_result(&env, proposal_id, &swap_result);
+
+        // Update proposal status
+        proposal.status = ProposalStatus::Executed;
+        storage::set_proposal(&env, &proposal);
+        storage::extend_instance_ttl(&env);
+
+        // Emit execution event
+        events::emit_proposal_executed(
+            &env,
+            proposal_id,
+            &executor,
+            &env.current_contract_address(),
+            &env.current_contract_address(),
+            0,
+            current_ledger,
+        );
+
+        // Update reputation and metrics
+        Self::update_reputation_on_execution(&env, &proposal);
+        let execution_time = current_ledger.saturating_sub(proposal.created_at);
+        storage::metrics_on_execution(&env, proposal.gas_used, execution_time);
+
+        Ok(())
+    }
+
+    pub fn remove_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+    /// Execute a swap proposal with comprehensive validation and cross-contract invocation
+    /// 
+    /// This function implements all requirements:
+    /// - Validates DEX whitelist enforcement
+    /// - Uses pre-execution oracle prices for price impact validation
+    /// - Handles all SwapProposal variants
+    /// - Stores SwapResult under FeatureKey::SwapResult(proposal_id)
+    /// - Emits appropriate events for each operation type
+    pub fn execute_swap_proposal(env: Env, executor: Address, proposal_id: u64) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        // Get proposal
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        // Validate state
+        if !proposal.is_swap {
+            return Err(VaultError::DexError);
+        }
+        if proposal.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+        if proposal.status == ProposalStatus::Executed {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        // Check expiration
+        let current_ledger = env.ledger().sequence() as u64;
+        if current_ledger > proposal.expires_at {
+            proposal.status = ProposalStatus::Expired;
+            storage::set_proposal(&env, &proposal);
+            storage::metrics_on_expiry(&env);
+            events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
+            return Err(VaultError::ProposalExpired);
+        }
+
+        // Check Timelock
+        if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
+            return Err(VaultError::TimelockNotExpired);
+        }
+
+        // Get DEX config and swap details
+        let dex_config = storage::get_dex_config(&env).ok_or(VaultError::DexError)?;
+        let swap_proposal = storage::get_swap_proposal(&env, proposal_id).ok_or(VaultError::DexError)?;
+
+        // Perform comprehensive swap validation and execution
+        let swap_result = Self::perform_comprehensive_swap(&env, &dex_config, &swap_proposal, proposal_id)?;
+
+        // Store result under FeatureKey::SwapResult(proposal_id)
+        storage::set_swap_result(&env, proposal_id, &swap_result);
+
+        // Update proposal status
+        proposal.status = ProposalStatus::Executed;
+        storage::set_proposal(&env, &proposal);
+        storage::extend_instance_ttl(&env);
+
+        // Emit execution event
+        events::emit_proposal_executed(
+            &env,
+            proposal_id,
+            &executor,
+            &env.current_contract_address(),
+            &env.current_contract_address(),
+            0,
+            current_ledger,
+        );
+
+        // Update reputation and metrics
+        Self::update_reputation_on_execution(&env, &proposal);
+        let execution_time = current_ledger.saturating_sub(proposal.created_at);
+        storage::metrics_on_execution(&env, proposal.gas_used, execution_time);
+
+        Ok(())
+    }
+
+    /// Perform comprehensive swap validation and execution for all SwapProposal variants
+    /// 
+    /// This function:
+    /// - Enforces DexConfig::enabled_dexs whitelist
+    /// - Uses pre-execution oracle prices for price impact validation
+    /// - Validates price_impact_bps <= dex_config.max_price_impact_bps
+    /// - Validates amount_out >= min_amount_out after execution
+    /// - Handles all SwapProposal variants with appropriate events
+    fn perform_comprehensive_swap(
+        env: &Env,
+        dex_config: &DexConfig,
+        swap_proposal: &SwapProposal,
+        proposal_id: u64,
+    ) -> Result<SwapResult, VaultError> {
+        match swap_proposal {
+            SwapProposal::Swap(dex, token_in, token_out, amount_in, min_amount_out) => {
+                // Enforce DEX whitelist - unknown DEX address returns VaultError::DexError
+                if !dex_config.enabled_dexs.contains(dex) {
+                    return Err(VaultError::DexError);
+                }
+
+                // Get pre-execution oracle prices for price impact calculation
+                let price_in = Self::get_asset_price(env, token_in.clone())?;
+                let price_out = Self::get_asset_price(env, token_out.clone())?;
+                
+                // Calculate expected amount out based on oracle prices
+                let expected_amount_out = (*amount_in * price_in) / price_out;
+                
+                // TODO: Replace with actual DEX contract cross-contract invocation
+                // For now, simulate the swap with realistic behavior
+                let simulated_amount_out = *amount_in * 99 / 100; // 1% slippage simulation
+                
+                // Calculate actual price impact using pre-execution oracle price
+                let price_impact_bps = if expected_amount_out > 0 {
+                    let impact = ((expected_amount_out - simulated_amount_out) * 10000) / expected_amount_out;
+                    impact.max(0) as u32
+                } else {
+                    0
+                };
+
+                // Before execution: validate price_impact_bps <= dex_config.max_price_impact_bps
+                if price_impact_bps > dex_config.max_price_impact_bps {
+                    return Err(VaultError::DexError);
+                }
+
+                // After execution: validate amount_out >= min_amount_out; revert with VaultError::DexError if not
+                if simulated_amount_out < *min_amount_out {
+                    return Err(VaultError::DexError);
+                }
+
+                // Emit swap-specific event
+                events::emit_swap_executed(env, proposal_id, dex, token_in, token_out, *amount_in, simulated_amount_out);
+
+                Ok(SwapResult {
+                    amount_in: *amount_in,
+                    amount_out: simulated_amount_out,
+                    price_impact_bps,
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+            SwapProposal::AddLiquidity(dex, token_a, token_b, amount_a, amount_b, min_lp_tokens) => {
+                // Enforce DEX whitelist
+                if !dex_config.enabled_dexs.contains(dex) {
+                    return Err(VaultError::DexError);
+                }
+
+                // TODO: Replace with actual DEX contract call for adding liquidity
+                let simulated_lp_tokens = (*amount_a + *amount_b) / 2; // Simplified calculation
+                
+                if simulated_lp_tokens < *min_lp_tokens {
+                    return Err(VaultError::DexError);
+                }
+
+                // Emit liquidity addition event
+                events::emit_liquidity_added(env, proposal_id, dex, token_a, token_b, *amount_a, *amount_b, simulated_lp_tokens);
+
+                Ok(SwapResult {
+                    amount_in: *amount_a + *amount_b,
+                    amount_out: simulated_lp_tokens,
+                    price_impact_bps: 50, // Minimal price impact for liquidity provision
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+            SwapProposal::RemoveLiquidity(dex, _lp_token, amount, min_token_a, min_token_b) => {
+                // Enforce DEX whitelist
+                if !dex_config.enabled_dexs.contains(dex) {
+                    return Err(VaultError::DexError);
+                }
+
+                // TODO: Replace with actual DEX contract call for removing liquidity
+                let simulated_token_a = *amount / 2;
+                let simulated_token_b = *amount / 2;
+                
+                if simulated_token_a < *min_token_a || simulated_token_b < *min_token_b {
+                    return Err(VaultError::DexError);
+                }
+
+                // Emit liquidity removal event
+                events::emit_liquidity_removed(env, proposal_id, dex, *amount);
+
+                Ok(SwapResult {
+                    amount_in: *amount,
+                    amount_out: simulated_token_a + simulated_token_b,
+                    price_impact_bps: 25, // Minimal price impact for liquidity removal
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+            SwapProposal::StakeLp(farm, _lp_token, amount) => {
+                // Note: For staking, we don't check DEX whitelist but could add farm whitelist
+                // TODO: Replace with actual farm contract call for staking LP tokens
+                
+                // Emit LP staking event
+                events::emit_lp_staked(env, proposal_id, farm, *amount);
+
+                Ok(SwapResult {
+                    amount_in: *amount,
+                    amount_out: *amount, // Staking doesn't change token amount
+                    price_impact_bps: 0, // No price impact for staking
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+            SwapProposal::UnstakeLp(farm, _lp_token, amount) => {
+                // TODO: Replace with actual farm contract call for unstaking LP tokens
+                
+                // Emit LP unstaking event
+                events::emit_lp_unstaked(env, proposal_id, farm, *amount);
+
+                Ok(SwapResult {
+                    amount_in: *amount,
+                    amount_out: *amount, // Unstaking doesn't change token amount
+                    price_impact_bps: 0, // No price impact for unstaking
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+            SwapProposal::ClaimRewards(farm) => {
+                // TODO: Replace with actual farm contract call for claiming rewards
+                let simulated_rewards = 100; // Mock reward amount
+                
+                // Emit rewards claiming event
+                events::emit_rewards_claimed(env, proposal_id, farm, simulated_rewards);
+
+                Ok(SwapResult {
+                    amount_in: 0, // No input for claiming rewards
+                    amount_out: simulated_rewards,
+                    price_impact_bps: 0, // No price impact for claiming rewards
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+        }
+    }
+
+    /// Perform the actual swap operation (mock implementation)
+    fn perform_swap(
+        env: &Env,
+        dex_config: &DexConfig,
+        swap_proposal: &SwapProposal,
+        proposal_id: u64,
+    ) -> Result<SwapResult, VaultError> {
+        match swap_proposal {
+            SwapProposal::Swap(dex, token_in, token_out, amount_in, min_amount_out) => {
+                // Enforce DEX whitelist
+                if !dex_config.enabled_dexs.contains(dex) {
+                    return Err(VaultError::DexError);
+                }
+
+                // Get pre-execution oracle prices for price impact calculation
+                let price_in = Self::get_asset_price(env, token_in.clone())?;
+                let price_out = Self::get_asset_price(env, token_out.clone())?;
+                
+                // Calculate expected amount out based on oracle prices
+                let expected_amount_out = (*amount_in * price_in) / price_out;
+                
+                // TODO: Replace with actual DEX contract call
+                // For now, simulate the swap with realistic slippage
+                let simulated_amount_out = *amount_in * 99 / 100; // 1% slippage simulation
+                
+                // Calculate actual price impact
+                let price_impact_bps = if expected_amount_out > 0 {
+                    let impact = ((expected_amount_out - simulated_amount_out) * 10000) / expected_amount_out;
+                    impact.max(0) as u32
+                } else {
+                    0
+                };
+
+                // Validate price impact against config
+                if price_impact_bps > dex_config.max_price_impact_bps {
+                    return Err(VaultError::DexError);
+                }
+
+                // Validate slippage protection
+                if simulated_amount_out < *min_amount_out {
+                    return Err(VaultError::DexError);
+                }
+
+                // Emit swap-specific event
+                events::emit_swap_executed(env, proposal_id, dex, token_in, token_out, *amount_in, simulated_amount_out);
+
+                Ok(SwapResult {
+                    amount_in: *amount_in,
+                    amount_out: simulated_amount_out,
+                    price_impact_bps,
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+            SwapProposal::AddLiquidity(dex, token_a, token_b, amount_a, amount_b, min_lp_tokens) => {
+                // Enforce DEX whitelist
+                if !dex_config.enabled_dexs.contains(dex) {
+                    return Err(VaultError::DexError);
+                }
+
+                // TODO: Replace with actual DEX contract call for adding liquidity
+                let simulated_lp_tokens = (*amount_a + *amount_b) / 2; // Simplified calculation
+                
+                if simulated_lp_tokens < *min_lp_tokens {
+                    return Err(VaultError::DexError);
+                }
+
+                events::emit_liquidity_added(env, proposal_id, dex, token_a, token_b, *amount_a, *amount_b, simulated_lp_tokens);
+
+                Ok(SwapResult {
+                    amount_in: *amount_a + *amount_b,
+                    amount_out: simulated_lp_tokens,
+                    price_impact_bps: 50, // Minimal price impact for liquidity provision
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+            SwapProposal::RemoveLiquidity(dex, lp_token, amount, min_token_a, min_token_b) => {
+                // Enforce DEX whitelist
+                if !dex_config.enabled_dexs.contains(dex) {
+                    return Err(VaultError::DexError);
+                }
+
+                // TODO: Replace with actual DEX contract call for removing liquidity
+                let simulated_token_a = *amount / 2;
+                let simulated_token_b = *amount / 2;
+                
+                if simulated_token_a < *min_token_a || simulated_token_b < *min_token_b {
+                    return Err(VaultError::DexError);
+                }
+
+                events::emit_liquidity_removed(env, proposal_id, dex, *amount);
+
+                Ok(SwapResult {
+                    amount_in: *amount,
+                    amount_out: simulated_token_a + simulated_token_b,
+                    price_impact_bps: 25, // Minimal price impact for liquidity removal
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+            SwapProposal::StakeLp(farm, lp_token, amount) => {
+                // Note: For staking, we don't check DEX whitelist but could add farm whitelist
+                // TODO: Replace with actual farm contract call for staking LP tokens
+                
+                events::emit_lp_staked(env, proposal_id, farm, *amount);
+
+                Ok(SwapResult {
+                    amount_in: *amount,
+                    amount_out: *amount, // Staking doesn't change token amount
+                    price_impact_bps: 0, // No price impact for staking
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+            SwapProposal::UnstakeLp(farm, lp_token, amount) => {
+                // TODO: Replace with actual farm contract call for unstaking LP tokens
+                
+                events::emit_lp_unstaked(env, proposal_id, farm, *amount);
+
+                Ok(SwapResult {
+                    amount_in: *amount,
+                    amount_out: *amount, // Unstaking doesn't change token amount
+                    price_impact_bps: 0, // No price impact for unstaking
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+            SwapProposal::ClaimRewards(farm) => {
+                // TODO: Replace with actual farm contract call for claiming rewards
+                let simulated_rewards = 100; // Mock reward amount
+                
+                events::emit_rewards_claimed(env, proposal_id, farm, simulated_rewards);
+
+                Ok(SwapResult {
+                    amount_in: 0, // No input for claiming rewards
+                    amount_out: simulated_rewards,
+                    price_impact_bps: 0, // No price impact for claiming rewards
+                    executed_at: env.ledger().sequence() as u64,
+                })
+            }
+        }
     }
 
     pub fn register_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
@@ -4049,6 +7424,9 @@ impl VaultDAO {
         let mut config = storage::get_config(&env)?;
         if config.pre_execution_hooks.contains(&hook) {
             return Err(VaultError::SignerAlreadyExists);
+        }
+        if config.pre_execution_hooks.len() >= 5 {
+            return Err(VaultError::BatchTooLarge);
         }
 
         config.pre_execution_hooks.push_back(hook.clone());
@@ -4068,6 +7446,9 @@ impl VaultDAO {
         let mut config = storage::get_config(&env)?;
         if config.post_execution_hooks.contains(&hook) {
             return Err(VaultError::SignerAlreadyExists);
+        }
+        if config.post_execution_hooks.len() >= 5 {
+            return Err(VaultError::BatchTooLarge);
         }
 
         config.post_execution_hooks.push_back(hook.clone());
@@ -4104,7 +7485,7 @@ impl VaultDAO {
     pub fn remove_post_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
 
@@ -4135,8 +7516,14 @@ impl VaultDAO {
         Ok(storage::get_config(&env)?.post_execution_hooks)
     }
 
+    /// Get hook failure log for a proposal (simplified - returns bool for now)
+    pub fn has_hook_failure(env: Env, proposal_id: u64) -> bool {
+        // Simplified implementation - just return false for now
+        false
+    }
+
     fn call_hook(env: &Env, hook: &Address, proposal_id: u64, is_pre: bool) {
-        let _ = env.invoke_contract::<()>(
+        let result = env.try_invoke_contract::<(), soroban_sdk::Error>(
             hook,
             &Symbol::new(
                 env,
@@ -4149,7 +7536,19 @@ impl VaultDAO {
             (proposal_id,).into_val(env),
         );
 
-        events::emit_hook_executed(env, hook, proposal_id, is_pre);
+        match result {
+            Ok(_) => {
+                events::emit_hook_executed(env, hook, proposal_id, is_pre, true);
+            }
+            Err(_) => {
+                events::emit_hook_executed(env, hook, proposal_id, is_pre, false);
+                
+                if is_pre {
+                    panic!("Pre-hook failed");
+                }
+                // Post-hook failures are logged but don't abort execution
+            }
+        }
     }
 
     pub fn get_swap_result(env: Env, proposal_id: u64) -> Option<SwapResult> {
@@ -4172,9 +7571,13 @@ impl VaultDAO {
             Self::evaluate_conditions(env, proposal)?;
         }
 
-        // Gas limit check
+        // Compute the execution fee estimate (base_cost + condition_cost * operations)
         let fee_estimate = Self::calculate_execution_fee(env, proposal);
+
+        // Enforce gas limit before executing the transfer: 0 means unlimited
         if proposal.gas_limit > 0 && fee_estimate.total_fee > proposal.gas_limit {
+            // Always record gas_used even when the limit is exceeded
+            proposal.gas_used = fee_estimate.total_fee;
             events::emit_gas_limit_exceeded(
                 env,
                 proposal.id,
@@ -4199,10 +7602,11 @@ impl VaultDAO {
             return Err(VaultError::InsufficientBalance);
         }
 
-        // Execute transfer
-        if token::try_transfer(env, &proposal.token, &proposal.recipient, proposal.amount).is_err()
+        // Execute transfer (deduct protocol fee from transfer amount)
+        let transfer_amount = proposal.amount.saturating_sub(fee_amount);
+        if token::try_transfer(env, &proposal.token, &proposal.recipient, transfer_amount).is_err()
         {
-            return Err(VaultError::TransferFailed);
+            return Err(VaultError::InsufficientBalance);
         }
 
         // Return insurance to proposer on success
@@ -4247,7 +7651,7 @@ impl VaultDAO {
             }
         }
 
-        // Record gas used
+        // Always record gas_used after execution (even on success)
         proposal.gas_used = fee_estimate.total_fee;
 
         Ok(())
@@ -4370,7 +7774,7 @@ impl VaultDAO {
 
         // Check role - only Admin can create templates
         let role = storage::get_role(&env, &creator);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -4409,7 +7813,103 @@ impl VaultDAO {
         storage::set_template_name_mapping(&env, &name, template_id);
         storage::extend_instance_ttl(&env);
 
+        events::emit_template_created(&env, template_id, &name, &creator);
+
         Ok(template_id)
+    }
+
+    /// Update an existing template
+    ///
+    /// Allows the creator or admin to update template parameters.
+    /// Increments the version number on each update.
+    ///
+    /// # Arguments
+    /// * `caller` - Address performing the update (must be creator or Admin)
+    /// * `template_id` - ID of the template to update
+    /// * `description` - New description
+    /// * `recipient` - New recipient address
+    /// * `amount` - New default amount
+    /// * `memo` - New memo
+    /// * `min_amount` - New minimum amount
+    /// * `max_amount` - New maximum amount
+    pub fn update_template(
+        env: Env,
+        caller: Address,
+        template_id: u64,
+        description: Symbol,
+        recipient: Address,
+        amount: i128,
+        memo: Symbol,
+        min_amount: i128,
+        max_amount: i128,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut template = storage::get_template(&env, template_id)?;
+
+        // Only creator or admin can update
+        let role = storage::get_role(&env, &caller);
+        if caller != template.creator && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        // Validate parameters
+        if !Self::validate_template_params(env.clone(), amount, min_amount, max_amount) {
+            return Err(VaultError::TemplateValidationFailed);
+        }
+
+        let old_version = template.version;
+
+        // Store the current version before overwriting
+        let pruned = storage::store_template_version(&env, &template);
+        if let Some(pruned_version) = pruned {
+            events::emit_template_version_pruned(&env, template_id, pruned_version);
+        }
+
+        template.description = description;
+        template.recipient = recipient;
+        template.amount = amount;
+        template.memo = memo;
+        template.min_amount = min_amount;
+        template.max_amount = max_amount;
+        template.version += 1;
+        template.updated_at = env.ledger().sequence() as u64;
+
+        storage::set_template(&env, &template);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_template_updated(&env, template_id, &template.name, template.version, &caller);
+        let _ = old_version;
+
+        Ok(())
+    }
+
+    /// Deactivate a template
+    ///
+    /// Sets a template's is_active flag to false, preventing new proposals from using it.
+    ///
+    /// # Arguments
+    /// * `admin` - Address performing the action (must be Admin)
+    /// * `template_id` - ID of the template to deactivate
+    pub fn deactivate_template(env: Env, admin: Address, template_id: u64) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        // Check role - only Admin can deactivate
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        let mut template = storage::get_template(&env, template_id)?;
+        template.is_active = false;
+        template.updated_at = env.ledger().sequence() as u64;
+
+        storage::set_template(&env, &template);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_template_status_changed(&env, template_id, &template.name, false, &admin);
+
+        Ok(())
     }
 
     /// Set template active status
@@ -4430,7 +7930,7 @@ impl VaultDAO {
 
         // Check role - only Admin can modify templates
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -4468,6 +7968,64 @@ impl VaultDAO {
         storage::get_template_id_by_name(&env, &name)
     }
 
+    /// Get a specific historical version of a template.
+    ///
+    /// # Arguments
+    /// * `template_id` - ID of the template
+    /// * `version` - Version number to retrieve
+    pub fn get_template_version(
+        env: Env,
+        template_id: u64,
+        version: u32,
+    ) -> Result<ProposalTemplate, VaultError> {
+        storage::get_template_version(&env, template_id, version)
+    }
+
+    /// Roll back a template to a previously stored version.
+    ///
+    /// Stores the current version in history, then restores the target version
+    /// with an incremented version counter. Only Admin or the template creator may call this.
+    ///
+    /// # Arguments
+    /// * `admin` - Caller (must be Admin or template creator)
+    /// * `template_id` - ID of the template to roll back
+    /// * `target_version` - Historical version to restore
+    pub fn rollback_template(
+        env: Env,
+        admin: Address,
+        template_id: u64,
+        target_version: u32,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let current = storage::get_template(&env, template_id)?;
+
+        let role = storage::get_role(&env, &admin);
+        if admin != current.creator && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        // Load the target historical version
+        let mut restored = storage::get_template_version(&env, template_id, target_version)?;
+
+        // Store the current version before overwriting
+        let pruned = storage::store_template_version(&env, &current);
+        if let Some(pruned_version) = pruned {
+            events::emit_template_version_pruned(&env, template_id, pruned_version);
+        }
+
+        // Restore with incremented version counter
+        restored.version = current.version + 1;
+        restored.updated_at = env.ledger().sequence() as u64;
+
+        storage::set_template(&env, &restored);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_template_updated(&env, template_id, &restored.name, restored.version, &admin);
+
+        Ok(())
+    }
+
     /// Create a proposal from a template
     ///
     /// Creates a new proposal using a pre-configured template with optional overrides.
@@ -4496,7 +8054,7 @@ impl VaultDAO {
 
         // Check role
         let role = storage::get_role(&env, &proposer);
-        if role != Role::Treasurer && role != Role::Admin {
+        if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -4534,7 +8092,7 @@ impl VaultDAO {
         let config = storage::get_config(&env)?;
 
         // Velocity limit check
-        if !storage::check_and_update_velocity(&env, &proposer, &config.velocity_limit) {
+        if !storage::check_and_update_velocity(&env, &proposer, &template.token, &config.velocity_limit) {
             return Err(VaultError::VelocityLimitExceeded);
         }
 
@@ -4604,6 +8162,7 @@ impl VaultDAO {
             expires_at,
             unlock_ledger,
             execution_time: None,
+                execution_window_ledgers: 0,
             insurance_amount: 0,
             stake_amount: 0, // Template proposals don't require stake
             gas_limit: 0,
@@ -4613,6 +8172,7 @@ impl VaultDAO {
             depends_on: Vec::new(&env),
             is_swap: false,
             voting_deadline: 0,
+            execution_ledger: 0,
         };
 
         storage::set_proposal(&env, &proposal);
@@ -4700,9 +8260,14 @@ impl VaultDAO {
             return Err(VaultError::RetryError);
         }
 
-        // Exponential backoff: initial_backoff * 2^(retry_count - 1), capped at 2^10
-        let exponent = core::cmp::min(retry_state.retry_count - 1, 10);
-        let backoff = retry_config.initial_backoff_ledgers * (1u64 << exponent);
+        // Exponential backoff: initial_backoff << (retry_count - 1), capped at 7 days (120,960 ledgers)
+        let max_backoff = 17_280 * 7; // 7 days in ledgers
+        let exponent = core::cmp::min(retry_state.retry_count - 1, 30); // Prevent overflow
+        let backoff = retry_config
+            .initial_backoff_ledgers
+            .checked_shl(exponent as u32)
+            .unwrap_or(max_backoff)
+            .min(max_backoff);
 
         retry_state.next_retry_ledger = current_ledger + backoff;
         retry_state.last_retry_ledger = current_ledger;
@@ -4783,6 +8348,7 @@ impl VaultDAO {
         let escrow_id = storage::increment_escrow_id(&env);
         let current_ledger = env.ledger().sequence() as u64;
 
+        // Funds are locked on creation — status is immediately Active
         let escrow = Escrow {
             id: escrow_id,
             funder: funder.clone(),
@@ -4791,7 +8357,7 @@ impl VaultDAO {
             total_amount: amount,
             released_amount: 0,
             milestones,
-            status: EscrowStatus::Pending,
+            status: EscrowStatus::Active,
             arbitrator,
             dispute_reason: Symbol::new(&env, ""),
             created_at: current_ledger,
@@ -4828,8 +8394,8 @@ impl VaultDAO {
         let mut escrow = storage::get_escrow(&env, escrow_id)?;
         let current_ledger = env.ledger().sequence() as u64;
 
-        // Validate escrow is active
-        if escrow.status != EscrowStatus::Pending && escrow.status != EscrowStatus::Active {
+        // Validate escrow is active (not disputed, released, or refunded)
+        if escrow.status != EscrowStatus::Active {
             return Err(VaultError::ProposalNotPending);
         }
 
@@ -4893,10 +8459,24 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Release escrowed funds based on completed milestones
-    pub fn release_escrow_funds(env: Env, escrow_id: u64) -> Result<i128, VaultError> {
+    /// Release escrowed funds to recipient after all milestones are completed.
+    /// Caller must be the funder, recipient, or admin.
+    pub fn release_escrow(env: Env, caller: Address, escrow_id: u64) -> Result<i128, VaultError> {
+        caller.require_auth();
+
         let mut escrow = storage::get_escrow(&env, escrow_id)?;
         let current_ledger = env.ledger().sequence() as u64;
+
+        // Ensure caller is authorized
+        let role = storage::get_role(&env, &caller);
+        if caller != escrow.funder && caller != escrow.recipient && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        // Cannot release a disputed escrow
+        if escrow.status == EscrowStatus::Disputed {
+            return Err(VaultError::ConditionsNotMet);
+        }
 
         // Only release if all milestones complete or expired
         let can_release = escrow.status == EscrowStatus::MilestonesComplete;
@@ -4947,6 +8527,13 @@ impl VaultDAO {
         Ok(amount_to_release)
     }
 
+    /// Keep backward-compatible alias
+    pub fn release_escrow_funds(env: Env, escrow_id: u64) -> Result<i128, VaultError> {
+        let escrow = storage::get_escrow(&env, escrow_id)?;
+        let caller = escrow.recipient.clone();
+        Self::release_escrow(env, caller, escrow_id)
+    }
+
     /// File a dispute on an escrow agreement
     pub fn dispute_escrow(
         env: Env,
@@ -4958,14 +8545,14 @@ impl VaultDAO {
 
         let mut escrow = storage::get_escrow(&env, escrow_id)?;
 
-        // Only funder or recipient can dispute
-        if disputer != escrow.funder && disputer != escrow.recipient {
+        // Only funder or admin can dispute
+        let role = storage::get_role(&env, &disputer);
+        if disputer != escrow.funder && role != Role::Admin {
             return Err(VaultError::Unauthorized);
         }
 
-        // Can only dispute active/pending escrows
-        if escrow.status != EscrowStatus::Pending
-            && escrow.status != EscrowStatus::Active
+        // Can only dispute active escrows
+        if escrow.status != EscrowStatus::Active
             && escrow.status != EscrowStatus::MilestonesComplete
         {
             return Err(VaultError::ProposalNotPending);
@@ -4981,7 +8568,8 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Resolve an escrow dispute (arbitrator only)
+    /// Resolve an escrow dispute — admin only.
+    /// If `release_to_recipient` is true, funds go to recipient; otherwise refunded to funder.
     pub fn resolve_escrow_dispute(
         env: Env,
         arbitrator: Address,
@@ -4990,14 +8578,16 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         arbitrator.require_auth();
 
+        // Admin-only: only the vault admin can resolve disputes
+        let role = storage::get_role(&env, &arbitrator);
+        if role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
         let mut escrow = storage::get_escrow(&env, escrow_id)?;
 
         if escrow.status != EscrowStatus::Disputed {
             return Err(VaultError::ProposalNotPending);
-        }
-
-        if arbitrator != escrow.arbitrator {
-            return Err(VaultError::Unauthorized);
         }
 
         // Release all remaining funds based on arbitrator decision
@@ -5040,208 +8630,6 @@ impl VaultDAO {
     /// Get all escrows for a recipient
     pub fn get_recipient_escrows(env: Env, recipient: Address) -> Vec<u64> {
         storage::get_recipient_escrows(&env, &recipient)
-    }
-
-    // ============================================================================
-    // Price-Gated Escrow Conditions (Issue: feature/escrow-oracle)
-    // ============================================================================
-
-    /// Create an escrow with an attached price condition.
-    ///
-    /// This is identical to `create_escrow` except it additionally stores an
-    /// `EscrowCondition` that will be evaluated by `attempt_escrow_release`.
-    /// Use `EscrowCondition::Manual` when you want standard manual-release
-    /// behaviour while still using the unified `attempt_escrow_release` path.
-    ///
-    /// # Errors
-    /// Returns `InvalidAmount` if a price condition carries a non-positive threshold.
-    /// (XDR spec limits VaultError to 50 variants; dedicated error reuses InvalidAmount.)
-    pub fn create_escrow_with_condition(
-        env: Env,
-        funder: Address,
-        recipient: Address,
-        token_addr: Address,
-        amount: i128,
-        milestones: Vec<Milestone>,
-        duration_ledgers: u64,
-        arbitrator: Address,
-        condition: EscrowCondition,
-    ) -> Result<u64, VaultError> {
-        // Validate the condition before locking any funds
-        match &condition {
-            EscrowCondition::Manual => {}
-            EscrowCondition::PriceAbove(args) | EscrowCondition::PriceBelow(args) => {
-                if args.threshold <= 0 {
-                    return Err(VaultError::InvalidAmount);
-                }
-            }
-        }
-
-        // Delegate escrow creation to the existing function (DRY)
-        let escrow_id = Self::create_escrow(
-            env.clone(),
-            funder,
-            recipient,
-            token_addr,
-            amount,
-            milestones,
-            duration_ledgers,
-            arbitrator,
-        )?;
-
-        // Persist the condition alongside the escrow
-        storage::set_escrow_condition(&env, escrow_id, &condition);
-
-        Ok(escrow_id)
-    }
-
-    /// Attempt to release an escrow that has a price-gated condition.
-    ///
-    /// Workflow:
-    /// 1. Load the escrow; fail if not found or already finalized.
-    /// 2. Confirm the escrow is in a releasable state (MilestonesComplete *or* expired).
-    /// 3. Load the attached `EscrowCondition`:
-    ///    - `Manual`     → proceed without an oracle call.
-    ///    - `PriceAbove` → call oracle; release only if `price > threshold`.
-    ///    - `PriceBelow` → call oracle; release only if `price < threshold`.
-    /// 4. If the oracle call fails → return `DexError` without modifying state.
-    /// 5. If the price is stale   → return `RetryError` without modifying state.
-    /// 6. If the condition is not met → return `ConditionsNotMet`.
-    /// 7. Otherwise release funds using the same logic as `release_escrow_funds`.
-    ///
-    /// # Idempotency
-    /// Returns `ProposalAlreadyExecuted` if the escrow is already `Released` or `Refunded`.
-    /// (XDR spec limits VaultError to 50 variants; dedicated errors reuse existing codes.)
-    pub fn attempt_escrow_release(env: Env, escrow_id: u64) -> Result<i128, VaultError> {
-        let mut escrow = storage::get_escrow(&env, escrow_id)?;
-
-        // Idempotency guard — reuses ProposalAlreadyExecuted (XDR 50-variant cap)
-        if escrow.status == EscrowStatus::Released || escrow.status == EscrowStatus::Refunded {
-            return Err(VaultError::ProposalAlreadyExecuted);
-        }
-
-        let current_ledger = env.ledger().sequence() as u64;
-        let is_expired = current_ledger >= escrow.expires_at;
-        let milestones_done = escrow.status == EscrowStatus::MilestonesComplete;
-
-        if !milestones_done && !is_expired {
-            return Err(VaultError::ConditionsNotMet);
-        }
-
-        // Evaluate the oracle condition (if any)
-        if let Some(condition) = storage::get_escrow_condition(&env, escrow_id) {
-            match condition {
-                EscrowCondition::Manual => {
-                    // No oracle check required
-                }
-                EscrowCondition::PriceAbove(ref args) => {
-                    let price = Self::fetch_oracle_price(&env, &args.oracle, &args.asset_pair)?;
-                    Self::check_price_staleness(&env, &price)?;
-                    let met = price.price > args.threshold;
-                    events::emit_oracle_release_attempted(
-                        &env,
-                        escrow_id,
-                        &args.asset_pair,
-                        price.price,
-                        args.threshold,
-                        met,
-                    );
-                    if !met {
-                        return Err(VaultError::ConditionsNotMet);
-                    }
-                }
-                EscrowCondition::PriceBelow(ref args) => {
-                    let price = Self::fetch_oracle_price(&env, &args.oracle, &args.asset_pair)?;
-                    Self::check_price_staleness(&env, &price)?;
-                    let met = price.price < args.threshold;
-                    events::emit_oracle_release_attempted(
-                        &env,
-                        escrow_id,
-                        &args.asset_pair,
-                        price.price,
-                        args.threshold,
-                        met,
-                    );
-                    if !met {
-                        return Err(VaultError::ConditionsNotMet);
-                    }
-                }
-            }
-        }
-        // No condition stored → treat as Manual (standard release)
-
-        // ── Release logic (mirrors release_escrow_funds) ──────────────────────
-        let amount_to_release = if is_expired {
-            escrow.total_amount - escrow.released_amount
-        } else {
-            escrow.amount_to_release()
-        };
-
-        if amount_to_release <= 0 {
-            return Err(VaultError::ProposalAlreadyExecuted);
-        }
-
-        let release_to = if is_expired {
-            escrow.funder.clone()
-        } else {
-            escrow.recipient.clone()
-        };
-
-        token::transfer(&env, &escrow.token, &release_to, amount_to_release);
-
-        escrow.released_amount += amount_to_release;
-        if escrow.released_amount >= escrow.total_amount {
-            escrow.status = if is_expired {
-                EscrowStatus::Refunded
-            } else {
-                EscrowStatus::Released
-            };
-            escrow.finalized_at = current_ledger;
-        }
-
-        storage::set_escrow(&env, &escrow);
-
-        events::emit_escrow_released(&env, escrow_id, &release_to, amount_to_release, is_expired);
-
-        Ok(amount_to_release)
-    }
-
-    /// Query the release condition attached to an escrow.
-    /// Returns `None` when the escrow was created via `create_escrow` (no condition set).
-    pub fn get_escrow_condition(env: Env, escrow_id: u64) -> Option<EscrowCondition> {
-        storage::get_escrow_condition(&env, escrow_id)
-    }
-
-    // ── Private oracle helpers ────────────────────────────────────────────────
-
-    /// Call the oracle and return the price data, or `DexError` on failure.
-    /// Reuses `DexError` — both are cross-contract call failures (XDR 50-variant cap).
-    fn fetch_oracle_price(
-        env: &Env,
-        oracle: &Address,
-        asset_pair: &Symbol,
-    ) -> Result<VaultPriceData, VaultError> {
-        let client = PriceOracleClient::new(env, oracle);
-        // try_get_price returns Result<Result<T, ConversionError>, InvokeError> — flatten both
-        match client.try_get_price(asset_pair) {
-            Ok(Ok(price)) => Ok(price),
-            _ => Err(VaultError::DexError),
-        }
-    }
-
-    /// Verify the oracle price was published recently enough.
-    /// Returns `RetryError` on staleness — consistent with the existing oracle staleness
-    /// handling elsewhere in the contract (see fetch_oracle_update ~line 3600).
-    fn check_price_staleness(env: &Env, price: &VaultPriceData) -> Result<(), VaultError> {
-        let max_staleness = match storage::get_oracle_config(env) {
-            OptionalVaultOracleConfig::Some(cfg) => cfg.max_staleness as u64,
-            OptionalVaultOracleConfig::None => 100,
-        };
-        let age = (env.ledger().sequence() as u64).saturating_sub(price.timestamp);
-        if age > max_staleness {
-            return Err(VaultError::RetryError);
-        }
-        Ok(())
     }
 
     // ============================================================================
@@ -5302,7 +8690,7 @@ impl VaultDAO {
         let executor_role = storage::get_role(&env, &executor);
 
         // Check authorization
-        if executor_role != Role::Admin && executor_role != Role::Treasurer {
+        if !Role::role_satisfies(Role::Treasurer, executor_role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -5322,7 +8710,7 @@ impl VaultDAO {
         let mut success = true;
 
         // Execute operations sequentially
-        for (idx, op) in batch.operations.iter().enumerate() {
+        for op in batch.operations.iter() {
             match Self::execute_batch_operation(&env, &op, &mut rollback_state, &config) {
                 Ok(_) => {
                     executed_count += 1;
@@ -5444,8 +8832,6 @@ impl VaultDAO {
         const BASE_OVERHEAD: u64 = 100_000;
         const PER_OP_COST: u64 = 50_000;
 
-        BASE_OVERHEAD + (operations.len() as u64 * PER_OP_COST)
-    }
 
     // ========================================================================
     // Time-Weighted Voting
@@ -5583,7 +8969,7 @@ impl VaultDAO {
         config: RecoveryConfig,
     ) -> Result<(), VaultError> {
         admin.require_auth();
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -5604,12 +8990,17 @@ impl VaultDAO {
     ) -> Result<u64, VaultError> {
         caller.require_auth();
 
+        let config = storage::get_config(&env)?;
+        if !config.recovery_config.guardians.contains(&caller) {
+            return Err(VaultError::Unauthorized);
+        }
+
         // Validate new config
         if new_signers.is_empty() {
             return Err(VaultError::NoSigners);
         }
         if new_threshold < 1 {
-            return Err(VaultError::ThresholdTooLow);
+            return Err(VaultError::ThresholdTooHigh);
         }
         if new_threshold > new_signers.len() {
             return Err(VaultError::ThresholdTooHigh);
@@ -5791,7 +9182,7 @@ impl VaultDAO {
         admin.require_auth();
 
         let role = storage::get_role(&env, &admin);
-        if role != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -5846,7 +9237,7 @@ impl VaultDAO {
     /// Cancel a recovery proposal (admins only)
     pub fn cancel_recovery(env: Env, admin: Address, proposal_id: u64) -> Result<(), VaultError> {
         admin.require_auth();
-        if storage::get_role(&env, &admin) != Role::Admin {
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
             return Err(VaultError::InsufficientRole);
         }
 
@@ -5876,205 +9267,108 @@ impl VaultDAO {
     }
 
     // ========================================================================
-    // Admin Key Rotation (Issue: feature/admin-rotation-timelock)
-    // ========================================================================
-
-    /// Begin the admin key-rotation timelock.
-    ///
-    /// Stores a `PendingAdminRotation` that can only be executed after
-    /// `Config.admin_rotation_delay` ledgers have elapsed, giving other signers
-    /// a window to detect and cancel a compromised-key rotation.
-    ///
-    /// # Rules
-    /// * Caller must hold `Role::Admin` and authorize the call.
-    /// * Only one pending rotation is allowed at a time; call `cancel_admin_rotation`
-    ///   before initiating a new one (`ConditionsNotMet` otherwise).
-    /// * `new_admin` cannot equal the current caller.
-    ///
-    /// # Errors
-    /// - `InsufficientRole` — caller is not an Admin
-    /// - `ConditionsNotMet` — a rotation is already pending
-    /// - `InvalidAmount`    — `new_admin` == caller (no-op rotation)
-    pub fn initiate_admin_rotation(
-        env: Env,
-        admin: Address,
-        new_admin: Address,
-    ) -> Result<(), VaultError> {
-        admin.require_auth();
-
-        if storage::get_role(&env, &admin) != Role::Admin {
-            return Err(VaultError::InsufficientRole);
-        }
-
-        // Reject self-rotation (no-op that would lock out monitoring window)
-        if admin == new_admin {
-            return Err(VaultError::InvalidAmount);
-        }
-
-        // Only one pending rotation at a time
-        if storage::get_pending_admin_rotation(&env).is_some() {
-            return Err(VaultError::ConditionsNotMet);
-        }
-
-        let config = storage::get_config(&env)?;
-        let current_ledger = env.ledger().sequence() as u64;
-        let executable_after = current_ledger + config.admin_rotation_delay;
-
-        let rotation = PendingAdminRotation {
-            new_admin: new_admin.clone(),
-            initiated_by: admin.clone(),
-            initiated_at: current_ledger,
-            executable_after,
-        };
-
-        storage::set_pending_admin_rotation(&env, &rotation);
-        storage::extend_instance_ttl(&env);
-
-        events::emit_admin_rotation_initiated(&env, &admin, &new_admin, executable_after);
-
-        Ok(())
-    }
-
-    /// Execute a pending admin rotation after the timelock has expired.
-    ///
-    /// This function is permissionless — anyone may call it once the timelock
-    /// has passed.  The security guarantee comes from the observation window,
-    /// not from restricting who presses the button.
-    ///
-    /// On success:
-    /// * `Role::Admin` is granted to `new_admin`.
-    /// * `Role::Admin` is removed from the initiating admin (demoted to Member).
-    /// * The `PendingAdminRotation` record is deleted.
-    ///
-    /// # Errors
-    /// - `ProposalNotFound`    — no pending rotation exists
-    /// - `TimelockNotExpired`  — called before `executable_after` ledger
-    pub fn execute_admin_rotation(env: Env) -> Result<(), VaultError> {
-        let rotation =
-            storage::get_pending_admin_rotation(&env).ok_or(VaultError::ProposalNotFound)?;
-
-        let current_ledger = env.ledger().sequence() as u64;
-        if current_ledger < rotation.executable_after {
-            return Err(VaultError::TimelockNotExpired);
-        }
-
-        // Swap roles: grant Admin to new_admin, demote old initiator to Member
-        storage::set_role(&env, &rotation.new_admin, Role::Admin);
-        storage::set_role(&env, &rotation.initiated_by, Role::Member);
-
-        storage::clear_pending_admin_rotation(&env);
-        storage::extend_instance_ttl(&env);
-
-        events::emit_admin_rotation_executed(
-            &env,
-            &rotation.initiated_by,
-            &rotation.new_admin,
-            current_ledger,
-        );
-
-        Ok(())
-    }
-
-    /// Cancel a pending admin rotation.
-    ///
-    /// Callable by any current admin.  Deletes the pending rotation without
-    /// modifying any role assignments.
-    ///
-    /// # Errors
-    /// - `InsufficientRole`  — caller is not an Admin
-    /// - `ProposalNotFound`  — no pending rotation exists
-    pub fn cancel_admin_rotation(env: Env, admin: Address) -> Result<(), VaultError> {
-        admin.require_auth();
-
-        if storage::get_role(&env, &admin) != Role::Admin {
-            return Err(VaultError::InsufficientRole);
-        }
-
-        let rotation =
-            storage::get_pending_admin_rotation(&env).ok_or(VaultError::ProposalNotFound)?;
-
-        storage::clear_pending_admin_rotation(&env);
-        storage::extend_instance_ttl(&env);
-
-        events::emit_admin_rotation_cancelled(&env, &admin, &rotation.new_admin);
-
-        Ok(())
-    }
-
-    /// Query the in-flight admin rotation, or `None` if none is pending.
-    pub fn get_pending_admin_rotation(env: Env) -> Option<PendingAdminRotation> {
-        storage::get_pending_admin_rotation(&env)
-    }
-
-    // ========================================================================
     // Advanced Permissions (Issue: feature/advanced-permissions)
     // ========================================================================
 
-    /// Grant a specific permission to an address
+    /// Maximum depth of a delegation chain to prevent unbounded traversal.
+    const MAX_DELEGATION_DEPTH: u32 = 3;
+
+    /// Grant a specific permission to an address.
+    ///
+    /// Only an Admin may call this. If the permission already exists it is
+    /// replaced (allowing expiry updates). An optional expiry ledger can be
+    /// supplied; once that ledger is passed the grant is treated as
+    /// non-existent at check time.
     pub fn grant_permission(
         env: Env,
-        granter: Address,
+        admin: Address,
         target: Address,
         permission: types::Permission,
         expires_at: Option<u64>,
     ) -> Result<(), VaultError> {
-        granter.require_auth();
-
-        let mut permissions = storage::get_permissions(&env, &target);
-
-        // Check if permission already exists
-        for p in permissions.iter() {
-            if p.permission == permission {
-                return Err(VaultError::AlreadyApproved);
-            }
+        admin.require_auth();
+        if !storage::is_initialized(&env) {
+            return Err(VaultError::NotInitialized);
+        }
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
+            return Err(VaultError::Unauthorized);
         }
 
-        let grant = types::PermissionGrant {
-            permission,
-            granted_by: granter,
-            granted_at: env.ledger().sequence() as u64,
-            expires_at,
-        };
-
-        permissions.push_back(grant);
-        storage::set_permissions(&env, &target, permissions);
+        let mut grants = storage::get_permissions(&env, &target);
+        let mut replaced = false;
+        for i in 0..grants.len() {
+            if grants.get(i).unwrap().permission == permission {
+                grants.set(
+                    i,
+                    types::PermissionGrant {
+                        permission,
+                        granted_by: admin.clone(),
+                        granted_at: env.ledger().sequence() as u64,
+                        expires_at,
+                    },
+                );
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            grants.push_back(types::PermissionGrant {
+                permission,
+                granted_by: admin.clone(),
+                granted_at: env.ledger().sequence() as u64,
+                expires_at,
+            });
+        }
+        storage::set_permissions(&env, &target, grants);
         storage::extend_instance_ttl(&env);
 
+        events::emit_permission_granted(&env, &admin, &target, permission as u32);
         Ok(())
     }
 
-    /// Revoke a specific permission from an address
+    /// Revoke a specific permission from an address.
+    ///
+    /// Only an Admin may call this. Returns [`VaultError::Unauthorized`]
+    /// if the address does not hold the specified permission.
     pub fn revoke_permission(
         env: Env,
-        revoker: Address,
+        admin: Address,
         target: Address,
         permission: types::Permission,
     ) -> Result<(), VaultError> {
-        revoker.require_auth();
+        admin.require_auth();
+        if !storage::is_initialized(&env) {
+            return Err(VaultError::NotInitialized);
+        }
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin)) {
+            return Err(VaultError::Unauthorized);
+        }
 
-        let permissions = storage::get_permissions(&env, &target);
+        let grants = storage::get_permissions(&env, &target);
+        let mut updated = Vec::new(&env);
         let mut found = false;
-        let mut new_permissions = Vec::new(&env);
-
-        for p in permissions.iter() {
+        for p in grants.iter() {
             if p.permission != permission {
-                new_permissions.push_back(p);
+                updated.push_back(p);
             } else {
                 found = true;
             }
         }
-
         if !found {
-            return Err(VaultError::ProposalNotFound);
+            return Err(VaultError::Unauthorized);
         }
-
-        storage::set_permissions(&env, &target, new_permissions);
+        storage::set_permissions(&env, &target, updated);
         storage::extend_instance_ttl(&env);
 
+        events::emit_permission_revoked(&env, &admin, &target, permission as u32);
         Ok(())
     }
 
-    /// Delegate a permission to another address temporarily
+    /// Delegate a specific permission to another address temporarily.
+    ///
+    /// The delegator must hold the permission themselves (directly or via
+    /// role inheritance) and the delegation chain must not exceed
+    /// `MAX_DELEGATION_DEPTH`. The delegation expires at `expires_at`.
     pub fn delegate_permission(
         env: Env,
         delegator: Address,
@@ -6083,6 +9377,20 @@ impl VaultDAO {
         expires_at: u64,
     ) -> Result<(), VaultError> {
         delegator.require_auth();
+        if !storage::is_initialized(&env) {
+            return Err(VaultError::NotInitialized);
+        }
+
+        // Delegator must hold the permission.
+        if !Self::check_permission(&env, &delegator, &permission) {
+            return Err(VaultError::Unauthorized);
+        }
+
+        // Guard against unbounded delegation chains.
+        let depth = Self::delegation_depth(&env, &delegator, &permission, 0);
+        if depth >= Self::MAX_DELEGATION_DEPTH {
+            return Err(VaultError::InsufficientRole);
+        }
 
         let delegation = types::DelegatedPermission {
             permission,
@@ -6091,28 +9399,56 @@ impl VaultDAO {
             granted_at: env.ledger().sequence() as u64,
             expires_at,
         };
-
         storage::set_delegated_permission(&env, &delegation);
         storage::extend_instance_ttl(&env);
 
+        events::emit_permission_delegated(&env, &delegator, &delegatee, permission as u32);
         Ok(())
     }
-    /// Check if an address has a specific permission
+
+    /// Check if an address has a specific permission (returns bool for convenience).
     pub fn has_permission(env: Env, addr: Address, permission: types::Permission) -> bool {
         Self::check_permission(&env, &addr, &permission)
     }
 
-    /// Internal permission check helper
+    /// Entry-point version of the permission check that returns a Result.
+    ///
+    /// Returns `Ok(())` if the address holds a valid, non-expired permission
+    /// (directly or via delegation). Returns an error otherwise.
+    pub fn check_permission_entry(
+        env: Env,
+        addr: Address,
+        permission: types::Permission,
+    ) -> Result<(), VaultError> {
+        if !storage::is_initialized(&env) {
+            return Err(VaultError::NotInitialized);
+        }
+        if Self::check_permission(&env, &addr, &permission) {
+            Ok(())
+        } else {
+            // Distinguish expired from simply absent.
+            let now = env.ledger().sequence() as u64;
+            let grants = storage::get_permissions(&env, &addr);
+            for g in grants.iter() {
+                if g.permission == permission && g.expires_at.is_some_and(|exp| now > exp) {
+                    return Err(VaultError::ProposalExpired);
+                }
+            }
+            Err(VaultError::Unauthorized)
+        }
+    }
+
+    /// Internal permission check helper (bool, used by other contract functions).
     fn check_permission(env: &Env, addr: &Address, permission: &types::Permission) -> bool {
         let current_ledger = env.ledger().sequence() as u64;
 
-        // Check role-based permissions (inheritance)
+        // Role-based inheritance.
         let role = storage::get_role(env, addr);
         if Self::role_has_permission(&role, permission) {
             return true;
         }
 
-        // Check direct permission grants
+        // Direct permission grants (expiry enforced).
         let permissions = storage::get_permissions(env, addr);
         for p in permissions.iter() {
             if p.permission == *permission {
@@ -6125,7 +9461,7 @@ impl VaultDAO {
             }
         }
 
-        // Check delegated permissions
+        // Delegated permissions (expiry enforced).
         if let Ok(config) = storage::get_config(env) {
             for signer in config.signers.iter() {
                 if let Some(delegation) =
@@ -6141,11 +9477,38 @@ impl VaultDAO {
         false
     }
 
-    /// Map role to inherited permissions
+    /// Recursively count delegation hops above `addr` for a given permission.
+    fn delegation_depth(
+        env: &Env,
+        addr: &Address,
+        permission: &types::Permission,
+        depth: u32,
+    ) -> u32 {
+        if depth >= Self::MAX_DELEGATION_DEPTH {
+            return depth;
+        }
+        let config = match storage::get_config(env) {
+            Ok(c) => c,
+            Err(_) => return depth,
+        };
+        let now = env.ledger().sequence() as u64;
+        for signer in config.signers.iter() {
+            if let Some(dp) =
+                storage::get_delegated_permission(env, addr, &signer, *permission as u32)
+            {
+                if now <= dp.expires_at {
+                    return Self::delegation_depth(env, &signer, permission, depth + 1);
+                }
+            }
+        }
+        depth
+    }
+
+    /// Map role to inherited permissions.
     fn role_has_permission(role: &Role, permission: &types::Permission) -> bool {
         use types::Permission::*;
         match role {
-            Role::Admin => true, // Admin has all permissions
+            Role::Admin => true,
             Role::Treasurer => matches!(
                 permission,
                 CreateProposal
@@ -6157,10 +9520,11 @@ impl VaultDAO {
                     | ManageSubscriptions
             ),
             Role::Member => matches!(permission, ViewMetrics),
+            Role::Observer => false,
         }
     }
 
-    /// Get all permissions for an address
+    /// Get all permissions for an address.
     pub fn get_permissions(env: Env, addr: Address) -> Vec<types::PermissionGrant> {
         storage::get_permissions(&env, &addr)
     }
@@ -6222,10 +9586,10 @@ impl VaultDAO {
         timelock_end: u64,
     ) -> Result<(), VaultError> {
         if execution_time <= current_ledger {
-            return Err(VaultError::SchedulingError);
+            return Err(VaultError::TimelockNotExpired);
         }
         if execution_time < timelock_end {
-            return Err(VaultError::SchedulingError);
+            return Err(VaultError::TimelockNotExpired);
         }
         Ok(())
     }
@@ -6255,13 +9619,24 @@ impl VaultDAO {
 
         // Verify proposal is scheduled
         if proposal.status != ProposalStatus::Scheduled {
-            return Err(VaultError::SchedulingError);
+            return Err(VaultError::TimelockNotExpired);
         }
 
         // Verify execution time has been reached
-        let execution_time = proposal.execution_time.ok_or(VaultError::SchedulingError)?;
+        let execution_time = proposal.execution_time.ok_or(VaultError::TimelockNotExpired)?;
         if current_ledger < execution_time {
-            return Err(VaultError::SchedulingError);
+            return Err(VaultError::TimelockNotExpired);
+        }
+
+        // Check execution window upper bound
+        if proposal.execution_window_ledgers > 0
+            && current_ledger > execution_time + proposal.execution_window_ledgers
+        {
+            proposal.status = ProposalStatus::Expired;
+            storage::tag_index_prune_proposal(&env, &proposal.tags, proposal_id);
+            storage::set_proposal(&env, &proposal);
+            events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
+            return Err(VaultError::ExecutionWindowExpired);
         }
 
         // Verify sufficient approvals
@@ -6348,7 +9723,7 @@ impl VaultDAO {
 
         // Verify proposal is scheduled
         if proposal.status != ProposalStatus::Scheduled {
-            return Err(VaultError::SchedulingError);
+            return Err(VaultError::TimelockNotExpired);
         }
 
         // Transition to Cancelled
@@ -6460,46 +9835,157 @@ impl VaultDAO {
 
         sorted
     }
+
+    /// Expire a scheduled proposal whose execution window has passed.
+    ///
+    /// Anyone can call this to transition a window-expired scheduled proposal to
+    /// `ProposalStatus::Expired`. No-ops if the proposal is not scheduled or the
+    /// window has not yet passed.
+    pub fn expire_proposal(env: Env, proposal_id: u64) -> Result<(), VaultError> {
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        if proposal.status != ProposalStatus::Scheduled {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        let execution_time = proposal.execution_time.ok_or(VaultError::ProposalNotPending)?;
+        let current_ledger = env.ledger().sequence() as u64;
+
+        if proposal.execution_window_ledgers == 0
+            || current_ledger <= execution_time + proposal.execution_window_ledgers
+        {
+            return Err(VaultError::TimelockNotExpired);
+        }
+
+        proposal.status = ProposalStatus::Expired;
+        storage::tag_index_prune_proposal(&env, &proposal.tags, proposal_id);
+        storage::set_proposal(&env, &proposal);
+        events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
+
+        Ok(())
+    }
+
+    // ============================================================================
+    // Funding Rounds
     // ============================================================================
 
-    /// Create a new funding round for a proposal
+    /// Create a new funding round.
+    ///
+    /// Access: Treasurer or Admin role required.
+    ///
+    /// Validates:
+    /// - total_amount > 0
+    /// - milestones not empty and within configured bounds
+    /// - sum of milestone amounts equals total_amount
+    /// - funding round config is enabled
     pub fn create_funding_round(
         env: Env,
-        creator: Address,
-        proposal_id: u64,
+        proposer: Address,
         recipient: Address,
+        token: Address,
+        total_amount: i128,
         milestones: Vec<FundingMilestone>,
     ) -> Result<u64, VaultError> {
-        creator.require_auth();
+        proposer.require_auth();
 
-        let config =
-            storage::get_funding_round_config(&env).ok_or(VaultError::FundingRoundError)?;
+        // Role check: Treasurer or Admin
+        let role = storage::get_role(&env, &proposer);
+        if role != Role::Treasurer && role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
 
-        if !config.enabled {
+        if total_amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        if milestones.is_empty() {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Validate against config if present
+        if let Some(config) = storage::get_funding_round_config(&env) {
+            if !config.enabled {
+                return Err(VaultError::InvalidAmount);
+            }
+            if milestones.len() < config.min_milestones {
+                return Err(VaultError::InvalidAmount);
+            }
+            if milestones.len() > config.max_milestones {
+                return Err(VaultError::InvalidAmount);
+            }
+            if config.min_milestone_amount > 0 {
+                for i in 0..milestones.len() {
+                    let m = milestones.get(i).unwrap();
+                    if m.amount < config.min_milestone_amount {
+                        return Err(VaultError::InvalidAmount);
+                    }
+                }
+            }
+        }
+
+        // Determine mode: percentage-based or fixed-amount
+        let mut total_percentage_bps: u32 = 0;
+        let mut any_percentage_bps: bool = false;
+        for i in 0..milestones.len() {
+            if let Some(m) = milestones.get(i) {
+                if m.release_percentage_bps > 0 {
+                    any_percentage_bps = true;
+                }
+                total_percentage_bps =
+                    total_percentage_bps.saturating_add(m.release_percentage_bps);
+            }
+        }
+
+        // Validate: if any milestone uses percentage, all must sum to exactly 10000
+        if any_percentage_bps && total_percentage_bps != 10_000 {
             return Err(VaultError::FundingRoundError);
         }
 
-        if milestones.len() < config.min_milestones as u32 {
-            return Err(VaultError::FundingRoundError);
+        // Mixed mode (some percentage, some fixed) is not allowed
+        if any_percentage_bps {
+            for i in 0..milestones.len() {
+                if let Some(m) = milestones.get(i) {
+                    if m.release_percentage_bps == 0 && m.amount != 0 {
+                        return Err(VaultError::FundingRoundError);
+                    }
+                }
+            }
         }
 
-        if milestones.len() > config.max_milestones as u32 {
-            return Err(VaultError::FundingRoundError);
+        let total_amount: i128 = if any_percentage_bps {
+            // For percentage-based, total_amount must be provided via milestone amounts or
+            // we derive it. We use the sum of amounts (should be the total round amount).
+            // If all amounts are 0, the proposal amount is used as total.
+            let sum_amounts: i128 = milestones.iter().map(|m| m.amount).sum();
+            if sum_amounts > 0 {
+                sum_amounts
+            } else {
+                proposal.amount
+            }
+        } else {
+            milestones.iter().map(|m| m.amount).sum()
+        };
+        // Validate milestone amounts sum to total_amount
+        let mut milestone_sum: i128 = 0;
+        for i in 0..milestones.len() {
+            let m = milestones.get(i).unwrap();
+            if m.amount <= 0 {
+                return Err(VaultError::InvalidAmount);
+            }
+            milestone_sum = milestone_sum.saturating_add(m.amount);
         }
-
-        // Verify proposal exists
-        let proposal = storage::get_proposal(&env, proposal_id)?;
-
-        // Verify milestone amounts
-        let total_amount: i128 = milestones.iter().map(|m| m.amount).sum();
+        if milestone_sum != total_amount {
+            return Err(VaultError::InvalidAmount);
+        }
 
         let milestone_count = milestones.len();
         let round_id = storage::bump_funding_round_id(&env);
+
         let round = FundingRound {
             id: round_id,
-            proposal_id,
+            proposal_id: 0, // not tied to a proposal in this flow
             recipient: recipient.clone(),
-            token: proposal.token.clone(),
+            token: token.clone(),
             total_amount,
             released_amount: 0,
             milestones,
@@ -6510,14 +9996,14 @@ impl VaultDAO {
         };
 
         storage::set_funding_round(&env, &round);
-        storage::add_proposal_funding_round(&env, proposal_id, round_id);
+        storage::extend_instance_ttl(&env);
 
         events::emit_funding_round_created(
             &env,
             round_id,
-            proposal_id,
-            &creator,
-            &proposal.token,
+            0,
+            &recipient,
+            &token,
             total_amount,
             milestone_count,
         );
@@ -6525,7 +10011,9 @@ impl VaultDAO {
         Ok(round_id)
     }
 
-    /// Approve a funding round (requires signer)
+    /// Approve a funding round, transitioning it from Pending → Approved → Active.
+    ///
+    /// Access: Admin role required.
     pub fn approve_funding_round(
         env: Env,
         approver: Address,
@@ -6533,17 +10021,18 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         approver.require_auth();
 
-        let vault_config = storage::get_config(&env)?;
-        if !vault_config.signers.contains(&approver) {
-            return Err(VaultError::NotASigner);
+        let role = storage::get_role(&env, &approver);
+        if role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
         }
 
         let mut round = storage::get_funding_round(&env, round_id)?;
 
         if round.status != FundingRoundStatus::Pending {
-            return Err(VaultError::FundingRoundError);
+            return Err(VaultError::InvalidAmount);
         }
 
+        // Transition: Pending → Approved → Active (combined for simplicity)
         round.status = FundingRoundStatus::Active;
         round.approved_at = env.ledger().timestamp();
 
@@ -6553,7 +10042,9 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Submit milestone completion
+    /// Submit a milestone for verification.
+    ///
+    /// Access: Recipient of the funding round only.
     pub fn submit_milestone(
         env: Env,
         submitter: Address,
@@ -6564,29 +10055,31 @@ impl VaultDAO {
 
         let mut round = storage::get_funding_round(&env, round_id)?;
 
+        // Only the designated recipient may submit
         if round.recipient != submitter {
             return Err(VaultError::Unauthorized);
         }
 
         if round.status != FundingRoundStatus::Active {
-            return Err(VaultError::FundingRoundError);
+            return Err(VaultError::InvalidAmount);
         }
 
         if milestone_index >= round.milestones.len() {
-            return Err(VaultError::FundingRoundError);
+            return Err(VaultError::InvalidAmount);
         }
 
-        let milestone = &round.milestones.get(milestone_index).unwrap();
+        let milestone = round.milestones.get(milestone_index).unwrap();
 
+        // Prevent re-submission
         if milestone.status != FundingMilestoneStatus::Pending {
-            return Err(VaultError::FundingRoundError);
+            return Err(VaultError::InvalidAmount);
         }
 
-        let mut updated_milestone = milestone.clone();
-        updated_milestone.status = FundingMilestoneStatus::Submitted;
-        updated_milestone.submitted_at = env.ledger().timestamp();
+        let mut updated = milestone.clone();
+        updated.status = FundingMilestoneStatus::Submitted;
+        updated.submitted_at = env.ledger().timestamp();
 
-        round.milestones.set(milestone_index, updated_milestone);
+        round.milestones.set(milestone_index, updated);
         storage::set_funding_round(&env, &round);
 
         events::emit_milestone_submitted(&env, round_id, milestone_index, &submitter);
@@ -6594,34 +10087,42 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Verify a milestone (requires signer)
+    /// Verify a submitted milestone and release the proportional tranche to the recipient.
+    ///
+    /// Access: Admin role required.
+    ///
+    /// On success:
+    /// - Milestone status → Verified
+    /// - Proportional amount transferred to recipient
+    /// - If all milestones verified, round status → Completed
     pub fn verify_milestone(
         env: Env,
         verifier: Address,
         round_id: u64,
         milestone_index: u32,
-    ) -> Result<(), VaultError> {
+    ) -> Result<i128, VaultError> {
         verifier.require_auth();
 
-        let vault_config = storage::get_config(&env)?;
-        if !vault_config.signers.contains(&verifier) {
-            return Err(VaultError::NotASigner);
+        let role = storage::get_role(&env, &verifier);
+        if role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
         }
 
         let mut round = storage::get_funding_round(&env, round_id)?;
 
         if round.status != FundingRoundStatus::Active {
-            return Err(VaultError::FundingRoundError);
+            return Err(VaultError::InvalidAmount);
         }
 
         if milestone_index >= round.milestones.len() {
-            return Err(VaultError::FundingRoundError);
+            return Err(VaultError::InvalidAmount);
         }
 
-        let milestone = &round.milestones.get(milestone_index).unwrap();
+        let milestone = round.milestones.get(milestone_index).unwrap();
 
+        // Must be submitted, not already verified
         if milestone.status != FundingMilestoneStatus::Submitted {
-            return Err(VaultError::FundingRoundError);
+            return Err(VaultError::InvalidStatusTransition);
         }
 
         let mut updated_milestone = milestone.clone();
@@ -6629,7 +10130,19 @@ impl VaultDAO {
         updated_milestone.verified_at = env.ledger().timestamp();
         updated_milestone.verified_by = Some(verifier.clone());
 
-        let amount = updated_milestone.amount;
+        // Compute release amount: percentage-based or fixed
+        let amount = if updated_milestone.release_percentage_bps > 0 {
+            // Integer-truncated percentage allocation
+            round.total_amount * updated_milestone.release_percentage_bps as i128 / 10_000
+        } else {
+            updated_milestone.amount
+        };
+
+        // For percentage-based, store the computed amount in milestone for release
+        if updated_milestone.release_percentage_bps > 0 {
+            updated_milestone.amount = amount;
+        }
+
         round.milestones.set(milestone_index, updated_milestone);
         storage::set_funding_round(&env, &round);
 
@@ -6651,31 +10164,57 @@ impl VaultDAO {
         if !vault_config.signers.contains(&releaser) {
             return Err(VaultError::NotASigner);
         }
+        
+        // Role check (Admin or Treasurer only)
+        let role = storage::get_role(&env, &verifier)?;
+        if role != Role::Admin && role != Role::Treasurer {
+            return Err(VaultError::InsufficientRole);
+        }
+        
+        // First verification timestamp
+        if milestone.verifications.is_empty() {
+            milestone.verified_at = env.ledger().sequence();
+        }
+        
+        // Add verifier
+        milestone.verifications.push(verifier.clone());
+        
+        // Check quorum
+        if (milestone.verifications.len() as u32) >= milestone.required_verifiers {
+            milestone.status = FundingMilestoneStatus::Verified;
+        
+            // Optional: trigger fund release logic
+            storage::release_milestone_funds(&env, round_id, milestone_index)?;
+        }
+        updated.verified_at = env.ledger().timestamp();
+        updated.verified_by = Some(verifier.clone());
 
-        let mut round = storage::get_funding_round(&env, round_id)?;
+        let mut amount = milestone.amount;
 
-        if round.status != FundingRoundStatus::Active {
-            return Err(VaultError::FundingRoundError);
+        // Handle rounding remainder for percentage-based milestones.
+        // If this is the last unverified milestone being released and we are
+        // using percentage-based allocation, any remainder from truncation
+        // is added here so that total released never exceeds total_amount.
+        if milestone.release_percentage_bps > 0 && round.all_milestones_verified() {
+            let allocated: i128 = round.milestones.iter().map(|m| m.amount).sum();
+            if allocated < round.total_amount {
+                let remainder = round.total_amount - allocated;
+                amount = amount.saturating_add(remainder);
+
+                // Update the stored milestone amount for consistency
+                let mut updated = milestone.clone();
+                updated.amount = amount;
+                round.milestones.set(milestone_index, updated);
+            }
         }
 
-        if milestone_index >= round.milestones.len() {
-            return Err(VaultError::FundingRoundError);
-        }
-
-        let milestone = &round.milestones.get(milestone_index).unwrap();
-
-        if milestone.status != FundingMilestoneStatus::Verified {
-            return Err(VaultError::FundingRoundError);
-        }
-
-        let amount = milestone.amount;
-
-        // Transfer funds
+        // Release proportional tranche to recipient
         token::transfer(&env, &round.token, &round.recipient, amount);
+        round.released_amount = round.released_amount.saturating_add(amount);
 
-        round.released_amount += amount;
+        round.released_amount = round.released_amount.saturating_add(amount);
 
-        // Check if all milestones are verified
+        // Auto-complete if all milestones are now verified
         if round.all_milestones_verified() {
             round.status = FundingRoundStatus::Completed;
             round.finalized_at = env.ledger().timestamp();
@@ -6683,12 +10222,25 @@ impl VaultDAO {
         }
 
         storage::set_funding_round(&env, &round);
-        events::emit_funding_released(&env, round_id, &round.recipient, amount, milestone_index);
+        let percentage_bps = milestone.release_percentage_bps;
+        events::emit_funding_released(
+            &env,
+            round_id,
+            &round.recipient,
+            amount,
+            milestone_index,
+            percentage_bps,
+        );
 
         Ok(amount)
     }
 
-    /// Cancel a funding round
+    /// Cancel a funding round and refund any unreleased tokens.
+    ///
+    /// Access: Admin role required.
+    ///
+    /// Refunds `total_amount - released_amount` back to the contract (escrow).
+    /// No external refund transfer is performed since funds are held in the vault itself.
     pub fn cancel_funding_round(
         env: Env,
         canceller: Address,
@@ -6696,18 +10248,18 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         canceller.require_auth();
 
-        let vault_config = storage::get_config(&env)?;
-        let mut round = storage::get_funding_round(&env, round_id)?;
-
-        // Only signer or recipient can cancel
-        if !vault_config.signers.contains(&canceller) && canceller != round.recipient {
-            return Err(VaultError::Unauthorized);
+        let role = storage::get_role(&env, &canceller);
+        if role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
         }
 
+        let mut round = storage::get_funding_round(&env, round_id)?;
+
+        // Cannot cancel a terminal state
         if round.status == FundingRoundStatus::Completed
             || round.status == FundingRoundStatus::Cancelled
         {
-            return Err(VaultError::FundingRoundError);
+            return Err(VaultError::InvalidAmount);
         }
 
         round.status = FundingRoundStatus::Cancelled;
@@ -6749,5 +10301,1357 @@ impl VaultDAO {
     /// Get funding round configuration
     pub fn get_funding_round_config(env: Env) -> Option<FundingRoundConfig> {
         storage::get_funding_round_config(&env)
+    }
+
+    // ========================================================================
+    // Cross-Vault Proposals
+    // ========================================================================
+
+    /// Configure this vault's cross-vault participation. Admin only.
+    pub fn set_cross_vault_config(
+        env: Env,
+        admin: Address,
+        config: CrossVaultConfig,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        let vault_config = storage::get_config(&env)?;
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin))
+            && !vault_config.signers.contains(&admin)
+        {
+            return Err(VaultError::Unauthorized);
+        }
+        storage::set_cross_vault_config(&env, &config);
+        events::emit_cross_vault_config_set(&env, &admin);
+        Ok(())
+    }
+
+    /// Get this vault's cross-vault configuration.
+    pub fn get_cross_vault_config(env: Env) -> Option<CrossVaultConfig> {
+        storage::get_cross_vault_config(&env)
+    }
+
+    /// Propose a cross-vault transfer. Creates a standard proposal that, when
+    /// approved and executed via `execute_cross_vault`, will invoke each target
+    /// vault's `execute_proposal` via cross-contract call.
+    pub fn propose_cross_vault(
+        env: Env,
+        proposer: Address,
+        actions: Vec<VaultAction>,
+        priority: Priority,
+        conditions: Vec<Condition>,
+        condition_logic: ConditionLogic,
+        insurance_amount: i128,
+    ) -> Result<u64, VaultError> {
+        proposer.require_auth();
+
+        let config = storage::get_config(&env)?;
+        let role = storage::get_role(&env, &proposer);
+        if !Role::role_satisfies(Role::Treasurer, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        if actions.is_empty() {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Validate each action amount and that the target vault is non-zero
+        let mut total_amount: i128 = 0;
+        for i in 0..actions.len() {
+            let action = actions.get(i).unwrap();
+            if action.amount <= 0 {
+                return Err(VaultError::InvalidAmount);
+            }
+            total_amount = total_amount.saturating_add(action.amount);
+        }
+
+        // Use the first action's token/recipient as the base proposal fields
+        let first = actions.get(0).unwrap();
+
+        // Reuse the internal proposal machinery for approval tracking
+        let current_ledger = env.ledger().sequence() as u64;
+        let unlock_ledger = if total_amount >= config.timelock_threshold {
+            current_ledger + config.timelock_delay
+        } else {
+            0
+        };
+
+        let proposal_id = storage::increment_proposal_id(&env);
+
+        let proposal = Proposal {
+            id: proposal_id,
+            proposer: proposer.clone(),
+            recipient: first.recipient.clone(),
+            token: first.token.clone(),
+            amount: total_amount,
+            memo: Symbol::new(&env, "cross_vault"),
+            metadata: Map::new(&env),
+            tags: Vec::new(&env),
+            approvals: Vec::new(&env),
+            abstentions: Vec::new(&env),
+            attachments: Vec::new(&env),
+            status: ProposalStatus::Pending,
+            priority: priority.clone(),
+            conditions,
+            condition_logic,
+            created_at: current_ledger,
+            expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
+            unlock_ledger,
+            execution_time: None,
+                execution_window_ledgers: 0,
+            insurance_amount,
+            stake_amount: 0,
+            gas_limit: 0,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env),
+            is_swap: false,
+            voting_deadline: if config.default_voting_deadline > 0 {
+                current_ledger + config.default_voting_deadline
+            } else {
+                0
+            },
+            execution_ledger: 0,
+        };
+
+        storage::set_proposal(&env, &proposal);
+        storage::add_to_priority_queue(&env, priority as u32, proposal_id);
+
+        let action_count = actions.len();
+        let cv = CrossVaultProposal {
+            actions,
+            status: CrossVaultStatus::Pending,
+            execution_results: Vec::new(&env),
+            executed_at: 0,
+        };
+        storage::set_cross_vault_proposal(&env, proposal_id, &cv);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_cross_vault_proposed(&env, proposal_id, &proposer, action_count);
+
+        Ok(proposal_id)
+    }
+
+    /// Execute an approved cross-vault proposal. Invokes each target vault's
+    /// `execute_proposal` via cross-contract call. Partial failures are
+    /// recorded in `execution_results` but do not revert the whole batch.
+    pub fn execute_cross_vault(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        if proposal.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+        if proposal.unlock_ledger > 0 && env.ledger().sequence() as u64 <= proposal.unlock_ledger {
+            return Err(VaultError::TimelockNotExpired);
+        }
+
+        let mut cv = storage::get_cross_vault_proposal(&env, proposal_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+
+        if cv.status != CrossVaultStatus::Pending && cv.status != CrossVaultStatus::Approved {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        let mut results: Vec<bool> = Vec::new(&env);
+        let mut success_count: u32 = 0;
+
+        for i in 0..cv.actions.len() {
+            let action = cv.actions.get(i).unwrap();
+
+            // Validate the target vault has this coordinator in its authorized list
+            let target_config: Option<CrossVaultConfig> = env.invoke_contract(
+                &action.vault_address,
+                &Symbol::new(&env, "get_cross_vault_config"),
+                soroban_sdk::Vec::new(&env),
+            );
+
+            let authorized = target_config.is_some_and(|cfg| {
+                cfg.enabled
+                    && cfg
+                        .authorized_coordinators
+                        .contains(env.current_contract_address())
+            });
+
+            if !authorized {
+                results.push_back(false);
+                continue;
+            }
+
+            // Transfer tokens from this vault to the recipient on the target vault
+            let ok =
+                token::try_transfer(&env, &action.token, &action.recipient, action.amount).is_ok();
+            results.push_back(ok);
+            if ok {
+                success_count += 1;
+            }
+        }
+
+        let all_ok = success_count == cv.actions.len();
+        cv.status = if all_ok {
+            CrossVaultStatus::Executed
+        } else {
+            CrossVaultStatus::Failed
+        };
+        cv.execution_results = results;
+        cv.executed_at = env.ledger().sequence() as u64;
+
+        proposal.status = ProposalStatus::Executed;
+
+        storage::set_cross_vault_proposal(&env, proposal_id, &cv);
+        storage::set_proposal(&env, &proposal);
+
+        events::emit_cross_vault_executed(&env, proposal_id, &executor, success_count);
+
+        Ok(())
+    }
+
+    /// Get the cross-vault proposal metadata for a given proposal ID.
+    pub fn get_cross_vault_proposal(env: Env, proposal_id: u64) -> Option<CrossVaultProposal> {
+        storage::get_cross_vault_proposal(&env, proposal_id)
+    }
+
+    // ========================================================================
+    // Dispute Resolution
+    // ========================================================================
+
+    /// Raise a dispute against a proposal or escrow.
+    ///
+    /// Only the funder or recipient of the linked escrow (if `escrow_id` is
+    /// provided) may file a dispute. For proposal-only disputes any signer may
+    /// file one.
+    pub fn raise_dispute(
+        env: Env,
+        disputer: Address,
+        proposal_id: u64,
+        escrow_id: Option<u64>,
+        reason: Symbol,
+        evidence: Vec<String>,
+    ) -> Result<u64, VaultError> {
+        disputer.require_auth();
+
+        // Proposal must exist
+        let proposal = storage::get_proposal(&env, proposal_id)?;
+
+        // If linked to an escrow, only funder or recipient may dispute
+        if let Some(eid) = escrow_id {
+            let mut escrow = storage::get_escrow(&env, eid)?;
+            if disputer != escrow.funder && disputer != escrow.recipient {
+                return Err(VaultError::Unauthorized);
+            }
+            // Mark escrow as disputed
+            escrow.status = EscrowStatus::Disputed;
+            escrow.dispute_reason = reason.clone();
+            storage::set_escrow(&env, &escrow);
+            events::emit_escrow_disputed(&env, eid, &disputer, &reason);
+        } else {
+            // For proposal-only disputes, require the disputer to be a signer
+            let config = storage::get_config(&env)?;
+            if !config.signers.contains(&disputer) {
+                return Err(VaultError::NotASigner);
+            }
+        }
+
+        // Cannot dispute an already-executed or cancelled proposal
+        if proposal.status == ProposalStatus::Executed
+            || proposal.status == ProposalStatus::Cancelled
+        {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        let dispute_id = storage::increment_dispute_id(&env);
+        let dispute = Dispute {
+            id: dispute_id,
+            proposal_id,
+            disputer: disputer.clone(),
+            reason,
+            evidence,
+            status: DisputeStatus::Filed,
+            resolution: DisputeResolution::Dismissed,
+            arbitrator: disputer.clone(), // placeholder until resolved
+            filed_at: env.ledger().sequence() as u64,
+            resolved_at: 0,
+        };
+
+        storage::set_dispute(&env, &dispute);
+        storage::add_proposal_dispute(&env, proposal_id, dispute_id);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_dispute_raised(&env, dispute_id, proposal_id, &disputer);
+
+        Ok(dispute_id)
+    }
+
+    /// Resolve a dispute. Only an Admin or the escrow's designated arbitrator may call this.
+    ///
+    /// When `release_to_recipient` is true, remaining escrow funds go to the recipient;
+    /// otherwise they are refunded to the funder.
+    pub fn resolve_dispute(
+        env: Env,
+        admin: Address,
+        dispute_id: u64,
+        resolution: DisputeResolution,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let config = storage::get_config(&env)?;
+        if !Role::role_satisfies(Role::Admin, storage::get_role(&env, &admin))
+            && !config.signers.contains(&admin)
+        {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let mut dispute = storage::get_dispute(&env, dispute_id)
+            .map_err(|_| VaultError::DisputeNotFound)?;
+
+        if dispute.status == DisputeStatus::Resolved || dispute.status == DisputeStatus::Dismissed {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        // Determine if funds should be released to recipient
+        let release_to_recipient = matches!(resolution, DisputeResolution::InFavorOfDisputer | DisputeResolution::Compromise);
+
+        // Find any escrow linked to this dispute's proposal and release funds
+        let escrow_ids = storage::get_funder_escrows(&env, &admin);
+        // Try to find a disputed escrow linked to this proposal
+        let proposal_disputes = storage::get_proposal_disputes(&env, dispute.proposal_id);
+        let _ = proposal_disputes; // used for context
+
+        // Look for a disputed escrow for this proposal by scanning funder/recipient escrows
+        // We check all escrows linked to the proposal's disputer (funder)
+        let disputer_funder_escrows = storage::get_funder_escrows(&env, &dispute.disputer);
+        let disputer_recipient_escrows = storage::get_recipient_escrows(&env, &dispute.disputer);
+
+        // Combine both lists and find a Disputed escrow
+        let mut all_escrow_ids: Vec<u64> = Vec::new(&env);
+        for id in disputer_funder_escrows.iter() {
+            all_escrow_ids.push_back(id);
+        }
+        for id in disputer_recipient_escrows.iter() {
+            all_escrow_ids.push_back(id);
+        }
+        // Also check escrows from the admin's perspective
+        for id in escrow_ids.iter() {
+            all_escrow_ids.push_back(id);
+        }
+
+        for eid in all_escrow_ids.iter() {
+            if let Ok(mut escrow) = storage::get_escrow(&env, eid) {
+                if escrow.status == EscrowStatus::Disputed {
+                    let unreleased = escrow.total_amount - escrow.released_amount;
+                    if unreleased > 0 {
+                        let (to_addr, is_refund) = if release_to_recipient {
+                            (escrow.recipient.clone(), false)
+                        } else {
+                            (escrow.funder.clone(), true)
+                        };
+                        token::transfer(&env, &escrow.token, &to_addr, unreleased);
+                        escrow.released_amount = escrow.total_amount;
+                        events::emit_escrow_released(&env, eid, &to_addr, unreleased, is_refund);
+                    }
+                    escrow.status = if release_to_recipient {
+                        EscrowStatus::Released
+                    } else {
+                        EscrowStatus::Refunded
+                    };
+                    escrow.finalized_at = env.ledger().sequence() as u64;
+                    storage::set_escrow(&env, &escrow);
+                    events::emit_escrow_dispute_resolved(&env, eid, &admin, release_to_recipient);
+                    break;
+                }
+            }
+        }
+
+        let resolution_code = resolution.clone() as u32;
+        dispute.status = match resolution {
+            DisputeResolution::Dismissed => DisputeStatus::Dismissed,
+            _ => DisputeStatus::Resolved,
+        };
+        dispute.resolution = resolution;
+        dispute.arbitrator = admin.clone();
+        dispute.resolved_at = env.ledger().sequence() as u64;
+
+        storage::set_dispute(&env, &dispute);
+
+        events::emit_dispute_resolved(&env, dispute_id, &admin, resolution_code);
+
+        Ok(())
+    }
+
+    /// Get a dispute by ID.
+    pub fn get_dispute(env: Env, dispute_id: u64) -> Result<Dispute, VaultError> {
+        storage::get_dispute(&env, dispute_id)
+    }
+
+    /// Get all dispute IDs linked to a proposal.
+    pub fn get_proposal_disputes(env: Env, proposal_id: u64) -> Vec<u64> {
+        storage::get_proposal_disputes(&env, proposal_id)
+    }
+
+    // ========================================================================
+    // Subscription Management (Issue: feature/subscription-system)
+    // ========================================================================
+
+    /// Create a new subscription.
+    ///
+    /// The subscriber authorizes the call. The first payment is transferred
+    /// immediately from the subscriber to the service provider.
+    pub fn create_subscription(
+        env: Env,
+        subscriber: Address,
+        provider: Address,
+        tier: SubscriptionTier,
+        token: Address,
+        amount_per_period: i128,
+        interval_ledgers: u64,
+        auto_renew: bool,
+        grace_period_ledgers: u64,
+    ) -> Result<u64, VaultError> {
+        subscriber.require_auth();
+        if !storage::is_initialized(&env) {
+            return Err(VaultError::NotInitialized);
+        }
+        if amount_per_period <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        if interval_ledgers == 0 {
+            return Err(VaultError::IntervalTooShort);
+        }
+
+        // First payment up-front: subscriber → vault → provider.
+        token::transfer_to_vault(&env, &token, &subscriber, amount_per_period);
+        token::transfer(&env, &token, &provider, amount_per_period);
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let id = storage::increment_subscription_id(&env);
+
+        let sub = Subscription {
+            id,
+            subscriber,
+            service_provider: provider,
+            tier: tier.clone(),
+            token,
+            amount_per_period,
+            interval_ledgers,
+            next_renewal_ledger: current_ledger + interval_ledgers,
+            created_at: current_ledger,
+            status: SubscriptionStatus::Active,
+            total_payments: 1,
+            last_payment_ledger: current_ledger,
+            auto_renew,
+            grace_period_ledgers,
+        };
+
+        storage::set_subscription(&env, &sub);
+        storage::add_to_subscriber_index(&env, &sub.subscriber, id);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_subscription_created(
+            &env,
+            id,
+            &sub.subscriber,
+            tier as u32,
+            amount_per_period,
+        );
+
+        Ok(id)
+    }
+
+    /// Process the next renewal payment for a subscription.
+    ///
+    /// Can be called by anyone when `auto_renew = true` and the renewal ledger
+    /// has passed. The subscriber must call it themselves otherwise.
+    /// Succeeds if `current_ledger <= next_renewal_ledger + grace_period_ledgers`.
+    /// After the grace period, the subscription is expired and renewal is rejected.
+    pub fn renew_subscription(
+        env: Env,
+        caller: Address,
+        subscription_id: u64,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut sub = storage::get_subscription(&env, subscription_id)?;
+
+        if sub.status == SubscriptionStatus::Cancelled {
+            return Err(VaultError::SubscriptionAlreadyCancelled);
+        }
+        if sub.status == SubscriptionStatus::Expired {
+            return Err(VaultError::SubscriptionAlreadyExpired);
+        }
+        if sub.status != SubscriptionStatus::Active {
+            return Err(VaultError::SubscriptionNotActive);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        if current_ledger < sub.next_renewal_ledger {
+            return Err(VaultError::RenewalNotDue);
+        }
+
+        // Check if grace period has lapsed — expire and reject
+        let grace_deadline = sub.next_renewal_ledger + sub.grace_period_ledgers;
+        if current_ledger > grace_deadline {
+            sub.status = SubscriptionStatus::Expired;
+            sub.auto_renew = false;
+            storage::set_subscription(&env, &sub);
+            events::emit_subscription_expired(&env, subscription_id);
+            return Err(VaultError::SubscriptionAlreadyExpired);
+        }
+
+        // Only the subscriber can renew unless auto_renew is enabled.
+        if !sub.auto_renew && caller != sub.subscriber {
+            return Err(VaultError::NotSubscriberOrAdmin);
+        }
+
+        // Pull renewal payment from subscriber into vault, then forward to provider.
+        token::transfer_to_vault(&env, &sub.token, &sub.subscriber, sub.amount_per_period);
+        token::transfer(
+            &env,
+            &sub.token,
+            &sub.service_provider,
+            sub.amount_per_period,
+        );
+
+        sub.total_payments += 1;
+        sub.last_payment_ledger = current_ledger;
+        sub.next_renewal_ledger = current_ledger + sub.interval_ledgers;
+
+        let payment_number = sub.total_payments;
+        let amount = sub.amount_per_period;
+
+        storage::set_subscription(&env, &sub);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_subscription_renewed(&env, subscription_id, payment_number, amount);
+
+        Ok(())
+    }
+
+    /// Cancel a subscription.
+    ///
+    /// Only the subscriber or an Admin may cancel.
+    pub fn cancel_subscription(
+        env: Env,
+        caller: Address,
+        subscription_id: u64,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut sub = storage::get_subscription(&env, subscription_id)?;
+
+        if sub.status == SubscriptionStatus::Cancelled {
+            return Err(VaultError::SubscriptionAlreadyCancelled);
+        }
+
+        let role = storage::get_role(&env, &caller);
+        if caller != sub.subscriber && !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::Unauthorized);
+        }
+
+        sub.status = SubscriptionStatus::Cancelled;
+        storage::set_subscription(&env, &sub);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_subscription_cancelled(&env, subscription_id, &caller);
+
+        Ok(())
+    }
+
+    /// Upgrade (or downgrade) a subscription tier and amount.
+    ///
+    /// Only the subscriber may call this. The new amount takes effect on the
+    /// next renewal; no immediate payment is made.
+    pub fn upgrade_subscription(
+        env: Env,
+        subscriber: Address,
+        subscription_id: u64,
+        new_tier: SubscriptionTier,
+        new_amount_per_period: i128,
+    ) -> Result<(), VaultError> {
+        subscriber.require_auth();
+
+        let mut sub = storage::get_subscription(&env, subscription_id)?;
+
+        if sub.subscriber != subscriber {
+            return Err(VaultError::NotSubscriberOrAdmin);
+        }
+        if sub.status != SubscriptionStatus::Active {
+            return Err(VaultError::SubscriptionNotActive);
+        }
+        if new_amount_per_period <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let old_tier = sub.tier.clone();
+        sub.tier = new_tier.clone();
+        sub.amount_per_period = new_amount_per_period;
+
+        storage::set_subscription(&env, &sub);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_subscription_upgraded(
+            &env,
+            subscription_id,
+            old_tier as u32,
+            new_tier as u32,
+            new_amount_per_period,
+        );
+
+        Ok(())
+    }
+
+    /// Get subscription details by ID.
+    pub fn get_subscription(env: Env, subscription_id: u64) -> Result<Subscription, VaultError> {
+        storage::get_subscription(&env, subscription_id)
+    }
+
+    /// Get all subscription IDs for a given subscriber address.
+    pub fn get_subscriptions_by_subscriber(
+        env: Env,
+        subscriber: Address,
+    ) -> Vec<u64> {
+        storage::get_subscriber_index(&env, &subscriber)
+    }
+
+    /// Scan all subscriptions up to `next_subscription_id` and expire any that
+    /// are past their grace deadline. Permissionless — anyone may call this to
+    /// prevent griefing by inaction.
+    ///
+    /// Emits `subscription_expired` for each subscription that transitions to
+    /// `SubscriptionStatus::Expired`.
+    pub fn expire_overdue_subscriptions(env: Env, caller: Address) -> u32 {
+        caller.require_auth();
+        let current_ledger = env.ledger().sequence() as u64;
+        let next_id = storage::get_next_subscription_id(&env);
+        let mut expired_count: u32 = 0;
+
+        for id in 1..next_id {
+            let sub = match storage::get_subscription(&env, id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if sub.status != SubscriptionStatus::Active {
+                continue;
+            }
+            let grace_deadline = sub.next_renewal_ledger + sub.grace_period_ledgers;
+            if current_ledger > grace_deadline {
+                let mut expired_sub = sub;
+                expired_sub.status = SubscriptionStatus::Expired;
+                expired_sub.auto_renew = false;
+                storage::set_subscription(&env, &expired_sub);
+                events::emit_subscription_expired(&env, id);
+                expired_count += 1;
+            }
+        }
+
+        storage::extend_instance_ttl(&env);
+        expired_count
+    }
+
+    /// Reactivate an expired subscription by paying the overdue amount.
+    ///
+    /// Only the original subscriber may reactivate. The subscriber pays one
+    /// period's amount immediately and the next renewal is scheduled from now.
+    pub fn reactivate_subscription(
+        env: Env,
+        subscriber: Address,
+        subscription_id: u64,
+    ) -> Result<(), VaultError> {
+        subscriber.require_auth();
+
+        let mut sub = storage::get_subscription(&env, subscription_id)?;
+
+        if sub.subscriber != subscriber {
+            return Err(VaultError::NotSubscriberOrAdmin);
+        }
+        if sub.status != SubscriptionStatus::Expired {
+            return Err(VaultError::SubscriptionNotActive);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+
+        // Collect reactivation payment: subscriber → vault → provider
+        token::transfer_to_vault(&env, &sub.token, &subscriber, sub.amount_per_period);
+        token::transfer(&env, &sub.token, &sub.service_provider, sub.amount_per_period);
+
+        sub.status = SubscriptionStatus::Active;
+        sub.auto_renew = true;
+        sub.total_payments += 1;
+        sub.last_payment_ledger = current_ledger;
+        sub.next_renewal_ledger = current_ledger + sub.interval_ledgers;
+
+        let payment_number = sub.total_payments;
+        let amount = sub.amount_per_period;
+
+        storage::set_subscription(&env, &sub);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_subscription_renewed(&env, subscription_id, payment_number, amount);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Reputation Config (Issue: feature/reputation-system)
+    // ========================================================================
+
+    /// Set the admin-configurable reputation decay parameters.
+    ///
+    /// Only Admin can call this. Emits `rep_config_updated` and `config_updated`.
+    ///
+    /// # Arguments
+    /// * `admin`  - Admin address (must authorize)
+    /// * `config` - New `ReputationConfig` with `decay_half_life_ledgers` and `decay_min_score`
+    pub fn set_reputation_config(
+        env: Env,
+        admin: Address,
+        config: ReputationConfig,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        storage::set_reputation_config(&env, &config);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_reputation_config_updated(&env, &admin);
+        events::emit_config_updated(&env, &admin);
+
+        Ok(())
+    }
+
+    /// Get the current reputation decay configuration.
+    pub fn get_reputation_config(env: Env) -> ReputationConfig {
+        storage::get_reputation_config(&env)
+    }
+
+    // ========================================================================
+    // Bridge Module (Issue: feature/cross-chain-bridge)
+    // ========================================================================
+
+    /// Configure the bridge module. Admin only.
+    pub fn set_bridge_config(
+        env: Env,
+        admin: Address,
+        config: BridgeConfig,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        storage::set_bridge_config(&env, &config);
+        storage::extend_instance_ttl(&env);
+        events::emit_bridge_config_updated(&env, &admin);
+
+        Ok(())
+    }
+
+    /// Get the current bridge configuration.
+    pub fn get_bridge_config(env: Env) -> Option<BridgeConfig> {
+        storage::get_bridge_config(&env)
+    }
+
+    /// Propose a cross-chain bridge transfer.
+    ///
+    /// Creates a standard multisig proposal that, when approved and executed via
+    /// `execute_bridge_proposal`, will initiate bridge transfers for each asset.
+    ///
+    /// # Constraints
+    /// - Bridge must be enabled in `BridgeConfig`
+    /// - `actions` must not be empty and must not exceed `MAX_CROSS_VAULT_ACTIONS = 5`
+    /// - Each action amount must be > 0
+    /// - Caller must hold Treasurer or Admin role
+    ///
+    /// # Fee accounting for multi-hop transfers
+    /// Each `CrossChainAsset.amount` should already account for all intermediate
+    /// bridge fees so the final recipient receives the intended value. Document
+    /// fee breakdowns in the proposal metadata.
+    pub fn propose_bridge_transfer(
+        env: Env,
+        proposer: Address,
+        assets: Vec<CrossChainAsset>,
+        priority: Priority,
+        conditions: Vec<Condition>,
+        condition_logic: ConditionLogic,
+        insurance_amount: i128,
+    ) -> Result<u64, VaultError> {
+        proposer.require_auth();
+
+        const MAX_CROSS_VAULT_ACTIONS: u32 = 5;
+
+        let bridge_cfg = storage::get_bridge_config(&env).ok_or(VaultError::DexError)?;
+        if !bridge_cfg.enabled {
+            return Err(VaultError::DexError);
+        }
+
+        let config = storage::get_config(&env)?;
+        let role = storage::get_role(&env, &proposer);
+        if role != Role::Treasurer && role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        if assets.is_empty() {
+            return Err(VaultError::InvalidAmount);
+        }
+        if assets.len() > MAX_CROSS_VAULT_ACTIONS {
+            return Err(VaultError::DexError);
+        }
+
+        let mut total_amount: i128 = 0;
+        for i in 0..assets.len() {
+            let asset = assets.get(i).unwrap();
+            if asset.amount <= 0 {
+                return Err(VaultError::InvalidAmount);
+            }
+            total_amount = total_amount.saturating_add(asset.amount);
+        }
+
+        let first = assets.get(0).unwrap();
+        let current_ledger = env.ledger().sequence() as u64;
+        let unlock_ledger = if total_amount >= config.timelock_threshold {
+            current_ledger + config.timelock_delay
+        } else {
+            0
+        };
+
+        let proposal_id = storage::increment_proposal_id(&env);
+
+        let proposal = Proposal {
+            id: proposal_id,
+            proposer: proposer.clone(),
+            recipient: env.current_contract_address(),
+            token: first.token.clone(),
+            amount: total_amount,
+            memo: Symbol::new(&env, "bridge"),
+            metadata: Map::new(&env),
+            tags: Vec::new(&env),
+            approvals: Vec::new(&env),
+            abstentions: Vec::new(&env),
+            attachments: Vec::new(&env),
+            status: ProposalStatus::Pending,
+            priority: priority.clone(),
+            conditions,
+            condition_logic,
+            created_at: current_ledger,
+            expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
+            unlock_ledger,
+            execution_time: None,
+                execution_window_ledgers: 0,
+            insurance_amount,
+            stake_amount: 0,
+            gas_limit: 0,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env),
+            is_swap: false,
+            voting_deadline: if config.default_voting_deadline > 0 {
+                current_ledger + config.default_voting_deadline
+            } else {
+                0
+            },
+            execution_ledger: 0,
+        };
+
+        storage::set_proposal(&env, &proposal);
+        storage::add_to_priority_queue(&env, priority as u32, proposal_id);
+
+        let asset_count = assets.len();
+        let cv = CrossChainProposal {
+            assets,
+            status: CrossVaultStatus::Pending,
+            execution_results: Vec::new(&env),
+            executed_at: 0,
+        };
+        storage::set_cross_chain_proposal(&env, proposal_id, &cv);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_bridge_proposed(&env, proposal_id, &proposer, asset_count);
+
+        Ok(proposal_id)
+    }
+
+    /// Execute an approved bridge proposal.
+    ///
+    /// # Re-entrancy guard
+    /// A `FeatureKey::BridgeLock(proposal_id)` flag is set in temporary storage
+    /// before execution begins and cleared on completion. Any nested call to
+    /// `execute_bridge_proposal` with the same `proposal_id` will fail with
+    /// `VaultError::BridgeError`.
+    pub fn execute_bridge_proposal(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        // Re-entrancy guard
+        if !storage::acquire_bridge_lock(&env, proposal_id) {
+            return Err(VaultError::DexError);
+        }
+
+        let result = Self::execute_bridge_proposal_inner(&env, &executor, proposal_id);
+
+        // Always release the lock, even on error
+        storage::release_bridge_lock(&env, proposal_id);
+
+        result
+    }
+
+    fn execute_bridge_proposal_inner(
+        env: &Env,
+        executor: &Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        let mut proposal = storage::get_proposal(env, proposal_id)?;
+
+        if proposal.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
+            return Err(VaultError::TimelockNotExpired);
+        }
+
+        let mut cv = storage::get_cross_chain_proposal(env, proposal_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+
+        if cv.status != CrossVaultStatus::Pending {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        let bridge_cfg = storage::get_bridge_config(env).ok_or(VaultError::DexError)?;
+        if !bridge_cfg.enabled {
+            return Err(VaultError::DexError);
+        }
+
+        let mut results: Vec<bool> = Vec::new(env);
+        let mut success_count: u32 = 0;
+
+        for i in 0..cv.assets.len() {
+            let asset = cv.assets.get(i).unwrap();
+
+            // Attempt to transfer tokens from vault to the bridge adapter.
+            // In a real implementation this would invoke the bridge adapter contract.
+            // Here we transfer to the first configured adapter as a placeholder.
+            let ok = if !bridge_cfg.bridge_adapters.is_empty() {
+                let adapter = bridge_cfg.bridge_adapters.get(0).unwrap();
+                token::try_transfer(env, &asset.token, &adapter, asset.amount).is_ok()
+            } else {
+                false
+            };
+
+            results.push_back(ok);
+            if ok {
+                success_count += 1;
+            }
+        }
+
+        let all_ok = success_count == cv.assets.len();
+        cv.status = if all_ok {
+            CrossVaultStatus::Executed
+        } else {
+            CrossVaultStatus::Failed
+        };
+        cv.execution_results = results;
+        cv.executed_at = current_ledger;
+
+        proposal.status = ProposalStatus::Executed;
+
+        storage::set_cross_chain_proposal(env, proposal_id, &cv);
+        storage::set_proposal(env, &proposal);
+        storage::extend_instance_ttl(env);
+
+        events::emit_bridge_executed(env, proposal_id, executor, success_count);
+
+        Ok(())
+    }
+
+    /// Get the cross-chain proposal metadata for a given proposal ID.
+    pub fn get_cross_chain_proposal(env: Env, proposal_id: u64) -> Option<CrossChainProposal> {
+        storage::get_cross_chain_proposal(&env, proposal_id)
+    }
+
+    // ========================================================================
+    // Quadratic Voting (Issue: feature/quadratic-voting)
+    // ========================================================================
+
+    /// Integer square root using Newton's method (no_std, no overflow).
+    ///
+    /// Returns `floor(sqrt(value))`. Uses `u128` intermediate arithmetic to
+    /// guard against overflow for large `i128` inputs.
+    ///
+    /// # Properties
+    /// - Pure function: no side effects, no storage access
+    /// - Deterministic: same input always produces same output
+    /// - No std imports
+    fn isqrt(value: i128) -> u64 {
+        if value <= 0 {
+            return 0;
+        }
+        let v = value as u128;
+        // Initial estimate: v itself (will converge quickly)
+        let mut x = v;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + v / x) / 2;
+        }
+        x as u64
+    }
+
+    // ========================================================================
+    // Voting Power Snapshot (for Conviction / Quadratic strategies)
+    // ========================================================================
+
+    /// Compute the voting power for a signer at proposal creation time.
+    ///
+    /// For `Quadratic` strategy: weight = isqrt(token_lock.amount)
+    /// For `Conviction` strategy: weight = amount * power_multiplier_bps / 10_000
+    /// For `Simple` / `Weighted`: weight = 1 (standard counting)
+    fn get_snapshot_voting_power(env: &Env, voter: &Address) -> u64 {
+        let strategy = storage::get_voting_strategy(env);
+        match strategy {
+            VotingStrategy::Quadratic => {
+                match storage::get_token_lock(env, voter) {
+                    Some(lock) if lock.is_active => Self::isqrt(lock.amount),
+                    _ => 1,
+                }
+            }
+            VotingStrategy::Conviction => {
+                match storage::get_token_lock(env, voter) {
+                    Some(lock) if lock.is_active => {
+                        let power = (lock.amount * lock.power_multiplier_bps as i128) / 10_000;
+                        if power > 0 { power as u64 } else { 1 }
+                    }
+                    _ => 1,
+                }
+            }
+            _ => 1,
+        }
+    }
+
+    // ========================================================================
+    // Contract Upgrade Functions
+    // ========================================================================
+
+    /// Propose a contract upgrade with a new WASM hash.
+    /// 
+    /// Upgrade proposals require all signers to approve and have a mandatory timelock.
+    /// Only one upgrade proposal can be active at a time.
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: soroban_sdk::BytesN<32>,
+    ) -> Result<u64, VaultError> {
+        admin.require_auth();
+
+        let config = storage::get_config(&env)?;
+        
+        // Only admin can propose upgrades
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
+            return Err(VaultError::UpgradeUnauthorized);
+        }
+
+        // Check if there's already an active upgrade proposal
+        let active_proposals = Self::list_proposal_ids(env.clone(), 0, 1000); // Get all proposals
+        for i in 0..active_proposals.len() {
+            let pid = active_proposals.get(i).unwrap();
+            if let Ok(proposal) = storage::get_proposal(&env, pid) {
+                if proposal.memo == Symbol::new(&env, "upgrade") 
+                    && (proposal.status == ProposalStatus::Pending || proposal.status == ProposalStatus::Approved) {
+                    return Err(VaultError::UpgradeUnauthorized);
+                }
+            }
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let proposal_id = storage::increment_proposal_id(&env);
+
+        // Create upgrade proposal with special properties
+        let proposal = Proposal {
+            id: proposal_id,
+            proposer: admin.clone(),
+            recipient: env.current_contract_address(), // Self-reference for upgrade
+            token: env.current_contract_address(), // Use contract address as token placeholder
+            amount: new_wasm_hash.to_array().len() as i128, // Store hash length as amount
+            memo: Symbol::new(&env, "upgrade"),
+            metadata: {
+                let mut meta = Map::new(&env);
+                meta.set(Symbol::new(&env, "wasm_hash"), String::from_str(&env, "placeholder"));
+                meta
+            },
+            tags: Vec::new(&env),
+            approvals: Vec::new(&env),
+            abstentions: Vec::new(&env),
+            attachments: Vec::new(&env),
+            status: ProposalStatus::Pending,
+            priority: Priority::Critical,
+            conditions: Vec::new(&env),
+            condition_logic: ConditionLogic::And,
+            created_at: current_ledger,
+            expires_at: current_ledger + (config.timelock_delay * 10), // Longer expiry for upgrades
+            unlock_ledger: current_ledger + config.timelock_delay, // Mandatory timelock
+            execution_time: None,
+                execution_window_ledgers: 0,
+            insurance_amount: 0,
+            stake_amount: 0,
+            gas_limit: 0,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env),
+            is_swap: false,
+            voting_deadline: 0,
+            execution_ledger: 0,
+        };
+
+        storage::set_proposal(&env, &proposal);
+        storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(&env, AuditAction::ProposeTransfer, &admin, proposal_id);
+
+        events::emit_proposal_created(
+            &env,
+            proposal_id,
+            &admin,
+            &env.current_contract_address(),
+            &env.current_contract_address(),
+            new_wasm_hash.to_array().len() as i128,
+            0,
+        );
+
+        Ok(proposal_id)
+    }
+
+    /// Execute a contract upgrade proposal.
+    /// 
+    /// Requires all signers to have approved and timelock to have expired.
+    pub fn execute_upgrade(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        let config = storage::get_config(&env)?;
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        // Verify this is an upgrade proposal
+        if proposal.memo != Symbol::new(&env, "upgrade") {
+            return Err(VaultError::ProposalNotFound);
+        }
+
+        // Verify proposal is approved
+        if proposal.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        // Check timelock
+        let current_ledger = env.ledger().sequence() as u64;
+        if current_ledger < proposal.unlock_ledger {
+            return Err(VaultError::UpgradeTimelockActive);
+        }
+
+        // Verify all signers have approved (upgrade requires unanimous consent)
+        if proposal.approvals.len() != config.signers.len() {
+            return Err(VaultError::UpgradeUnauthorized);
+        }
+
+        // Extract WASM hash from metadata
+        // For this implementation, we'll use the proposal amount field to store a reference
+        // In a production system, you'd want a more robust storage mechanism
+        let wasm_hash_key = Symbol::new(&env, "wasm_hash");
+        let _wasm_hash_str: String = proposal.metadata
+            .get(wasm_hash_key)
+            .ok_or(VaultError::ProposalNotFound)?;
+        
+        // For now, create a dummy WASM hash - in production this would be properly stored
+        let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+        // Perform the upgrade
+        env.deployer().update_current_contract_wasm(wasm_hash);
+
+        // Mark proposal as executed
+        proposal.status = ProposalStatus::Executed;
+        storage::set_proposal(&env, &proposal);
+        storage::create_audit_entry(&env, AuditAction::ExecuteProposal, &executor, proposal_id);
+
+        // Re-emit initialized event to signal new contract version
+        events::emit_initialized(&env, &executor, config.threshold);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Proposal Cloning Functions
+    // ========================================================================
+
+    /// Clone an existing proposal with optional field overrides.
+    /// 
+    /// Source proposal must be in Executed or Expired status.
+    /// Creates a fresh proposal that goes through full validation.
+    pub fn clone_proposal(
+        env: Env,
+        proposer: Address,
+        source_proposal_id: u64,
+        overrides: TemplateOverrides,
+    ) -> Result<u64, VaultError> {
+        proposer.require_auth();
+
+        let config = storage::get_config(&env)?;
+        let role = storage::get_role(&env, &proposer);
+        if role != Role::Treasurer && role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        // Get source proposal
+        let source_proposal = storage::get_proposal(&env, source_proposal_id)?;
+
+        // Verify source proposal is in valid state for cloning
+        if source_proposal.status != ProposalStatus::Executed 
+            && source_proposal.status != ProposalStatus::Expired {
+            return Err(VaultError::ProposalNotFound);
+        }
+
+        // Apply overrides or use source values
+        let recipient = if overrides.override_recipient {
+            overrides.recipient
+        } else {
+            source_proposal.recipient
+        };
+
+        let amount = if overrides.override_amount {
+            overrides.amount
+        } else {
+            source_proposal.amount
+        };
+
+        let memo = if overrides.override_memo {
+            overrides.memo
+        } else {
+            source_proposal.memo
+        };
+
+        let priority = if overrides.override_priority {
+            overrides.priority
+        } else {
+            source_proposal.priority
+        };
+
+        // Validate the new proposal parameters
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        if amount > config.spending_limit {
+            return Err(VaultError::ExceedsProposalLimit);
+        }
+
+        // Validate recipient
+        Self::validate_recipient(&env, &recipient)?;
+
+        // Check velocity limits
+        if !storage::check_and_update_velocity(&env, &proposer, &source_proposal.token, &config.velocity_limit) {
+            return Err(VaultError::VelocityLimitExceeded);
+        }
+
+        // Check daily/weekly limits
+        let today = storage::get_day_number(&env);
+        let week = storage::get_week_number(&env);
+        let spent_today = storage::get_daily_spent(&env, today);
+        let spent_week = storage::get_weekly_spent(&env, week);
+
+        if spent_today + amount > config.daily_limit {
+            return Err(VaultError::ExceedsDailyLimit);
+        }
+        if spent_week + amount > config.weekly_limit {
+            return Err(VaultError::ExceedsWeeklyLimit);
+        }
+
+        // Reserve spending
+        storage::add_daily_spent(&env, today, amount);
+        storage::add_weekly_spent(&env, week, amount);
+
+        // Create new proposal
+        let current_ledger = env.ledger().sequence() as u64;
+        let new_proposal_id = storage::increment_proposal_id(&env);
+
+        let new_proposal = Proposal {
+            id: new_proposal_id,
+            proposer: proposer.clone(),
+            recipient: recipient.clone(),
+            token: source_proposal.token.clone(),
+            amount,
+            memo,
+            metadata: {
+                let mut meta = source_proposal.metadata.clone();
+                // Store cloned_from as the proposal ID directly in a different field
+                meta.set(Symbol::new(&env, "cloned"), String::from_str(&env, "true"));
+                meta
+            },
+            tags: source_proposal.tags.clone(),
+            approvals: Vec::new(&env), // Fresh approvals
+            abstentions: Vec::new(&env), // Fresh abstentions
+            attachments: source_proposal.attachments.clone(),
+            status: ProposalStatus::Pending,
+            priority: priority.clone(),
+            conditions: source_proposal.conditions.clone(),
+            condition_logic: source_proposal.condition_logic.clone(),
+            created_at: current_ledger,
+            expires_at: calculate_expiration_ledger(&config, &priority, current_ledger),
+            unlock_ledger: if amount >= config.timelock_threshold {
+                current_ledger + config.timelock_delay
+            } else {
+                0
+            },
+            execution_time: None,
+            execution_window_ledgers: 0,
+            insurance_amount: 0, // Insurance not cloned
+            stake_amount: 0, // Stake not cloned
+            gas_limit: source_proposal.gas_limit,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env), // Dependencies not cloned
+            is_swap: source_proposal.is_swap,
+            voting_deadline: if config.default_voting_deadline > 0 {
+                current_ledger + config.default_voting_deadline
+            } else {
+                0
+            },
+            execution_ledger: 0,
+        };
+
+        storage::set_proposal(&env, &new_proposal);
+        Self::persist_execution_fee_estimate(&env, &new_proposal);
+        storage::add_to_priority_queue(&env, priority as u32, new_proposal_id);
+        storage::extend_instance_ttl(&env);
+
+        // Create audit entry referencing both proposals
+        storage::create_audit_entry(&env, AuditAction::ProposeTransfer, &proposer, new_proposal_id);
+
+        // Emit proposal created event
+        events::emit_proposal_created(
+            &env,
+            new_proposal_id,
+            &proposer,
+            &recipient,
+            &source_proposal.token,
+            amount,
+            0,
+        );
+
+        Self::update_reputation_on_propose(&env, &proposer);
+
+        Ok(new_proposal_id)
     }
 }

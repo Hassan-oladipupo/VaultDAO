@@ -40,4 +40,10 @@ export const env = {
 
   /** Stellar block explorer base URL */
   explorerUrl: optionalEnv('VITE_STELLAR_EXPLORER_URL', 'https://stellar.expert/explorer/testnet'),
+
+  /** Fee account for read-only operations when wallet is disconnected */
+  feesAccount: requireEnv('VITE_FEES_ACCOUNT'),
+
+  /** IPFS gateway base URL for resolving CIDs (default: https://ipfs.io/ipfs/) */
+  ipfsGateway: optionalEnv('VITE_IPFS_GATEWAY', 'https://ipfs.io/ipfs/'),
 } as const;
