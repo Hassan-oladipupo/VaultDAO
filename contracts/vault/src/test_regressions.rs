@@ -34,6 +34,7 @@ fn init_config(
         },
         recovery_config: crate::types::RecoveryConfig::default(env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
     }
 }
 

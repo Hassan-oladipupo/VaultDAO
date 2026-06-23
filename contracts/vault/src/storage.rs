@@ -25,8 +25,8 @@ use crate::types::{
     AuditEntry, BatchExecutionResult, BatchTransaction, Comment, Config, CumulativeVolume,
     DelegatedPermission, DexConfig, Escrow, EscrowCondition, ExecutionFeeEstimate,
     ExecutionSnapshot, FeeStructure, FeeTier, FundingRound, FundingRoundConfig, GasConfig,
-    InsuranceConfig, ListMode, NotificationPreferences, PermissionGrant, Proposal,
-    ProposalAmendment, ProposalTemplate, RecoveryProposal, Reputation, RetryState, Role,
+    InsuranceConfig, ListMode, NotificationPreferences, PendingAdminRotation, PermissionGrant,
+    Proposal, ProposalAmendment, ProposalTemplate, RecoveryProposal, Reputation, RetryState, Role,
     RoleAssignment, StakeRecord, StakingConfig, SwapProposal, SwapResult, TierFeeConfig,
     TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy,
 };
@@ -208,6 +208,9 @@ pub enum FeatureKey {
     CumulativeVolume(Address),
     /// Price-gate condition for an escrow (Persistent) -> EscrowCondition
     EscrowConditionKey(u64),
+    /// In-flight admin rotation request (Persistent) -> PendingAdminRotation
+    /// Exactly one may exist at a time; absent means no rotation is pending.
+    PendingAdminRotation,
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -1882,6 +1885,34 @@ pub fn set_escrow_condition(env: &Env, escrow_id: u64, condition: &EscrowConditi
     env.storage()
         .persistent()
         .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+}
+
+// ============================================================================
+// Admin Rotation (Issue: feature/admin-rotation-timelock)
+// ============================================================================
+
+/// Return the in-flight admin rotation request, or `None` if no rotation is pending.
+pub fn get_pending_admin_rotation(env: &Env) -> Option<PendingAdminRotation> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::PendingAdminRotation)
+}
+
+/// Persist a pending admin rotation.  Extends TTL to PERSISTENT_TTL so the
+/// record survives the full rotation window.
+pub fn set_pending_admin_rotation(env: &Env, rotation: &PendingAdminRotation) {
+    let key = FeatureKey::PendingAdminRotation;
+    env.storage().persistent().set(&key, rotation);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+/// Delete the pending rotation record (called on execute or cancel).
+pub fn clear_pending_admin_rotation(env: &Env) {
+    env.storage()
+        .persistent()
+        .remove(&FeatureKey::PendingAdminRotation);
 }
 
 // ============================================================================

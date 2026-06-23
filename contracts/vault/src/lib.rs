@@ -28,12 +28,13 @@ use types::{
     EscrowCondition, EscrowStatus, ExecutionFeeEstimate, FeeTier, FundingMilestone,
     FundingMilestoneStatus, FundingRound, FundingRoundConfig, FundingRoundStatus, GasConfig,
     InitConfig, InsuranceConfig, ListMode, Milestone, NotificationPreferences,
-    OptionalVaultOracleConfig, PriceOracleClient, Priority, Proposal, ProposalAmendment,
-    ProposalStatus, ProposalTemplate, RecoveryConfig, RecoveryProposal, RecoveryStatus,
-    RecurringPayment, Reputation, RetryConfig, RetryState, Role, RoleAssignment, StreamStatus,
-    StreamingPayment, Subscription, SubscriptionPayment, SubscriptionStatus, SubscriptionTier,
-    SwapProposal, SwapResult, TemplateOverrides, ThresholdStrategy, TierFeeConfig, TransferDetails,
-    VaultMetrics, VaultOracleConfig, VaultPriceData, VotingStrategy,
+    OptionalVaultOracleConfig, PendingAdminRotation, PriceOracleClient, Priority, Proposal,
+    ProposalAmendment, ProposalStatus, ProposalTemplate, RecoveryConfig, RecoveryProposal,
+    RecoveryStatus, RecurringPayment, Reputation, RetryConfig, RetryState, Role, RoleAssignment,
+    StreamStatus, StreamingPayment, Subscription, SubscriptionPayment, SubscriptionStatus,
+    SubscriptionTier, SwapProposal, SwapResult, TemplateOverrides, ThresholdStrategy,
+    TierFeeConfig, TransferDetails, VaultMetrics, VaultOracleConfig, VaultPriceData,
+    VotingStrategy,
 };
 
 /// The main contract structure for VaultDAO.
@@ -65,6 +66,10 @@ const MAX_TAGS: u32 = 10;
 /// Maximum number of attachments per proposal
 const MAX_ATTACHMENTS: u32 = 10;
 
+/// Minimum admin rotation delay: 1440 ledgers ≈ 24 hours at 5 s/ledger.
+/// Enforced at both vault initialization and `set_admin_rotation_delay`.
+const MIN_ADMIN_ROTATION_DELAY: u64 = 1_440;
+
 /// Minimum length for an attachment CID (CIDv0 = 46 chars, CIDv1 base32 = 59+ chars)
 const MIN_ATTACHMENT_LEN: u32 = 46;
 
@@ -90,6 +95,8 @@ fn calculate_expiration_ledger(config: &Config, priority: &Priority, current_led
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_admin_rotation;
 #[cfg(test)]
 mod test_audit;
 #[cfg(test)]
@@ -141,6 +148,10 @@ impl VaultDAO {
         if config.spending_limit <= 0 || config.daily_limit <= 0 || config.weekly_limit <= 0 {
             return Err(VaultError::InvalidAmount);
         }
+        // Enforce minimum admin rotation delay (≥ 24 h worth of ledgers)
+        if config.admin_rotation_delay < MIN_ADMIN_ROTATION_DELAY {
+            return Err(VaultError::InvalidAmount);
+        }
 
         // Admin must authorize initialization
         admin.require_auth();
@@ -165,6 +176,7 @@ impl VaultDAO {
             retry_config: config.retry_config,
             recovery_config: config.recovery_config.clone(),
             staking_config: config.staking_config,
+            admin_rotation_delay: config.admin_rotation_delay,
         };
 
         // Store state
@@ -5861,6 +5873,137 @@ impl VaultDAO {
     /// Get recovery proposal details
     pub fn get_recovery_proposal(env: Env, id: u64) -> Result<RecoveryProposal, VaultError> {
         storage::get_recovery_proposal(&env, id)
+    }
+
+    // ========================================================================
+    // Admin Key Rotation (Issue: feature/admin-rotation-timelock)
+    // ========================================================================
+
+    /// Begin the admin key-rotation timelock.
+    ///
+    /// Stores a `PendingAdminRotation` that can only be executed after
+    /// `Config.admin_rotation_delay` ledgers have elapsed, giving other signers
+    /// a window to detect and cancel a compromised-key rotation.
+    ///
+    /// # Rules
+    /// * Caller must hold `Role::Admin` and authorize the call.
+    /// * Only one pending rotation is allowed at a time; call `cancel_admin_rotation`
+    ///   before initiating a new one (`ConditionsNotMet` otherwise).
+    /// * `new_admin` cannot equal the current caller.
+    ///
+    /// # Errors
+    /// - `InsufficientRole` — caller is not an Admin
+    /// - `ConditionsNotMet` — a rotation is already pending
+    /// - `InvalidAmount`    — `new_admin` == caller (no-op rotation)
+    pub fn initiate_admin_rotation(
+        env: Env,
+        admin: Address,
+        new_admin: Address,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        // Reject self-rotation (no-op that would lock out monitoring window)
+        if admin == new_admin {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Only one pending rotation at a time
+        if storage::get_pending_admin_rotation(&env).is_some() {
+            return Err(VaultError::ConditionsNotMet);
+        }
+
+        let config = storage::get_config(&env)?;
+        let current_ledger = env.ledger().sequence() as u64;
+        let executable_after = current_ledger + config.admin_rotation_delay;
+
+        let rotation = PendingAdminRotation {
+            new_admin: new_admin.clone(),
+            initiated_by: admin.clone(),
+            initiated_at: current_ledger,
+            executable_after,
+        };
+
+        storage::set_pending_admin_rotation(&env, &rotation);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_admin_rotation_initiated(&env, &admin, &new_admin, executable_after);
+
+        Ok(())
+    }
+
+    /// Execute a pending admin rotation after the timelock has expired.
+    ///
+    /// This function is permissionless — anyone may call it once the timelock
+    /// has passed.  The security guarantee comes from the observation window,
+    /// not from restricting who presses the button.
+    ///
+    /// On success:
+    /// * `Role::Admin` is granted to `new_admin`.
+    /// * `Role::Admin` is removed from the initiating admin (demoted to Member).
+    /// * The `PendingAdminRotation` record is deleted.
+    ///
+    /// # Errors
+    /// - `ProposalNotFound`    — no pending rotation exists
+    /// - `TimelockNotExpired`  — called before `executable_after` ledger
+    pub fn execute_admin_rotation(env: Env) -> Result<(), VaultError> {
+        let rotation =
+            storage::get_pending_admin_rotation(&env).ok_or(VaultError::ProposalNotFound)?;
+
+        let current_ledger = env.ledger().sequence() as u64;
+        if current_ledger < rotation.executable_after {
+            return Err(VaultError::TimelockNotExpired);
+        }
+
+        // Swap roles: grant Admin to new_admin, demote old initiator to Member
+        storage::set_role(&env, &rotation.new_admin, Role::Admin);
+        storage::set_role(&env, &rotation.initiated_by, Role::Member);
+
+        storage::clear_pending_admin_rotation(&env);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_admin_rotation_executed(
+            &env,
+            &rotation.initiated_by,
+            &rotation.new_admin,
+            current_ledger,
+        );
+
+        Ok(())
+    }
+
+    /// Cancel a pending admin rotation.
+    ///
+    /// Callable by any current admin.  Deletes the pending rotation without
+    /// modifying any role assignments.
+    ///
+    /// # Errors
+    /// - `InsufficientRole`  — caller is not an Admin
+    /// - `ProposalNotFound`  — no pending rotation exists
+    pub fn cancel_admin_rotation(env: Env, admin: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        let rotation =
+            storage::get_pending_admin_rotation(&env).ok_or(VaultError::ProposalNotFound)?;
+
+        storage::clear_pending_admin_rotation(&env);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_admin_rotation_cancelled(&env, &admin, &rotation.new_admin);
+
+        Ok(())
+    }
+
+    /// Query the in-flight admin rotation, or `None` if none is pending.
+    pub fn get_pending_admin_rotation(env: Env) -> Option<PendingAdminRotation> {
+        storage::get_pending_admin_rotation(&env)
     }
 
     // ========================================================================

@@ -83,6 +83,9 @@ pub struct InitConfig {
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
     pub staking_config: StakingConfig,
+    /// Minimum ledgers an admin-rotation request must wait before execution.
+    /// Must be >= MIN_ADMIN_ROTATION_DELAY_LEDGERS (1440 ≈ 24 h); 0 is rejected.
+    pub admin_rotation_delay: u64,
 }
 
 /// Vault configuration
@@ -124,6 +127,9 @@ pub struct Config {
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
     pub staking_config: StakingConfig,
+    /// Minimum ledgers an admin-rotation request must be pending before it can execute.
+    /// Must be >= MIN_ADMIN_ROTATION_DELAY_LEDGERS (1440 ≈ 24 h).
+    pub admin_rotation_delay: u64,
 }
 
 /// Audit record for a cancelled proposal
@@ -1600,6 +1606,31 @@ pub struct TierFeeConfig {
     pub tiers: Vec<FeeTier>,
     /// Volume window length in ledgers; 0 means use the 30-day default
     pub volume_window: u64,
+}
+
+// ============================================================================
+// Admin Key Rotation (Issue: feature/admin-rotation-timelock)
+// ============================================================================
+
+/// Pending admin-rotation request stored during the timelock window.
+///
+/// Created by `initiate_admin_rotation`; consumed (or deleted) by
+/// `execute_admin_rotation` / `cancel_admin_rotation`.
+///
+/// Only one pending rotation is allowed at a time.  Attempting to initiate a
+/// second one while this record exists is rejected with `ConditionsNotMet`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingAdminRotation {
+    /// The address that will receive the `Admin` role on execution.
+    pub new_admin: Address,
+    /// The address that initiated the rotation (the current admin at initiation time).
+    pub initiated_by: Address,
+    /// Ledger sequence at which the rotation was initiated.
+    pub initiated_at: u64,
+    /// Earliest ledger at which `execute_admin_rotation` may succeed.
+    /// Equals `initiated_at + Config.admin_rotation_delay`.
+    pub executable_after: u64,
 }
 
 // ============================================================================

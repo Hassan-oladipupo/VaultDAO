@@ -44,6 +44,7 @@ fn default_init_config(
         },
         recovery_config: crate::types::RecoveryConfig::default(_env),
         staking_config: crate::types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
         pre_execution_hooks: soroban_sdk::Vec::new(_env),
         post_execution_hooks: soroban_sdk::Vec::new(_env),
     }
@@ -96,6 +97,7 @@ fn test_multisig_approval() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -177,6 +179,7 @@ fn test_unauthorized_proposal() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -245,6 +248,7 @@ fn test_timelock_violation() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -548,6 +552,7 @@ fn test_priority_levels() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -653,6 +658,7 @@ fn test_get_proposals_by_priority() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -736,6 +742,7 @@ fn test_change_priority_unauthorized() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -802,6 +809,7 @@ fn test_comment_functionality() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -894,6 +902,7 @@ fn test_blacklist_mode() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -979,6 +988,7 @@ fn test_abstention_does_not_count_toward_threshold() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1055,6 +1065,7 @@ fn test_list_management() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1120,6 +1131,7 @@ fn test_cannot_abstain_after_voting() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1189,6 +1201,7 @@ fn test_cannot_abstain_twice() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1259,6 +1272,7 @@ fn test_velocity_limit_enforcement() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1348,6 +1362,7 @@ fn test_verify_attachment() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1415,6 +1430,7 @@ fn test_remove_attachment() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1488,6 +1504,7 @@ fn test_attachment_unauthorized() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1558,6 +1575,7 @@ fn test_attachment_duplicate() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1628,6 +1646,7 @@ fn test_attachment_invalid_hash() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1695,6 +1714,7 @@ fn test_admin_can_add_attachment() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1762,6 +1782,7 @@ fn test_set_and_get_proposal_metadata() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1836,6 +1857,7 @@ fn test_remove_proposal_metadata() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -1910,6 +1932,7 @@ fn test_proposal_metadata_unauthorized() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -2396,6 +2419,7 @@ fn test_fixed_threshold_strategy() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -2473,6 +2497,7 @@ fn test_percentage_threshold_strategy() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -2569,6 +2594,7 @@ fn test_amount_based_threshold_strategy() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -2699,6 +2725,7 @@ fn test_time_based_threshold_strategy() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -2778,6 +2805,7 @@ fn test_condition_balance_above() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -2852,6 +2880,7 @@ fn test_condition_date_after() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -2938,6 +2967,7 @@ fn test_condition_multiple_and_logic() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3030,6 +3060,7 @@ fn test_condition_multiple_or_logic() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3115,6 +3146,7 @@ fn test_condition_no_conditions() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3187,6 +3219,7 @@ fn test_dex_config_setup() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3254,6 +3287,7 @@ fn test_swap_proposal_creation() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3327,6 +3361,7 @@ fn test_dex_not_enabled_error() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3387,6 +3422,7 @@ fn test_batch_propose_multi_token() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3474,6 +3510,7 @@ fn test_batch_propose_exceeds_max_size() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3551,6 +3588,7 @@ fn test_quorum_disabled_behaves_like_fixed_threshold() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3629,6 +3667,7 @@ fn test_quorum_blocks_approval_until_satisfied() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3728,6 +3767,7 @@ fn test_abstentions_count_toward_quorum_but_not_threshold() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3827,6 +3867,7 @@ fn test_get_quorum_status() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3913,6 +3954,7 @@ fn test_get_quorum_status_quorum_disabled() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -3977,6 +4019,7 @@ fn test_update_quorum() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -4042,6 +4085,7 @@ fn test_execution_rechecks_quorum_requirement() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -4120,6 +4164,7 @@ fn test_batch_execution_rechecks_quorum_requirement() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -4204,6 +4249,7 @@ fn test_quorum_satisfied_by_approvals_alone() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -4274,6 +4320,7 @@ fn test_initialize_rejects_quorum_too_high() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: crate::types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
         veto_addresses: soroban_sdk::Vec::new(&env),
@@ -4333,6 +4380,7 @@ macro_rules! setup_retry_test {
             },
             recovery_config: crate::types::RecoveryConfig::default(&$env),
             staking_config: crate::types::StakingConfig::default(),
+            admin_rotation_delay: 1440,
             pre_execution_hooks: soroban_sdk::Vec::new(&$env),
             post_execution_hooks: soroban_sdk::Vec::new(&$env),
             veto_addresses: soroban_sdk::Vec::new(&$env),
@@ -4529,6 +4577,7 @@ fn test_retry_not_enabled_passes_through_error() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -4636,6 +4685,7 @@ fn test_retry_disabled_rejects_retry_execution() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -5068,6 +5118,7 @@ fn test_cross_vault_multi_vault_actions() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -5563,6 +5614,7 @@ fn test_reputation_initialized_at_neutral() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -5625,6 +5677,7 @@ fn test_reputation_increases_on_proposal_creation() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -5697,6 +5750,7 @@ fn test_reputation_increases_on_approval() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -5774,6 +5828,7 @@ fn test_participation_tracking_on_abstention() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -5847,6 +5902,7 @@ fn test_reputation_increases_on_execution() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -5924,6 +5980,7 @@ fn test_reputation_decreases_on_rejection() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -6003,6 +6060,7 @@ fn test_reputation_decay_over_time() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -6097,6 +6155,7 @@ fn test_create_from_template_with_overrides() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -6183,6 +6242,7 @@ fn test_create_from_template_amount_out_of_range() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -6274,6 +6334,7 @@ fn test_create_from_inactive_template() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -6358,6 +6419,7 @@ fn test_reputation_based_spending_limit() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -6441,6 +6503,7 @@ fn test_reputation_high_score_get_limits_boost() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -6514,6 +6577,7 @@ fn test_template_not_found() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -6589,6 +6653,7 @@ fn test_retry_not_enabled() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -6803,6 +6868,7 @@ fn test_insurance_posting_and_refund() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -6909,6 +6975,7 @@ fn test_insurance_slashing_on_rejection() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -7007,6 +7074,7 @@ fn test_insurance_pool_withdrawal() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -7483,6 +7551,7 @@ fn test_veto_blocks_execution() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
 
         pre_execution_hooks: soroban_sdk::Vec::new(&env),
         post_execution_hooks: soroban_sdk::Vec::new(&env),
@@ -7563,6 +7632,7 @@ fn test_execution_rollback_restores_proposal_status_on_transfer_failure() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: crate::types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
     };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -7635,6 +7705,7 @@ fn test_execution_rollback_restores_priority_queue_on_transfer_failure() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: crate::types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
     };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -8452,6 +8523,7 @@ fn inv_config(env: &Env, signers: soroban_sdk::Vec<Address>, threshold: u32) -> 
         },
         recovery_config: crate::types::RecoveryConfig::default(env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
         pre_execution_hooks: soroban_sdk::Vec::new(env),
         post_execution_hooks: soroban_sdk::Vec::new(env),
     }
@@ -9314,6 +9386,7 @@ fn recurring_init_config(env: &Env, admin: &Address, treasurer: &Address) -> Ini
         },
         recovery_config: crate::types::RecoveryConfig::default(env),
         staking_config: crate::types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
         pre_execution_hooks: soroban_sdk::Vec::new(env),
         post_execution_hooks: soroban_sdk::Vec::new(env),
     }
@@ -10202,6 +10275,7 @@ fn test_public_api_get_config_after_init() {
         },
         recovery_config: types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
     };
     client.initialize(&admin, &config);
 

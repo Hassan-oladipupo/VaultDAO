@@ -36,6 +36,7 @@ fn default_init_config(env: &Env, admin: &Address) -> InitConfig {
         },
         recovery_config: crate::types::RecoveryConfig::default(env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
     }
 }
 
@@ -196,6 +197,7 @@ fn test_hooks_with_initialization() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
     };
 
     client.initialize(&admin, &config);
@@ -282,6 +284,7 @@ fn setup_execution_test(env: &Env) -> (VaultDAOClient<'_>, Address, Address, Add
         },
         recovery_config: crate::types::RecoveryConfig::default(env),
         staking_config: crate::types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
     };
 
     client.initialize(&admin, &config);

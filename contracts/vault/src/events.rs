@@ -1004,6 +1004,45 @@ pub fn emit_stream_claimed(env: &Env, stream_id: u64, recipient: &Address, amoun
 /// Emit when attempt_escrow_release evaluates a price condition.
 /// `condition_met` indicates whether the oracle check passed and funds were released.
 /// `oracle_price` is the price returned by the oracle (0 if oracle was unavailable).
+// ============================================================================
+// Admin Rotation Events (Issue: feature/admin-rotation-timelock)
+// ============================================================================
+
+/// Emit when an admin-rotation request is initiated.
+/// Monitoring systems should alert on this so signers can review during the timelock.
+pub fn emit_admin_rotation_initiated(
+    env: &Env,
+    initiated_by: &Address,
+    new_admin: &Address,
+    executable_after: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "admin_rotation_init"),),
+        (initiated_by.clone(), new_admin.clone(), executable_after),
+    );
+}
+
+/// Emit when a pending admin rotation is executed (timelock expired, roles swapped).
+pub fn emit_admin_rotation_executed(
+    env: &Env,
+    old_admin: &Address,
+    new_admin: &Address,
+    executed_at: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "admin_rotation_exec"),),
+        (old_admin.clone(), new_admin.clone(), executed_at),
+    );
+}
+
+/// Emit when a pending admin rotation is cancelled by an admin.
+pub fn emit_admin_rotation_cancelled(env: &Env, cancelled_by: &Address, new_admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "admin_rotation_cancel"),),
+        (cancelled_by.clone(), new_admin.clone()),
+    );
+}
+
 pub fn emit_oracle_release_attempted(
     env: &Env,
     escrow_id: u64,

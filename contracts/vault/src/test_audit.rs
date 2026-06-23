@@ -49,6 +49,7 @@ fn setup_test_environment(env: &Env) -> (VaultDAOClient<'_>, Address, Address, A
         },
         recovery_config: crate::types::RecoveryConfig::default(env),
         staking_config: crate::types::StakingConfig::default(),
+        admin_rotation_delay: 1440,
     };
 
     client.initialize(&admin, &config);
