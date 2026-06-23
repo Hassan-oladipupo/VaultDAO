@@ -1,12 +1,15 @@
 import React, { useMemo } from 'react';
-import { ArrowLeft, Download } from 'lucide-react';
+import { ArrowLeft, Download, Copy, FilePen } from 'lucide-react';
 import { getDiffSegments } from '../utils/diffHighlighting';
+import { calculateProposalSimilarity } from '../utils/similarityDetection';
 import type { DiffSegment, ComparisonField } from '../types/comparison';
 
 interface ComparisonViewProps {
   proposals: any[];
   onClose: () => void;
   onExport: () => void;
+  /** Called with pre-filled amendment data when user clicks "Propose Amendment" */
+  onAmendment?: (data: Record<string, string>) => void;
 }
 
 const COMPARISON_FIELDS: ComparisonField[] = [
@@ -23,7 +26,7 @@ const COMPARISON_FIELDS: ComparisonField[] = [
 
 const DiffText: React.FC<{ segments: DiffSegment[] }> = ({ segments }) => {
   return (
-    <span className="inline">
+    <span className="inline break-words whitespace-pre-wrap">
       {segments.map((segment, idx) => {
         if (segment.type === 'equal') {
           return <span key={idx}>{segment.value}</span>;
@@ -48,7 +51,7 @@ const DiffText: React.FC<{ segments: DiffSegment[] }> = ({ segments }) => {
   );
 };
 
-const ComparisonView: React.FC<ComparisonViewProps> = ({ proposals, onClose, onExport }) => {
+const ComparisonView: React.FC<ComparisonViewProps> = ({ proposals, onClose, onExport, onAmendment }) => {
   const comparisonData = useMemo(() => {
     return COMPARISON_FIELDS.map((field) => {
       const values = proposals.map((p) => String(field.getValue(p)));
@@ -69,6 +72,32 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ proposals, onClose, onE
       };
     });
   }, [proposals]);
+
+  // Similarity score for exactly 2 proposals
+  const similarityScore = useMemo(() => {
+    if (proposals.length !== 2) return null;
+    const result = calculateProposalSimilarity(proposals[0], proposals[1]);
+    return Math.round(result.overall * 100);
+  }, [proposals]);
+
+  const handleCopyToClipboard = () => {
+    const lines: string[] = [`Proposal Comparison — ${new Date().toLocaleDateString()}`, ''];
+    lines.push(['Field', ...proposals.map((p) => `Proposal #${p.id}`)].join('\t'));
+    comparisonData.forEach(({ field, values }) => {
+      lines.push([field.label, ...values].join('\t'));
+    });
+    if (similarityScore !== null) lines.push(`\nSimilarity Score: ${similarityScore}%`);
+    void navigator.clipboard.writeText(lines.join('\n'));
+  };
+
+  const handleProposeAmendment = () => {
+    if (!onAmendment || proposals.length < 2) return;
+    const diffs: Record<string, string> = {};
+    comparisonData.forEach(({ field, values, hasDifferences }) => {
+      if (hasDifferences) diffs[field.key] = values[1]; // use second proposal's value
+    });
+    onAmendment(diffs);
+  };
 
   const formatAddress = (address: string): string => {
     if (address.length <= 12) return address;
@@ -103,33 +132,58 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ proposals, onClose, onE
                 <h2 className="text-xl font-bold text-white">Proposal Comparison</h2>
                 <p className="text-sm text-gray-400">
                   Comparing {proposals.length} proposal{proposals.length > 1 ? 's' : ''}
+                  {similarityScore !== null && (
+                    <span className={`ml-2 font-semibold ${similarityScore >= 70 ? 'text-yellow-400' : 'text-green-400'}`}>
+                      · {similarityScore}% similar
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
-            <button
-              onClick={onExport}
-              className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white transition-colors"
-            >
-              <Download size={16} />
-              <span className="hidden sm:inline">Export PDF</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleCopyToClipboard}
+                className="flex items-center gap-2 px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-white transition-colors text-sm"
+                title="Copy comparison to clipboard"
+              >
+                <Copy size={16} />
+                <span className="hidden sm:inline">Copy</span>
+              </button>
+              {onAmendment && proposals.length === 2 && (
+                <button
+                  onClick={handleProposeAmendment}
+                  className="flex items-center gap-2 px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white transition-colors text-sm"
+                  title="Pre-fill amendment form with differences"
+                >
+                  <FilePen size={16} />
+                  <span className="hidden sm:inline">Propose Amendment</span>
+                </button>
+              )}
+              <button
+                onClick={onExport}
+                className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white transition-colors"
+              >
+                <Download size={16} />
+                <span className="hidden sm:inline">Export PDF</span>
+              </button>
+            </div>
           </div>
         </div>
 
         {/* Comparison Table */}
         <div className="flex-1 overflow-auto p-4">
-          <div id="comparison-content" className="min-w-max">
+          <div id="comparison-content" className="w-full min-w-0">
             <div className="bg-gray-800/50 rounded-lg border border-gray-700 overflow-hidden">
-              <table className="w-full">
+              <table className="w-full table-fixed">
                 <thead>
                   <tr className="bg-gray-800">
-                    <th className="sticky left-0 z-10 bg-gray-800 px-4 py-3 text-left text-sm font-semibold text-gray-300 border-r border-gray-700 min-w-[150px]">
+                    <th className="sticky left-0 z-10 bg-gray-800 px-4 py-3 text-left text-sm font-semibold text-gray-300 border-r border-gray-700 w-[120px] sm:w-[150px]">
                       Field
                     </th>
                     {proposals.map((proposal, index) => (
                       <th
                         key={proposal.id}
-                        className="px-4 py-3 text-left text-sm font-semibold text-white border-r border-gray-700 last:border-r-0 min-w-[250px]"
+                        className="px-4 py-3 text-left text-sm font-semibold text-white border-r border-gray-700 last:border-r-0"
                       >
                         <div className="space-y-1">
                           <div>Proposal #{proposal.id}</div>
@@ -160,7 +214,7 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ proposals, onClose, onE
                       {values.map((value, colIndex) => (
                         <td
                           key={colIndex}
-                          className="px-4 py-3 text-sm text-gray-200 border-r border-gray-700 last:border-r-0"
+                          className="px-4 py-3 text-sm text-gray-200 border-r border-gray-700 last:border-r-0 break-words overflow-hidden max-w-0"
                         >
                           {field.type === 'address' ? (
                             <span className="font-mono text-xs" title={value}>

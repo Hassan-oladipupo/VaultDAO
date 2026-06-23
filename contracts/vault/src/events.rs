@@ -69,6 +69,19 @@ pub fn emit_proposal_abstained(
     );
 }
 
+pub fn emit_vote_changed(
+    env: &Env,
+    proposal_id: u64,
+    voter: &Address,
+    old_vote: u32,
+    new_vote: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "vote_changed"), proposal_id),
+        (voter.clone(), old_vote, new_vote),
+    );
+}
+
 /// Emit when a proposal reaches threshold and is ready for execution
 pub fn emit_proposal_ready(env: &Env, proposal_id: u64, unlock_ledger: u64) {
     env.events().publish(
@@ -217,6 +230,14 @@ pub fn emit_oracle_config_updated(env: &Env, admin: &Address, oracle: &Address) 
     );
 }
 
+/// Emit when a stale oracle price blocks condition evaluation
+pub fn emit_oracle_price_stale(env: &Env, asset: &Address, price_ledger: u64, current_ledger: u64) {
+    env.events().publish(
+        (Symbol::new(env, "oracle_price_stale"),),
+        (asset.clone(), price_ledger, current_ledger),
+    );
+}
+
 /// Emit when quorum configuration is updated by admin
 pub fn emit_quorum_updated(env: &Env, admin: &Address, old_quorum: u32, new_quorum: u32) {
     env.events().publish(
@@ -233,7 +254,16 @@ pub fn emit_quorum_reached(env: &Env, proposal_id: u64, quorum_votes: u32, requi
     );
 }
 
+/// Emit when a proposal's threshold is reduced due to time-based strategy
+pub fn emit_threshold_reduced(env: &Env, proposal_id: u64, old_threshold: u32, new_threshold: u32) {
+    env.events().publish(
+        (Symbol::new(env, "threshold_reduced"), proposal_id),
+        (old_threshold, new_threshold),
+    );
+}
+
 /// Emit when a signer is added
+#[allow(dead_code)]
 pub fn emit_signer_added(env: &Env, signer: &Address, total_signers: u32) {
     env.events().publish(
         (Symbol::new(env, "signer_added"),),
@@ -242,6 +272,7 @@ pub fn emit_signer_added(env: &Env, signer: &Address, total_signers: u32) {
 }
 
 /// Emit when a signer is removed
+#[allow(dead_code)]
 pub fn emit_signer_removed(env: &Env, signer: &Address, total_signers: u32) {
     env.events().publish(
         (Symbol::new(env, "signer_removed"),),
@@ -358,6 +389,14 @@ pub fn emit_batch_executed(env: &Env, executor: &Address, executed_count: u32, f
     );
 }
 
+/// Emit when a batch execution partially failed and was rolled back
+pub fn emit_batch_rolled_back(env: &Env, executor: &Address, rolled_back_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "batch_rolled_back"),),
+        (executor.clone(), rolled_back_count),
+    );
+}
+
 // ============================================================================
 // Notification Events (feature/execution-notifications)
 // ============================================================================
@@ -405,14 +444,15 @@ pub fn emit_hook_removed(env: &Env, hook: &Address, is_pre: bool) {
 }
 
 /// Emit when a hook is executed
-pub fn emit_hook_executed(env: &Env, hook: &Address, proposal_id: u64, is_pre: bool) {
+pub fn emit_hook_executed(env: &Env, hook: &Address, proposal_id: u64, is_pre: bool, success: bool) {
     env.events().publish(
         (Symbol::new(env, "hook_executed"), proposal_id),
-        (hook.clone(), is_pre),
+        (hook.clone(), is_pre, success),
     );
 }
 
 /// Emit when liquidity is removed
+#[allow(dead_code)]
 pub fn emit_liquidity_removed(env: &Env, proposal_id: u64, dex: &Address, lp_tokens: i128) {
     env.events().publish(
         (Symbol::new(env, "liquidity_removed"), proposal_id),
@@ -421,6 +461,7 @@ pub fn emit_liquidity_removed(env: &Env, proposal_id: u64, dex: &Address, lp_tok
 }
 
 /// Emit when LP tokens are staked
+#[allow(dead_code)]
 pub fn emit_lp_staked(env: &Env, proposal_id: u64, farm: &Address, amount: i128) {
     env.events().publish(
         (Symbol::new(env, "lp_staked"), proposal_id),
@@ -429,6 +470,7 @@ pub fn emit_lp_staked(env: &Env, proposal_id: u64, farm: &Address, amount: i128)
 }
 
 /// Emit when rewards are claimed
+#[allow(dead_code)]
 pub fn emit_rewards_claimed(env: &Env, proposal_id: u64, farm: &Address, amount: i128) {
     env.events().publish(
         (Symbol::new(env, "rewards_claimed"), proposal_id),
@@ -543,6 +585,14 @@ pub fn emit_template_updated(
     );
 }
 
+/// Emit when the oldest stored template version is pruned due to the 10-version cap
+pub fn emit_template_version_pruned(env: &Env, template_id: u64, pruned_version: u32) {
+    env.events().publish(
+        (Symbol::new(env, "template_ver_pruned"), template_id),
+        pruned_version,
+    );
+}
+
 /// Emit when a template's active status changes
 #[allow(dead_code)]
 pub fn emit_template_status_changed(
@@ -591,6 +641,7 @@ pub fn emit_retry_scheduled(
 }
 
 /// Emit when a retry execution attempt is made
+#[allow(dead_code)]
 pub fn emit_retry_attempted(env: &Env, proposal_id: u64, retry_count: u32, executor: &Address) {
     env.events().publish(
         (Symbol::new(env, "retry_attempted"), proposal_id),
@@ -812,10 +863,11 @@ pub fn emit_funding_released(
     recipient: &Address,
     amount: i128,
     milestone_index: u32,
+    percentage_bps: u32,
 ) {
     env.events().publish(
         (Symbol::new(env, "funding_released"), round_id),
-        (recipient.clone(), amount, milestone_index),
+        (recipient.clone(), amount, milestone_index, percentage_bps),
     );
 }
 
@@ -958,6 +1010,45 @@ pub fn emit_dex_config_updated(env: &Env, admin: &Address) {
         .publish((Symbol::new(env, "dex_cfg_updated"),), admin.clone());
 }
 
+/// Emit event when a swap is executed
+pub fn emit_swap_executed(
+    env: &Env,
+    proposal_id: u64,
+    dex: &Address,
+    token_in: &Address,
+    token_out: &Address,
+    amount_in: i128,
+    amount_out: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "swap_executed"),),
+        (proposal_id, dex.clone(), token_in.clone(), token_out.clone(), amount_in, amount_out),
+    );
+}
+
+/// Emit event when liquidity is added
+pub fn emit_liquidity_added(
+    env: &Env,
+    proposal_id: u64,
+    dex: &Address,
+    token_a: &Address,
+    token_b: &Address,
+    amount_a: i128,
+    amount_b: i128,
+    lp_tokens: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "liquidity_added"),),
+        (proposal_id, dex.clone(), token_a.clone(), token_b.clone(), amount_a, amount_b, lp_tokens),
+    );
+}
+
+/// Emit event when LP tokens are unstaked
+pub fn emit_lp_unstaked(env: &Env, proposal_id: u64, farm: &Address, amount: i128) {
+    env.events()
+        .publish((Symbol::new(env, "lp_unstaked"),), (proposal_id, farm.clone(), amount));
+}
+
 pub fn emit_stream_created(
     env: &Env,
     stream_id: u64,
@@ -979,6 +1070,14 @@ pub fn emit_stream_created(
     );
 }
 
+/// Emit when a stream rate is adjusted
+pub fn emit_stream_rate_adjusted(env: &Env, stream_id: u64, old_rate: i128, new_rate: i128, adjusted_by: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "stream_rate_adj"), stream_id),
+        (old_rate, new_rate, adjusted_by.clone()),
+    );
+}
+
 /// Emit when a stream status is updated (paused, resumed, or cancelled)
 #[allow(dead_code)]
 pub fn emit_stream_status_updated(env: &Env, stream_id: u64, status: u32, updated_by: &Address) {
@@ -997,23 +1096,125 @@ pub fn emit_stream_claimed(env: &Env, stream_id: u64, recipient: &Address, amoun
     );
 }
 
-// ============================================================================
-// Price-Gated Escrow Oracle Events (Issue: feature/escrow-oracle)
-// ============================================================================
-
-/// Emit when attempt_escrow_release evaluates a price condition.
-/// `condition_met` indicates whether the oracle check passed and funds were released.
-/// `oracle_price` is the price returned by the oracle (0 if oracle was unavailable).
-pub fn emit_oracle_release_attempted(
+pub fn emit_cross_vault_proposed(
     env: &Env,
-    escrow_id: u64,
-    asset_pair: &Symbol,
-    oracle_price: i128,
-    threshold: i128,
-    condition_met: bool,
+    proposal_id: u64,
+    proposer: &Address,
+    action_count: u32,
 ) {
     env.events().publish(
-        (Symbol::new(env, "oracle_release"), escrow_id),
-        (asset_pair.clone(), oracle_price, threshold, condition_met),
+        (Symbol::new(env, "cv_proposed"), proposal_id),
+        (proposer.clone(), action_count),
+    );
+}
+
+pub fn emit_cross_vault_executed(
+    env: &Env,
+    proposal_id: u64,
+    executor: &Address,
+    success_count: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "cv_executed"), proposal_id),
+        (executor.clone(), success_count),
+    );
+}
+
+pub fn emit_cross_vault_config_set(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "cv_config_set"),), admin.clone());
+}
+
+pub fn emit_permission_granted(env: &Env, admin: &Address, target: &Address, permission: u32) {
+    env.events().publish(
+        (Symbol::new(env, "permission_granted"),),
+        (admin.clone(), target.clone(), permission),
+    );
+}
+
+pub fn emit_permission_revoked(env: &Env, admin: &Address, target: &Address, permission: u32) {
+    env.events().publish(
+        (Symbol::new(env, "permission_revoked"),),
+        (admin.clone(), target.clone(), permission),
+    );
+}
+
+pub fn emit_permission_delegated(
+    env: &Env,
+    delegator: &Address,
+    delegatee: &Address,
+    permission: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "permission_delegated"),),
+        (delegator.clone(), delegatee.clone(), permission),
+    );
+}
+
+pub fn emit_dispute_raised(env: &Env, dispute_id: u64, proposal_id: u64, disputer: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "dispute_raised"), dispute_id),
+        (proposal_id, disputer.clone()),
+    );
+}
+
+pub fn emit_dispute_resolved(env: &Env, dispute_id: u64, admin: &Address, resolution: u32) {
+    env.events().publish(
+        (Symbol::new(env, "dispute_resolved"), dispute_id),
+        (admin.clone(), resolution),
+    );
+}
+
+// ============================================================================
+// Bridge Events (feature/cross-chain-bridge)
+// ============================================================================
+
+/// Emit when a bridge transfer proposal is created
+pub fn emit_bridge_proposed(env: &Env, proposal_id: u64, proposer: &Address, asset_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_proposed"), proposal_id),
+        (proposer.clone(), asset_count),
+    );
+}
+
+/// Emit when a bridge proposal is executed
+pub fn emit_bridge_executed(env: &Env, proposal_id: u64, executor: &Address, success_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_executed"), proposal_id),
+        (executor.clone(), success_count),
+    );
+}
+
+/// Emit when bridge configuration is updated
+pub fn emit_bridge_config_updated(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "bridge_cfg_updated"),), admin.clone());
+}
+
+/// Emit when reputation config is updated
+pub fn emit_reputation_config_updated(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "rep_config_updated"),), admin.clone());
+}
+
+/// Emit when a comment is deleted (soft delete)
+pub fn emit_comment_deleted(env: &Env, comment_id: u64, caller: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "comment_deleted"), comment_id),
+        caller.clone(),
+    );
+}
+
+/// Emit when metrics bucket is updated with current week stats
+pub fn emit_metrics_bucket_updated(
+    env: &Env,
+    week: u64,
+    executed: u64,
+    rejected: u64,
+    expired: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "metrics_bucket_upd"), week),
+        (executed, rejected, expired),
     );
 }

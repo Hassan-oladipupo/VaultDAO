@@ -1,9 +1,20 @@
 import type { Request, Response, NextFunction } from "express";
+import { RedisRateLimitStore, createRedisRateLimitStore } from "./redis-rate-limit.store.js";
 
 export interface RateLimitConfig {
   windowMs: number; // Time window in milliseconds
   maxRequests: number; // Max requests per window
   skipSuccessfulRequests?: boolean; // Don't count successful responses
+  /**
+   * When true, trust the X-Forwarded-For header to identify the real client IP.
+   * Only enable this when the server sits behind a trusted reverse proxy.
+   * Defaults to false — uses socket.remoteAddress to prevent IP spoofing.
+   */
+  trustProxy?: boolean;
+  /**
+   * Redis URL for distributed rate limiting
+   */
+  redisUrl?: string;
 }
 
 interface ClientState {
@@ -17,13 +28,14 @@ interface ClientState {
  */
 export class RateLimiter {
   private clients = new Map<string, ClientState>();
-  private readonly config: Required<RateLimitConfig>;
+  private readonly config: Required<Omit<RateLimitConfig, 'redisUrl'>> & { redisUrl?: string };
 
   constructor(config: RateLimitConfig) {
     this.config = {
       windowMs: config.windowMs,
       maxRequests: config.maxRequests,
       skipSuccessfulRequests: config.skipSuccessfulRequests ?? false,
+      trustProxy: config.trustProxy ?? false,
     };
 
     // Cleanup expired entries periodically
@@ -31,15 +43,18 @@ export class RateLimiter {
   }
 
   /**
-   * Get the client identifier from request
-   * Uses IP address for client identification
+   * Get the client identifier from request.
+   * Uses socket.remoteAddress by default to prevent IP spoofing.
+   * Only reads X-Forwarded-For when trustProxy is explicitly enabled.
    */
   private getClientId(req: Request): string {
-    return (
-      (req.headers["x-forwarded-for"] as string)?.split(",")[0] ||
-      req.socket.remoteAddress ||
-      "unknown"
-    ).trim();
+    if (this.config.trustProxy) {
+      const forwarded = req.headers["x-forwarded-for"] as string | undefined;
+      if (forwarded) {
+        return forwarded.split(",")[0].trim();
+      }
+    }
+    return (req.socket.remoteAddress ?? "unknown").trim();
   }
 
   /**
@@ -92,7 +107,7 @@ export class RateLimiter {
    */
   private startCleanup(): void {
     const cleanupInterval = Math.min(60000, this.config.windowMs); // At least every minute
-    setInterval(() => {
+    const handle = setInterval(() => {
       const now = Date.now();
       for (const [clientId, state] of this.clients.entries()) {
         if (now >= state.resetTime) {
@@ -100,6 +115,7 @@ export class RateLimiter {
         }
       }
     }, cleanupInterval);
+    handle.unref();
   }
 
   /**
@@ -123,17 +139,28 @@ export class RateLimiter {
  */
 export function createRateLimitMiddleware(config: RateLimitConfig) {
   const limiter = new RateLimiter(config);
+  let redisStore: RedisRateLimitStore | null = null;
+  
+  if (config.redisUrl) {
+    try {
+      redisStore = createRedisRateLimitStore(config.redisUrl, config);
+    } catch (err) {
+      console.warn("Failed to create Redis rate limit store", err);
+    }
+  }
 
-  return (req: Request, res: Response, next: NextFunction): void => {
-    if (limiter.isLimited(req)) {
-      const resetTime = new Date(limiter.getResetTime(req));
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const resetMs = redisStore ? await redisStore.getResetTime(req) : limiter.getResetTime(req);
+    const resetUnix = Math.ceil(resetMs / 1000); // Unix timestamp in seconds
+
+    const isLimited = redisStore ? await redisStore.isLimited(req) : limiter.isLimited(req);
+    
+    if (isLimited) {
       res.set({
-        "Retry-After": Math.ceil(
-          (limiter.getResetTime(req) - Date.now()) / 1000
-        ).toString(),
+        "Retry-After": Math.ceil((resetMs - Date.now()) / 1000).toString(),
         "X-RateLimit-Limit": limiter.getMaxRequests().toString(),
         "X-RateLimit-Remaining": "0",
-        "X-RateLimit-Reset": resetTime.toISOString(),
+        "X-RateLimit-Reset": resetUnix.toString(),
       });
 
       res.status(429).json({
@@ -142,18 +169,19 @@ export function createRateLimitMiddleware(config: RateLimitConfig) {
           message: "Too Many Requests",
           code: "RATE_LIMIT_EXCEEDED",
           details: {
-            retryAfter: resetTime.toISOString(),
+            retryAfter: new Date(resetMs).toISOString(),
           },
         },
       });
       return;
     }
 
-    // Set rate limit headers
+    // Set rate limit headers on every non-limited response
+    const remaining = redisStore ? await redisStore.getRemaining(req) : limiter.getRemaining(req);
     res.set({
       "X-RateLimit-Limit": limiter.getMaxRequests().toString(),
-      "X-RateLimit-Remaining": limiter.getRemaining(req).toString(),
-      "X-RateLimit-Reset": new Date(limiter.getResetTime(req)).toISOString(),
+      "X-RateLimit-Remaining": remaining.toString(),
+      "X-RateLimit-Reset": resetUnix.toString(),
     });
 
     next();
