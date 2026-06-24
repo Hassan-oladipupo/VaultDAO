@@ -27,7 +27,8 @@ use crate::types::{
     FeeStructure, FundingRound, FundingRoundConfig, GasConfig, InsuranceConfig, ListMode,
     NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalStatus,
     ProposalTemplate, RecoveryProposal, Reputation, ReputationConfig, RetryState, Role,
-    RoleAssignment, StakeRecord, StakingConfig, Subscription, SwapProposal, SwapResult,
+    HolidayCalendar, RoleAssignment, SignerTier, StakeRecord, StakingConfig, Subscription,
+    SwapProposal, SwapResult, VestingSchedule,
     TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy, BridgeConfig,
     CrossChainProposal,
 };
@@ -122,6 +123,21 @@ pub enum CounterKey {
     Recovery = 5,
     FundingRound = 6,
     Batch = 7,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum VestingKey {
+    Schedule(u64),
+    NextId,
+    ActiveCount,
+    Reserved(Address),
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum CalendarKey {
+    Holidays,
 }
 
 /// Feature-specific storage keys (split to avoid enum size limits)
@@ -245,6 +261,114 @@ pub const INSTANCE_TTL: u32 = DAY_IN_LEDGERS * 30; // 30 days
 pub const INSTANCE_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS * 7; // Extend when below 7 days
 pub const PERSISTENT_TTL: u32 = DAY_IN_LEDGERS * 30; // 30 days
 pub const PERSISTENT_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS * 7; // Extend when below 7 days
+
+// ============================================================================
+// Signer tiers
+// ============================================================================
+
+pub fn set_signer_tier(env: &Env, signer: &Address, tier: &SignerTier) {
+    if let Some(mut config) = env.storage().instance().get::<_, Config>(&DataKey::Config) {
+        config.signer_tiers.set(signer.clone(), tier.clone());
+        env.storage().instance().set(&DataKey::Config, &config);
+    }
+}
+
+pub fn get_signer_tier(env: &Env, signer: &Address) -> SignerTier {
+    env.storage()
+        .instance()
+        .get::<_, Config>(&DataKey::Config)
+        .and_then(|config| config.signer_tiers.get(signer.clone()))
+        .unwrap_or(SignerTier::Principal)
+}
+
+pub fn set_full_quorum_threshold(env: &Env, threshold: i128) {
+    if let Some(mut config) = env.storage().instance().get::<_, Config>(&DataKey::Config) {
+        config.full_quorum_threshold = threshold;
+        env.storage().instance().set(&DataKey::Config, &config);
+    }
+}
+
+pub fn get_full_quorum_threshold(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get::<_, Config>(&DataKey::Config)
+        .map(|config| config.full_quorum_threshold)
+        .unwrap_or(0)
+}
+
+// ============================================================================
+// Vesting schedules
+// ============================================================================
+
+pub fn next_vesting_id(env: &Env) -> u64 {
+    let id = env
+        .storage()
+        .instance()
+        .get(&VestingKey::NextId)
+        .unwrap_or(1);
+    env.storage().instance().set(&VestingKey::NextId, &(id + 1));
+    id
+}
+
+pub fn set_vesting_schedule(env: &Env, schedule: &VestingSchedule) {
+    let key = VestingKey::Schedule(schedule.id);
+    env.storage().persistent().set(&key, schedule);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_vesting_schedule(env: &Env, id: u64) -> Option<VestingSchedule> {
+    env.storage().persistent().get(&VestingKey::Schedule(id))
+}
+
+pub fn get_active_vesting_count(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&VestingKey::ActiveCount)
+        .unwrap_or(0)
+}
+
+pub fn set_active_vesting_count(env: &Env, count: u32) {
+    env.storage().instance().set(&VestingKey::ActiveCount, &count);
+}
+
+pub fn get_reserved_vesting(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&VestingKey::Reserved(token.clone()))
+        .unwrap_or(0)
+}
+
+pub fn set_reserved_vesting(env: &Env, token: &Address, amount: i128) {
+    let key = VestingKey::Reserved(token.clone());
+    env.storage().persistent().set(&key, &amount);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+// ============================================================================
+// Holiday calendar
+// ============================================================================
+
+pub fn set_holiday_calendar(env: &Env, calendar: &HolidayCalendar) {
+    env.storage().persistent().set(&CalendarKey::Holidays, calendar);
+    env.storage().persistent().extend_ttl(
+        &CalendarKey::Holidays,
+        PERSISTENT_TTL_THRESHOLD,
+        PERSISTENT_TTL,
+    );
+}
+
+pub fn get_holiday_calendar(env: &Env) -> HolidayCalendar {
+    env.storage()
+        .persistent()
+        .get(&CalendarKey::Holidays)
+        .unwrap_or(HolidayCalendar {
+            holiday_ledgers: Vec::new(env),
+        })
+}
 
 // ============================================================================
 // Initialization
