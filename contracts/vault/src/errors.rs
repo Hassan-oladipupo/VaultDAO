@@ -1,4 +1,3 @@
-```rust
 //! VaultDAO error definitions.
 
 use soroban_sdk::contracterror;
@@ -116,7 +115,7 @@ pub enum VaultError {
     ConfigChangeInProgress = 1010,
 
     // =========================================================
-    // Milestone quorum verification errors (NEW)
+    // Milestone quorum verification errors
     // =========================================================
 
     /// Milestone has already been verified by this address
@@ -126,41 +125,38 @@ pub enum VaultError {
     InsufficientVerifications = 511,
 
     PermissionExpired = 320,
-    
+
     PermissionNotFound = 321,
 
-    /// Stake is locked due to recent compounding
-    ReinvestmentLocked = 322,
+    // =========================================================
+    // Dependency graph errors (Issue #1066)
+    // =========================================================
 
-    /// Bridge already exists with this ID
-    BridgeAlreadyExists = 323,
+    /// Circular dependency detected in proposal dependency graph
+    CircularDependency = 960,
 
-    /// Bridge ID is invalid
-    BridgeInvalidId = 324,
+    /// Dependency proposal has not been executed yet
+    DependencyNotMet = 961,
 
-    /// Bridge deadline has passed
-    BridgeDeadlineExceeded = 325,
+    /// Too many dependencies on a single proposal (max 8)
+    TooManyDependencies = 962,
 
-    /// Bridge slippage exceeded (actual_amount < min_received)
-    BridgeSlippageExceeded = 326,
+    // =========================================================
+    // Comment moderation errors (Issue #1076)
+    // =========================================================
 
-    /// Bridge is not in the correct status for this operation
-    BridgeInvalidStatus = 327,
+    /// Comment rate limit exceeded (max 10 per signer per proposal per day)
+    CommentRateLimited = 970,
 
-    /// Bridge amount exceeds max single transfer
-    BridgeAmountExceedsLimit = 328,
+    /// Thread depth exceeds maximum (5 levels)
+    ThreadDepthExceeded = 971,
 
-    /// Dispute bond amount is too small
-    DisputeBondTooSmall = 329,
+    // =========================================================
+    // Vote weight errors (Issue #1061)
+    // =========================================================
 
-    /// Cannot re-raise a dismissed dispute
-    DisputeAlreadyDismissed = 330,
-
-    /// Arbitrator cannot resolve their own dispute
-    ArbitratorCannotResolveOwnDispute = 331,
-
-    /// Dispute has already been resolved
-    DisputeAlreadyResolved = 332,
+    /// Cannot change vote weight model while proposals are active
+    VoteWeightChangeBlocked = 980,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above
@@ -177,4 +173,3 @@ pub enum VaultError {
 
 // Compatibility markers for CI source checks:
 // DelegationError, DelegationChainTooLong, CircularDelegation
-```

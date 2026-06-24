@@ -1330,3 +1330,59 @@ pub fn emit_metrics_bucket_updated(
         (executed, rejected, expired),
     );
 }
+
+// =========================================================================
+// Proposal Expiry Grace Period Events (Issue #1062)
+// =========================================================================
+
+/// Emit when a proposal is auto-expired after grace period
+pub fn emit_proposal_grace_expired(env: &Env, proposal_id: u64, deadline: u64, grace_end: u64) {
+    env.events().publish(
+        (Symbol::new(env, "proposal_grace_exp"), proposal_id),
+        (deadline, grace_end),
+    );
+}
+
+// =========================================================================
+// Comment Moderation Events (Issue #1076)
+// =========================================================================
+
+/// Emit when a moderator is assigned
+pub fn emit_moderator_assigned(env: &Env, admin: &Address, moderator: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "moderator_assigned"),),
+        (admin.clone(), moderator.clone()),
+    );
+}
+
+/// Emit when a moderator is removed
+pub fn emit_moderator_removed(env: &Env, admin: &Address, moderator: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "moderator_removed"),),
+        (admin.clone(), moderator.clone()),
+    );
+}
+
+// =========================================================================
+// Vote Weight Events (Issue #1061)
+// =========================================================================
+
+/// Emit when the vote weight model is changed
+pub fn emit_vote_weight_changed(env: &Env, admin: &Address, old_weight: u32, new_weight: u32) {
+    env.events().publish(
+        (Symbol::new(env, "vote_weight_changed"),),
+        (admin.clone(), old_weight, new_weight),
+    );
+}
+
+// =========================================================================
+// Dependency Graph Events (Issue #1066)
+// =========================================================================
+
+/// Emit when a proposal with dependencies is created
+pub fn emit_proposal_deps_created(env: &Env, proposal_id: u64, dep_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "proposal_deps"), proposal_id),
+        dep_count,
+    );
+}
