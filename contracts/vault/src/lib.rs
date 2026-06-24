@@ -89,6 +89,49 @@ const REP_EXEC_APPROVER: u32 = 5;
 const REP_REJECTION_PENALTY: u32 = 20;
 const REP_APPROVAL_BONUS: u32 = 2;
 
+/// Compute which registered addresses have `NotificationPrefs` that match
+/// `event_type` and `amount`, taking quiet hours into account.
+///
+/// Called at emission time so indexers receive a ready-made push list inside
+/// the companion `notif_dispatch` event.
+fn compute_relevant_signers(env: &Env, event_type: &Symbol, amount: i128) -> Vec<Address> {
+    let day_offset = env.ledger().sequence() % QUIET_HOURS_CYCLE;
+    // Use the dedicated prefs index so any address (not just role-holders) can subscribe.
+    let known = storage::get_notification_prefs_index(env);
+    let mut relevant = Vec::new(env);
+
+    for addr in known.iter() {
+        let prefs = match storage::get_notification_prefs(env, &addr) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if !prefs.subscribed_events.contains(event_type) {
+            continue;
+        }
+
+        if amount < prefs.min_amount_threshold {
+            continue;
+        }
+
+        // Quiet-hours check: exclude if the current day-offset falls within
+        // [quiet_hours_start, quiet_hours_end).  Wrapping ranges (start > end)
+        // are handled by splitting into two half-open intervals.
+        let in_quiet = if prefs.quiet_hours_start <= prefs.quiet_hours_end {
+            day_offset >= prefs.quiet_hours_start && day_offset < prefs.quiet_hours_end
+        } else {
+            day_offset >= prefs.quiet_hours_start || day_offset < prefs.quiet_hours_end
+        };
+        if in_quiet {
+            continue;
+        }
+
+        relevant.push_back(addr);
+    }
+
+    relevant
+}
+
 fn calculate_expiration_ledger(config: &Config, priority: &Priority, current_ledger: u64) -> u64 {
     let multiplier = match priority {
         Priority::Low => 2,
@@ -112,6 +155,8 @@ mod test_cross_vault;
 mod test_disputes;
 #[cfg(test)]
 mod test_hooks;
+#[cfg(test)]
+mod test_notification_prefs;
 #[cfg(test)]
 mod test_recurring;
 #[cfg(test)]
@@ -725,6 +770,13 @@ impl VaultDAO {
             amount,
             actual_insurance,
         );
+
+        // Emit notification dispatch so indexers know exactly which signers to notify.
+        {
+            let event_type = Symbol::new(&env, "proposal_created");
+            let relevant = compute_relevant_signers(&env, &event_type, amount);
+            events::emit_notification_dispatch(&env, &event_type, proposal_id, amount, &relevant);
+        }
 
         // Update reputation for creating proposal
         Self::update_reputation_on_propose(&env, &proposer);
@@ -1663,6 +1715,19 @@ impl VaultDAO {
                     proposal.amount,
                     current_ledger,
                 );
+
+                // Companion notification dispatch
+                {
+                    let event_type = Symbol::new(&env, "proposal_executed");
+                    let relevant = compute_relevant_signers(&env, &event_type, proposal.amount);
+                    events::emit_notification_dispatch(
+                        &env,
+                        &event_type,
+                        proposal_id,
+                        proposal.amount,
+                        &relevant,
+                    );
+                }
 
                 // Update reputation: proposer +10, each approver +5
                 Self::update_reputation_on_execution(&env, &proposal);
