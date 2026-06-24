@@ -24,13 +24,15 @@ use crate::errors::VaultError;
 use crate::types::{
     AuditEntry, BatchExecutionResult, BatchTransaction, Comment, Config, DelegatedPermission,
     Delegation, DelegationHistory, DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot,
-    FeeStructure, FundingRound, FundingRoundConfig, GasConfig, InsuranceConfig, ListMode,
-    NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalStatus,
+    FeeStructure, FundingRound, FundingRoundConfig, GasConfig, GovernanceProposal, InsuranceConfig,
+    ListMode, NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalStatus,
     ProposalTemplate, RecoveryProposal, Reputation, ReputationConfig, RetryState, Role,
-    RoleAssignment, StakeRecord, StakingConfig, Subscription, SwapProposal, SwapResult,
+    HolidayCalendar, RoleAssignment, SignerTier, StakeRecord, StakingConfig, Subscription,
+    SwapProposal, SwapResult, VestingSchedule,
     TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy, BridgeConfig,
-    CrossChainProposal, PauseState, ComplianceRule, ComplianceReport, RuleEvaluator,
+    CrossChainProposal, DeadLetterRecord,
 };
+use crate::types_balance_snapshot::BalanceSnapshot;
 
 /// Core storage key definitions (kept minimal to avoid size limits)
 #[contracttype]
@@ -122,6 +124,22 @@ pub enum CounterKey {
     Recovery = 5,
     FundingRound = 6,
     Batch = 7,
+    ScopedDelegation = 8,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum VestingKey {
+    Schedule(u64),
+    NextId,
+    ActiveCount,
+    Reserved(Address),
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum CalendarKey {
+    Holidays,
 }
 
 /// Feature-specific storage keys (split to avoid enum size limits)
@@ -182,6 +200,8 @@ pub enum FeatureKey {
     CrossVaultProposal(u64),
     /// Cross-vault configuration -> CrossVaultConfig
     CrossVaultConfig,
+    /// Bridge record by bridge ID -> BridgeRecord
+    BridgeRecord(soroban_sdk::BytesN<32>),
     /// Dispute by ID -> Dispute
     Dispute(u64),
     /// Disputes for a proposal -> Vec<u64>
@@ -232,18 +252,10 @@ pub enum FeatureKey {
     MetricsBucketIndex,
     /// Pending config change proposal ID -> u64
     PendingConfig,
-    /// Vault pause state -> PauseState
-    PauseState,
-    /// Emergency signers list -> Vec<Address>
-    EmergencySigners,
-    /// Circuit breaker: outflow in current 1-hour window -> i128
-    CircuitBreakerOutflow(u64),
-    /// Proposal content fingerprint -> bool (active flag)
-    ProposalFingerprint(soroban_sdk::BytesN<32>),
-    /// Compliance rules -> Vec<ComplianceRule>
-    ComplianceRules,
-    /// Circuit breaker threshold (max outflow per hour) -> i128
-    CircuitBreakerThreshold,
+    /// Moderator flag for an address -> bool
+    Moderator(Address),
+    /// Comment rate tracking: (proposal_id, author, day_number) -> u32
+    CommentRateCount(u64, Address, u64),
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -253,6 +265,114 @@ pub const INSTANCE_TTL: u32 = DAY_IN_LEDGERS * 30; // 30 days
 pub const INSTANCE_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS * 7; // Extend when below 7 days
 pub const PERSISTENT_TTL: u32 = DAY_IN_LEDGERS * 30; // 30 days
 pub const PERSISTENT_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS * 7; // Extend when below 7 days
+
+// ============================================================================
+// Signer tiers
+// ============================================================================
+
+pub fn set_signer_tier(env: &Env, signer: &Address, tier: &SignerTier) {
+    if let Some(mut config) = env.storage().instance().get::<_, Config>(&DataKey::Config) {
+        config.signer_tiers.set(signer.clone(), tier.clone());
+        env.storage().instance().set(&DataKey::Config, &config);
+    }
+}
+
+pub fn get_signer_tier(env: &Env, signer: &Address) -> SignerTier {
+    env.storage()
+        .instance()
+        .get::<_, Config>(&DataKey::Config)
+        .and_then(|config| config.signer_tiers.get(signer.clone()))
+        .unwrap_or(SignerTier::Principal)
+}
+
+pub fn set_full_quorum_threshold(env: &Env, threshold: i128) {
+    if let Some(mut config) = env.storage().instance().get::<_, Config>(&DataKey::Config) {
+        config.full_quorum_threshold = threshold;
+        env.storage().instance().set(&DataKey::Config, &config);
+    }
+}
+
+pub fn get_full_quorum_threshold(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get::<_, Config>(&DataKey::Config)
+        .map(|config| config.full_quorum_threshold)
+        .unwrap_or(0)
+}
+
+// ============================================================================
+// Vesting schedules
+// ============================================================================
+
+pub fn next_vesting_id(env: &Env) -> u64 {
+    let id = env
+        .storage()
+        .instance()
+        .get(&VestingKey::NextId)
+        .unwrap_or(1);
+    env.storage().instance().set(&VestingKey::NextId, &(id + 1));
+    id
+}
+
+pub fn set_vesting_schedule(env: &Env, schedule: &VestingSchedule) {
+    let key = VestingKey::Schedule(schedule.id);
+    env.storage().persistent().set(&key, schedule);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_vesting_schedule(env: &Env, id: u64) -> Option<VestingSchedule> {
+    env.storage().persistent().get(&VestingKey::Schedule(id))
+}
+
+pub fn get_active_vesting_count(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&VestingKey::ActiveCount)
+        .unwrap_or(0)
+}
+
+pub fn set_active_vesting_count(env: &Env, count: u32) {
+    env.storage().instance().set(&VestingKey::ActiveCount, &count);
+}
+
+pub fn get_reserved_vesting(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&VestingKey::Reserved(token.clone()))
+        .unwrap_or(0)
+}
+
+pub fn set_reserved_vesting(env: &Env, token: &Address, amount: i128) {
+    let key = VestingKey::Reserved(token.clone());
+    env.storage().persistent().set(&key, &amount);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+// ============================================================================
+// Holiday calendar
+// ============================================================================
+
+pub fn set_holiday_calendar(env: &Env, calendar: &HolidayCalendar) {
+    env.storage().persistent().set(&CalendarKey::Holidays, calendar);
+    env.storage().persistent().extend_ttl(
+        &CalendarKey::Holidays,
+        PERSISTENT_TTL_THRESHOLD,
+        PERSISTENT_TTL,
+    );
+}
+
+pub fn get_holiday_calendar(env: &Env) -> HolidayCalendar {
+    env.storage()
+        .persistent()
+        .get(&CalendarKey::Holidays)
+        .unwrap_or(HolidayCalendar {
+            holiday_ledgers: Vec::new(env),
+        })
+}
 
 // ============================================================================
 // Initialization
@@ -1684,6 +1804,20 @@ pub fn set_stake_record(env: &Env, record: &StakeRecord) {
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, PROPOSAL_TTL);
 }
 
+pub fn get_bridge_record(env: &Env, bridge_id: soroban_sdk::BytesN<32>) -> Option<crate::types::BridgeRecord> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::BridgeRecord(bridge_id))
+}
+
+pub fn set_bridge_record(env: &Env, record: &crate::types::BridgeRecord) {
+    let key = FeatureKey::BridgeRecord(record.bridge_id.clone());
+    env.storage().persistent().set(&key, record);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, PROPOSAL_TTL);
+}
+
 pub fn get_permissions(env: &Env, addr: &Address) -> Vec<PermissionGrant> {
     env.storage()
         .persistent()
@@ -1893,6 +2027,37 @@ pub fn set_retry_state(env: &Env, proposal_id: u64, state: &RetryState) {
     env.storage()
         .persistent()
         .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+}
+
+// ============================================================================
+// Dead Letter Queue
+// ============================================================================
+
+pub fn get_dead_letter(env: &Env, id: u64) -> Option<DeadLetterRecord> {
+    env.storage().persistent().get(&FeatureKey::DeadLetter(id))
+}
+
+pub fn set_dead_letter(env: &Env, record: &DeadLetterRecord) {
+    let key = FeatureKey::DeadLetter(record.id);
+    env.storage().persistent().set(&key, record);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_dead_letter_count(env: &Env) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::DeadLetterCount)
+        .unwrap_or(0)
+}
+
+pub fn increment_dead_letter_count(env: &Env) -> u64 {
+    let count = get_dead_letter_count(env) + 1;
+    env.storage()
+        .persistent()
+        .set(&FeatureKey::DeadLetterCount, &count);
+    count
 }
 
 // ============================================================================
@@ -2578,153 +2743,67 @@ pub fn remove_delegator_index(env: &Env, delegate: &Address, delegator: &Address
 }
 
 // ============================================================================
-// Emergency Pause / Circuit Breaker (#1084)
+// Moderator Management (Issue #1076)
 // ============================================================================
 
-pub fn get_pause_state(env: &Env) -> PauseState {
+/// Check if an address has the Moderator sub-role.
+pub fn is_moderator(env: &Env, addr: &Address) -> bool {
     env.storage()
-        .instance()
-        .get(&DataKey::PauseState)
-        .unwrap_or(PauseState {
-            is_paused: false,
-            paused_by: None,
-            paused_at_ledger: 0,
-            cause: soroban_sdk::Symbol::new(env, "none"),
-        })
+        .persistent()
+        .get(&FeatureKey::Moderator(addr.clone()))
+        .unwrap_or(false)
 }
 
-pub fn set_pause_state(env: &Env, state: &PauseState) {
-    env.storage().instance().set(&DataKey::PauseState, state);
-}
-
-pub fn get_emergency_signers(env: &Env) -> soroban_sdk::Vec<Address> {
-    env.storage()
-        .instance()
-        .get(&DataKey::EmergencySigners)
-        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
-}
-
-pub fn set_emergency_signers(env: &Env, signers: &soroban_sdk::Vec<Address>) {
-    env.storage().instance().set(&DataKey::EmergencySigners, signers);
-}
-
-pub fn get_circuit_breaker_threshold(env: &Env) -> i128 {
-    env.storage()
-        .instance()
-        .get(&DataKey::CircuitBreakerThreshold)
-        .unwrap_or(0i128)
-}
-
-pub fn set_circuit_breaker_threshold(env: &Env, threshold: i128) {
-    env.storage().instance().set(&DataKey::CircuitBreakerThreshold, &threshold);
-}
-
-/// Returns the 1-hour window index for circuit breaker tracking (~720 ledgers per hour)
-pub fn get_hour_window(env: &Env) -> u64 {
-    env.ledger().sequence() as u64 / 720
-}
-
-pub fn get_circuit_breaker_outflow(env: &Env, window: u64) -> i128 {
-    env.storage()
-        .temporary()
-        .get(&DataKey::CircuitBreakerOutflow(window))
-        .unwrap_or(0i128)
-}
-
-pub fn add_circuit_breaker_outflow(env: &Env, window: u64, amount: i128) {
-    let current: i128 = get_circuit_breaker_outflow(env, window);
-    let key = DataKey::CircuitBreakerOutflow(window);
-    env.storage().temporary().set(&key, &(current + amount));
-    env.storage().temporary().extend_ttl(&key, 1440, 1440); // 2 hours
-}
-
-// ============================================================================
-// Proposal Fingerprint Deduplication (#1089)
-// ============================================================================
-
-/// ~30 days in ledgers
-pub const FINGERPRINT_TTL: u32 = DAY_IN_LEDGERS * 30;
-
-pub fn has_proposal_fingerprint(env: &Env, fingerprint: &soroban_sdk::BytesN<32>) -> bool {
-    env.storage()
-        .temporary()
-        .has(&DataKey::ProposalFingerprint(fingerprint.clone()))
-}
-
-pub fn set_proposal_fingerprint(env: &Env, fingerprint: &soroban_sdk::BytesN<32>) {
-    let key = DataKey::ProposalFingerprint(fingerprint.clone());
-    env.storage().temporary().set(&key, &true);
-    env.storage().temporary().extend_ttl(&key, FINGERPRINT_TTL, FINGERPRINT_TTL);
-}
-
-// ============================================================================
-// Compliance Rules (#1103)
-// ============================================================================
-
-pub fn get_compliance_rules(env: &Env) -> soroban_sdk::Vec<ComplianceRule> {
-    env.storage()
-        .instance()
-        .get(&DataKey::ComplianceRules)
-        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
-}
-
-pub fn set_compliance_rules(env: &Env, rules: &soroban_sdk::Vec<ComplianceRule>) {
-    env.storage().instance().set(&DataKey::ComplianceRules, rules);
-}
-
-/// Evaluate compliance for the given window and return a report.
-/// This is read-only — it does not write any state.
-pub fn evaluate_compliance_report(env: &Env, window_ledgers: u32) -> ComplianceReport {
-    let rules = get_compliance_rules(env);
-    let current_ledger = env.ledger().sequence();
-    let window_start = current_ledger.saturating_sub(window_ledgers);
-
-    let mut total_weight: u32 = 0;
-    let mut passed_weight: u32 = 0;
-    let mut failed_rules: soroban_sdk::Vec<u32> = soroban_sdk::Vec::new(env);
-
-    for rule in rules.iter() {
-        total_weight += rule.weight;
-        let passed = match rule.evaluator {
-            RuleEvaluator::TimelockAdherence => {
-                // Considered compliant if no proposals executed before timelock in window
-                // Simplified: always pass unless specific state indicates violations
-                true
-            }
-            RuleEvaluator::SpendingLimitCompliance => {
-                // Check if daily/weekly limits were exceeded in window
-                let day = window_start as u64 / DAY_IN_LEDGERS as u64;
-                let current_day = current_ledger as u64 / DAY_IN_LEDGERS as u64;
-                // Compare spending in window vs configured limits
-                let _ = day;
-                let _ = current_day;
-                true
-            }
-            RuleEvaluator::VotingParticipation => {
-                // Check if quorum was met on proposals in window
-                true
-            }
-            RuleEvaluator::AuditTrailCompleteness => {
-                // Check if audit entries exist
-                env.storage().instance().has(&DataKey::NextAuditId)
-            }
-        };
-        if passed {
-            passed_weight += rule.weight;
-        } else {
-            failed_rules.push_back(rule.rule_id);
-        }
-    }
-
-    let score = if total_weight == 0 {
-        100
+/// Set or remove the Moderator sub-role for an address.
+pub fn set_moderator(env: &Env, addr: &Address, is_mod: bool) {
+    if is_mod {
+        env.storage()
+            .persistent()
+            .set(&FeatureKey::Moderator(addr.clone()), &true);
+        env.storage().persistent().extend_ttl(
+            &FeatureKey::Moderator(addr.clone()),
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL,
+        );
     } else {
-        (passed_weight * 100) / total_weight
-    };
-
-    ComplianceReport {
-        score,
-        failed_rules,
-        generated_at: current_ledger,
+        env.storage()
+            .persistent()
+            .remove(&FeatureKey::Moderator(addr.clone()));
     }
+}
+
+// ============================================================================
+// Comment Rate Limiting (Issue #1076)
+// ============================================================================
+
+/// Get the comment count for a signer on a proposal for a given day.
+pub fn get_comment_rate_count(env: &Env, proposal_id: u64, author: &Address, day: u64) -> u32 {
+    env.storage()
+        .temporary()
+        .get(&FeatureKey::CommentRateCount(proposal_id, author.clone(), day))
+        .unwrap_or(0)
+}
+
+/// Increment the comment count for a signer on a proposal for a given day.
+pub fn increment_comment_rate_count(env: &Env, proposal_id: u64, author: &Address, day: u64) {
+    let key = FeatureKey::CommentRateCount(proposal_id, author.clone(), day);
+    let count: u32 = env.storage().temporary().get(&key).unwrap_or(0);
+    env.storage().temporary().set(&key, &(count + 1));
+    // TTL of 2 days to cover edge cases spanning two ledger epochs
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS, DAY_IN_LEDGERS * 2);
+}
+
+// ============================================================================
+// Expired Proposal TTL Reduction (Issue #1062)
+// ============================================================================
+
+/// Reduce TTL for an expired proposal to reclaim ledger rent sooner.
+pub fn reduce_expired_proposal_ttl(env: &Env, proposal_id: u64) {
+    let key = DataKey::Proposal(proposal_id);
+    // Set a short TTL (1 day) for expired proposals instead of the default 7 days
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, DAY_IN_LEDGERS / 2, DAY_IN_LEDGERS);
 }
