@@ -28,15 +28,15 @@ use types::{
     CrossChainAsset, CrossChainProposal, CrossVaultConfig, CrossVaultProposal, CrossVaultStatus,
     Delegation, DelegationHistory, DexConfig, Dispute, DisputeResolution, DisputeStatus, Escrow,
     EscrowStatus, ExecutionFeeEstimate, FundingMilestone, FundingMilestoneStatus, FundingRound,
-    FundingRoundConfig, FundingRoundStatus, GasConfig, InitConfig, InsuranceConfig, ListMode,
-    Milestone, NotificationPreferences, OptionalVaultOracleConfig, Priority, Proposal,
+    FundingRoundConfig, FundingRoundStatus, GasConfig, HolidayBehavior, HolidayCalendar, InitConfig,
+    InsuranceConfig, ListMode, Milestone, NotificationPreferences, OptionalVaultOracleConfig,
+    Priority, Proposal,
     ProposalAmendment, ProposalStatus, ProposalTemplate, RecoveryConfig, RecoveryProposal,
     RecoveryStatus, RecurringPayment, Reputation, ReputationConfig, RetryConfig, RetryState, Role,
-    RoleAssignment, ScheduledTransferConfig, StakingConfig, StreamStatus, StreamingPayment,
-    Subscription, SubscriptionStatus, SubscriptionTier, SwapProposal, SwapResult,
+    RoleAssignment, ScheduledTransferConfig, SignerTier, StakingConfig, StreamStatus,
+    StreamingPayment, Subscription, SubscriptionStatus, SubscriptionTier, SwapProposal, SwapResult,
     TemplateOverrides, ThresholdStrategy, TransferDetails, VaultAction, VaultMetrics,
-    VaultOracleConfig, VaultPriceData, VelocityConfig, VotingStrategy,
-    VoteChoice,
+    VaultOracleConfig, VaultPriceData, VelocityConfig, VestingSchedule, VoteChoice, VotingStrategy,
 };
 
 /// The main contract structure for VaultDAO.
@@ -117,6 +117,8 @@ mod test_voting_deadline;
 mod test_streaming;
 #[cfg(test)]
 mod test_attachments;
+#[cfg(test)]
+mod test_enterprise_features;
 #[cfg(test)]
 mod test_tags;
 #[cfg(test)]
@@ -235,6 +237,8 @@ impl VaultDAO {
         // Create config
         let config_storage = Config {
             signers: config.signers.clone(),
+            signer_tiers: Map::new(&env),
+            full_quorum_threshold: 0,
             threshold: config.threshold,
             quorum: config.quorum,
             quorum_percentage: config.quorum_percentage,
@@ -595,7 +599,7 @@ impl VaultDAO {
             0
         };
 
-        let proposal = Proposal {
+        let mut proposal = Proposal {
             id: proposal_id,
             proposer: proposer.clone(),
             recipient: recipient.clone(),
@@ -678,6 +682,49 @@ impl VaultDAO {
             metrics.expired_count,
             metrics.success_rate_bps(),
         );
+
+        let full_quorum_threshold = storage::get_full_quorum_threshold(&env);
+        if Self::can_execute_unilaterally(
+            &storage::get_signer_tier(&env, &proposer),
+            amount,
+            full_quorum_threshold,
+        ) {
+            proposal.approvals.push_back(proposer.clone());
+            proposal.status = ProposalStatus::Approved;
+            Self::try_execute_transfer(&env, &proposer, &mut proposal, current_ledger)?;
+            proposal.status = ProposalStatus::Executed;
+            proposal.execution_ledger = current_ledger;
+            storage::set_proposal(&env, &proposal);
+            events::emit_proposal_approved(
+                &env,
+                proposal_id,
+                &proposer,
+                proposal.approvals.len(),
+                1,
+            );
+            events::emit_proposal_executed(
+                &env,
+                proposal_id,
+                &proposer,
+                &recipient,
+                &token_addr,
+                amount,
+                current_ledger,
+            );
+            storage::create_audit_entry(
+                &env,
+                AuditAction::ApproveProposal,
+                &proposer,
+                proposal_id,
+            );
+            storage::create_audit_entry(
+                &env,
+                AuditAction::ExecuteProposal,
+                &proposer,
+                proposal_id,
+            );
+            storage::metrics_on_execution(&env, proposal.gas_used, 0);
+        }
 
         Ok(proposal_id)
     }
@@ -1842,7 +1889,7 @@ impl VaultDAO {
         delegator.require_auth();
 
         if delegator == delegate {
-            return Err(VaultError::InvalidAmount); // Invalid operation
+            return Err(VaultError::CircularDelegation);
         }
 
         let config = storage::get_config(&env)?;
@@ -1850,33 +1897,28 @@ impl VaultDAO {
             return Err(VaultError::NotASigner);
         }
 
-        // Circular delegation check (A -> B, B -> A)
-        if let Some(existing) = storage::get_delegation(&env, &delegate) {
-            if existing.delegate == delegator {
-                return Err(VaultError::Unauthorized); // Circular
-            }
-        }
-
-        // Enforce max delegation depth (prevent chains longer than 10)
-        const MAX_DELEGATION_DEPTH: u32 = 10;
-        let mut depth = 0u32;
+        // Iteratively trace the target chain. A->B->C is valid; adding another
+        // hop is rejected. Cycle detection happens before state is written.
+        const MAX_DELEGATION_DEPTH: u8 = 2;
+        let mut depth = 1u8;
         let mut current = delegate.clone();
         let current_ledger = env.ledger().sequence() as u64;
 
         loop {
-            if depth >= MAX_DELEGATION_DEPTH {
-                return Err(VaultError::Unauthorized); // Chain would be too long
-            }
-
             if let Some(delegation) = storage::get_delegation(&env, &current) {
-                // Check if delegation is still active
                 if !delegation.is_active
                     || (delegation.expiry_ledger > 0 && current_ledger > delegation.expiry_ledger)
                 {
                     break;
                 }
-                current = delegation.delegate;
-                depth += 1;
+                if delegation.delegate == delegator {
+                    return Err(VaultError::CircularDelegation);
+                }
+                if depth >= MAX_DELEGATION_DEPTH {
+                    return Err(VaultError::DelegationChainTooLong);
+                }
+                current = delegation.delegate.clone();
+                depth = depth.saturating_add(1);
             } else {
                 break;
             }
@@ -1886,15 +1928,33 @@ impl VaultDAO {
             .map(|d| d.delegate)
             .unwrap_or(delegator.clone());
 
+        if depth >= MAX_DELEGATION_DEPTH
+            && !storage::get_delegators_for(&env, &delegator).is_empty()
+        {
+            return Err(VaultError::DelegationChainTooLong);
+        }
+
         let delegation = Delegation {
             delegator: delegator.clone(),
             delegate: delegate.clone(),
             created_at: env.ledger().sequence() as u64,
             expiry_ledger,
             is_active: true,
+            chain_depth: depth,
         };
 
         storage::set_delegation(&env, &delegation);
+
+        // If this signer was already the final delegate for another signer,
+        // extending the chain changes that original delegation to depth two.
+        for upstream in storage::get_delegators_for(&env, &delegator).iter() {
+            if let Some(mut upstream_delegation) = storage::get_delegation(&env, &upstream) {
+                if upstream_delegation.is_active && upstream_delegation.delegate == delegator {
+                    upstream_delegation.chain_depth = depth.saturating_add(1);
+                    storage::set_delegation(&env, &upstream_delegation);
+                }
+            }
+        }
 
         let history = DelegationHistory {
             id: storage::increment_delegation_id(&env),
@@ -1908,152 +1968,48 @@ impl VaultDAO {
         Ok(())
     }
 
-        // ============================================================
-    // Delegation: Cycle-safe vote delegation
-    // ============================================================
-
-    const MAX_DELEGATION_DEPTH: u32 = 5;
-
+    /// Compatibility alias for clients using the original delegation method.
     pub fn delegate_vote(
         env: Env,
         delegator: Address,
         delegate: Address,
         expiry_ledger: u64,
     ) -> Result<(), VaultError> {
-        delegator.require_auth();
-
-        // Basic self-delegation protection
-        if delegator == delegate {
-            return Err(VaultError::CircularDelegation);
-        }
-
-        // Check cycle BEFORE writing state
-        Self::check_delegation_cycle(&env, &delegate, &delegator, 0)?;
-
-        // Load existing delegation (if any)
-        let mut delegation = storage::get_delegation(&env, &delegator);
-
-        // Update reverse index: remove old delegate mapping if exists
-        if delegation.is_active {
-            storage::remove_delegator_index(&env, &delegation.delegate, &delegator);
-        }
-
-        // Create new delegation
-        delegation.delegator = delegator.clone();
-        delegation.delegate = delegate.clone();
-        delegation.created_at = env.ledger().sequence() as u64;
-        delegation.expiry_ledger = expiry_ledger;
-        delegation.is_active = true;
-
-        storage::set_delegation(&env, &delegation);
-
-        // Reverse index: delegate -> delegators
-        storage::add_delegator_index(&env, &delegate, &delegator);
-
-        // Audit history
-        storage::push_delegation_history(&env, DelegationHistory {
-            id: storage::next_delegation_id(&env),
-            delegator,
-            previous_delegate: delegation.delegate.clone(),
-            new_delegate: delegate,
-            changed_at: env.ledger().sequence() as u64,
-        });
-
-        Ok(())
-    }
-
-
-    fn check_delegation_cycle(
-        env: &Env,
-        current: &Address,
-        target: &Address,
-        depth: u32,
-    ) -> Result<(), VaultError> {
-        if depth >= MAX_DELEGATION_DEPTH {
-            return Err(VaultError::DelegationChainTooLong);
-        }
-    
-        if current == target {
-            return Err(VaultError::CircularDelegation);
-        }
-    
-        let delegation = storage::get_delegation(env, current);
-    
-        if !delegation.is_active {
-            return Ok(());
-        }
-    
-        Self::check_delegation_cycle(
-            env,
-            &delegation.delegate,
-            target,
-            depth + 1,
-        )
-    }
-
-
-    fn resolve_delegation_chain(
-        env: &Env,
-        current: &Address,
-        output: &mut Vec<Address>,
-        depth: u32,
-    ) {
-        if depth >= MAX_DELEGATION_DEPTH {
-            return;
-        }
-    
-        let delegation = storage::get_delegation(env, current);
-    
-        if !delegation.is_active {
-            return;
-        }
-    
-        let current_ledger = env.ledger().sequence() as u64;
-        if delegation.expiry_ledger != 0 && current_ledger > delegation.expiry_ledger {
-            return;
-        }
-    
-        let delegate = delegation.delegate.clone();
-    
-        if !output.contains(&delegate) {
-            output.push_back(delegate.clone());
-    
-            Self::resolve_delegation_chain(env, &delegate, output, depth + 1);
-        }
+        Self::delegate_voting_power(env, delegator, delegate, expiry_ledger)
     }
 
     fn get_all_represented_voters(
         env: &Env,
         signer: &Address,
         voters: &mut Vec<Address>,
-        depth: u32,
+        _depth: u32,
     ) {
-        if depth >= 5 {
-            return;
-        }
+        let current_ledger = env.ledger().sequence() as u64;
+        let mut frontier = Vec::new(env);
+        frontier.push_back(signer.clone());
 
-        let delegators = storage::get_delegators_for(env, signer);
-
-        for delegator in delegators.iter() {
-            if !voters.contains(&delegator) {
-                let delegation = storage::get_delegation(env, &delegator);
-        
-                let current_ledger = env.ledger().sequence() as u64;
-        
-                if delegation.is_active
-                    && (delegation.expiry_ledger == 0 || current_ledger <= delegation.expiry_ledger)
-                {
-                    represented_voters.push_back(delegator.clone());
-        
-                    // Continue forward chain safely
-                    Self::resolve_delegation_chain(
-                        env,
-                        &delegator,
-                        &mut represented_voters,
-                        0,
-                    );
+        // Reverse traversal is bounded to two hops and each original signer is
+        // inserted once, preventing vote amplification through a chain.
+        for _ in 0..2 {
+            let mut next = Vec::new(env);
+            for delegate in frontier.iter() {
+                for delegator in storage::get_delegators_for(env, &delegate).iter() {
+                    if voters.contains(&delegator) {
+                        continue;
+                    }
+                    if let Some(delegation) = storage::get_delegation(env, &delegator) {
+                        if delegation.is_active
+                            && delegation.delegate == delegate
+                            && (delegation.expiry_ledger == 0
+                                || current_ledger <= delegation.expiry_ledger)
+                        {
+                            voters.push_back(delegator.clone());
+                            next.push_back(delegator);
+                        }
+                    }
                 }
             }
+            frontier = next;
         }
     }
 
@@ -2106,23 +2062,22 @@ impl VaultDAO {
     /// # Errors
     /// Returns `VaultError::Unauthorized` if the delegation chain exceeds max depth (10)
     pub fn get_delegation_chain(env: Env, addr: Address) -> Result<Vec<Address>, VaultError> {
-        const MAX_DELEGATION_DEPTH: u32 = 10;
+        const MAX_DELEGATION_DEPTH: u32 = 2;
         let mut chain = Vec::new(&env);
         let mut current = addr.clone();
         let mut depth = 0u32;
         let current_ledger = env.ledger().sequence() as u64;
 
         loop {
-            if depth >= MAX_DELEGATION_DEPTH {
-                return Err(VaultError::Unauthorized); // Chain too long
-            }
-
             if let Some(delegation) = storage::get_delegation(&env, &current) {
                 // Check if delegation is still active
                 if !delegation.is_active
                     || (delegation.expiry_ledger > 0 && current_ledger > delegation.expiry_ledger)
                 {
                     break;
+                }
+                if depth >= MAX_DELEGATION_DEPTH {
+                    return Err(VaultError::DelegationChainTooLong);
                 }
                 chain.push_back(delegation.delegate.clone());
                 current = delegation.delegate;
@@ -2789,6 +2744,8 @@ impl VaultDAO {
             // Return defaults if not initialized
             Config {
                 signers: Vec::new(&env),
+                signer_tiers: Map::new(&env),
+                full_quorum_threshold: 0,
                 threshold: 1,
                 quorum: 0,
                 quorum_percentage: 0,
@@ -3667,6 +3624,8 @@ impl VaultDAO {
             status: crate::types::RecurringStatus::Active,
             max_missed_payments,
             paused_at_ledger: 0,
+            skip_holidays: false,
+            holiday_behavior: HolidayBehavior::PayLate,
         };
 
         storage::set_recurring_payment(&env, &payment);
@@ -3688,7 +3647,13 @@ impl VaultDAO {
         }
 
         let current_ledger = env.ledger().sequence() as u64;
-        if current_ledger < payment.next_payment_ledger {
+        let due_ledger = Self::adjust_recurring_ledger(
+            &env,
+            payment.next_payment_ledger,
+            payment.skip_holidays,
+            &payment.holiday_behavior,
+        );
+        if current_ledger < due_ledger {
             return Err(VaultError::TimelockNotExpired); // Reuse error for "Too Early"
         }
 
@@ -3743,7 +3708,16 @@ impl VaultDAO {
             token::transfer(&env, &payment.token, &payment.recipient, payment.amount);
             
             // Emit event for each payment with sequential ledger timestamp
-            let payment_ledger = payment.next_payment_ledger + (i * payment.interval);
+            let payment_ledger = if i == 0 {
+                due_ledger
+            } else {
+                Self::adjust_recurring_ledger(
+                    &env,
+                    payment.next_payment_ledger + (i * payment.interval),
+                    payment.skip_holidays,
+                    &payment.holiday_behavior,
+                )
+            };
             env.events().publish(
                 (Symbol::new(&env, "recurring_payment_executed"),),
                 (payment_id, payment_ledger, payment.amount),
@@ -6133,6 +6107,10 @@ impl VaultDAO {
 
     /// Calculate effective threshold based on the configured ThresholdStrategy.
     fn calculate_threshold(env: &Env, config: &Config, amount: &i128, created_at: u64) -> u32 {
+        let full_quorum_threshold = storage::get_full_quorum_threshold(env);
+        if full_quorum_threshold > 0 && *amount > full_quorum_threshold {
+            return config.signers.len();
+        }
         match &config.threshold_strategy {
             ThresholdStrategy::Fixed => config.threshold,
             ThresholdStrategy::Percentage(pct) => {
@@ -11643,5 +11621,373 @@ impl VaultDAO {
         Self::update_reputation_on_propose(&env, &proposer);
 
         Ok(new_proposal_id)
+    }
+
+    // ========================================================================
+    // Signer tiers
+    // ========================================================================
+
+    fn can_execute_unilaterally(
+        tier: &SignerTier,
+        amount: i128,
+        full_quorum_threshold: i128,
+    ) -> bool {
+        if amount <= 0 || (full_quorum_threshold > 0 && amount > full_quorum_threshold) {
+            return false;
+        }
+        match tier {
+            SignerTier::Junior(limit) | SignerTier::Senior(limit) => amount <= *limit,
+            SignerTier::Principal => false,
+        }
+    }
+
+    pub fn set_signer_tier(
+        env: Env,
+        admin: Address,
+        signer: Address,
+        tier: SignerTier,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        let config = storage::get_config(&env)?;
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if !config.signers.contains(&signer) {
+            return Err(VaultError::NotASigner);
+        }
+        match &tier {
+            SignerTier::Junior(limit) | SignerTier::Senior(limit) if *limit < 0 => {
+                return Err(VaultError::InvalidAmount);
+            }
+            _ => {}
+        }
+        storage::set_signer_tier(&env, &signer, &tier);
+        env.events().publish(
+            (Symbol::new(&env, "signer_tier_set"), signer),
+            tier,
+        );
+        Ok(())
+    }
+
+    pub fn get_signer_tier(env: Env, signer: Address) -> SignerTier {
+        storage::get_signer_tier(&env, &signer)
+    }
+
+    pub fn set_full_quorum_threshold(
+        env: Env,
+        admin: Address,
+        threshold: i128,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if threshold < 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        storage::set_full_quorum_threshold(&env, threshold);
+        env.events().publish(
+            (Symbol::new(&env, "full_quorum_threshold"),),
+            threshold,
+        );
+        Ok(())
+    }
+
+    pub fn get_full_quorum_threshold(env: Env) -> i128 {
+        storage::get_full_quorum_threshold(&env)
+    }
+
+    // ========================================================================
+    // Token vesting
+    // ========================================================================
+
+    pub fn create_vesting_schedule(
+        env: Env,
+        admin: Address,
+        beneficiary: Address,
+        token_addr: Address,
+        total: i128,
+        cliff_ledger: u32,
+        start_ledger: u32,
+        end_ledger: u32,
+    ) -> Result<u64, VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if total <= 0
+            || end_ledger <= cliff_ledger
+            || end_ledger <= start_ledger
+            || cliff_ledger < start_ledger
+        {
+            return Err(VaultError::InvalidAmount);
+        }
+        let active = storage::get_active_vesting_count(&env);
+        if active >= 100 {
+            return Err(VaultError::BatchTooLarge);
+        }
+        let reserved = storage::get_reserved_vesting(&env, &token_addr);
+        if token::balance(&env, &token_addr).saturating_sub(reserved) < total {
+            return Err(VaultError::InsufficientBalance);
+        }
+
+        let id = storage::next_vesting_id(&env);
+        let schedule = VestingSchedule {
+            id,
+            beneficiary: beneficiary.clone(),
+            token: token_addr.clone(),
+            total,
+            cliff_ledger,
+            start_ledger,
+            end_ledger,
+            claimed: 0,
+            cancelled: false,
+        };
+        storage::set_vesting_schedule(&env, &schedule);
+        storage::set_active_vesting_count(&env, active + 1);
+        storage::set_reserved_vesting(&env, &token_addr, reserved + total);
+        env.events().publish(
+            (Symbol::new(&env, "vesting_created"), id),
+            (beneficiary, token_addr, total, cliff_ledger, end_ledger),
+        );
+        Ok(id)
+    }
+
+    pub fn get_vesting_schedule(env: Env, schedule_id: u64) -> Option<VestingSchedule> {
+        storage::get_vesting_schedule(&env, schedule_id)
+    }
+
+    pub fn claim_vested_tokens(
+        env: Env,
+        beneficiary: Address,
+        schedule_id: u64,
+    ) -> Result<i128, VaultError> {
+        beneficiary.require_auth();
+        let mut schedule =
+            storage::get_vesting_schedule(&env, schedule_id).ok_or(VaultError::ProposalNotFound)?;
+        if schedule.cancelled || schedule.beneficiary != beneficiary {
+            return Err(VaultError::Unauthorized);
+        }
+        let vested = Self::vested_amount(&schedule, env.ledger().sequence())?;
+        let claimable = vested.saturating_sub(schedule.claimed);
+        if claimable == 0 {
+            return Ok(0);
+        }
+        token::transfer(&env, &schedule.token, &beneficiary, claimable);
+        schedule.claimed = schedule.claimed.saturating_add(claimable);
+        storage::set_vesting_schedule(&env, &schedule);
+        let reserved = storage::get_reserved_vesting(&env, &schedule.token);
+        storage::set_reserved_vesting(
+            &env,
+            &schedule.token,
+            reserved.saturating_sub(claimable),
+        );
+        if schedule.claimed == schedule.total {
+            let active = storage::get_active_vesting_count(&env);
+            storage::set_active_vesting_count(&env, active.saturating_sub(1));
+        }
+        env.events().publish(
+            (Symbol::new(&env, "vesting_claimed"), schedule_id),
+            (beneficiary, claimable, schedule.claimed),
+        );
+        Ok(claimable)
+    }
+
+    pub fn cancel_vesting(
+        env: Env,
+        admin: Address,
+        schedule_id: u64,
+    ) -> Result<i128, VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        let mut schedule =
+            storage::get_vesting_schedule(&env, schedule_id).ok_or(VaultError::ProposalNotFound)?;
+        if schedule.cancelled {
+            return Ok(0);
+        }
+        if schedule.claimed == schedule.total {
+            schedule.cancelled = true;
+            storage::set_vesting_schedule(&env, &schedule);
+            return Ok(0);
+        }
+        let vested = Self::vested_amount(&schedule, env.ledger().sequence())?;
+        let vested_unclaimed = vested.saturating_sub(schedule.claimed);
+        if vested_unclaimed > 0 {
+            token::transfer(
+                &env,
+                &schedule.token,
+                &schedule.beneficiary,
+                vested_unclaimed,
+            );
+            schedule.claimed = vested;
+        }
+        let unvested = schedule.total.saturating_sub(vested);
+        schedule.cancelled = true;
+        storage::set_vesting_schedule(&env, &schedule);
+        let reserved = storage::get_reserved_vesting(&env, &schedule.token);
+        storage::set_reserved_vesting(
+            &env,
+            &schedule.token,
+            reserved.saturating_sub(vested_unclaimed.saturating_add(unvested)),
+        );
+        let active = storage::get_active_vesting_count(&env);
+        storage::set_active_vesting_count(&env, active.saturating_sub(1));
+        env.events().publish(
+            (Symbol::new(&env, "vesting_cancelled"), schedule_id),
+            (admin, vested_unclaimed, unvested),
+        );
+        Ok(unvested)
+    }
+
+    fn vested_amount(schedule: &VestingSchedule, ledger: u32) -> Result<i128, VaultError> {
+        if ledger < schedule.cliff_ledger {
+            return Ok(0);
+        }
+        if ledger >= schedule.end_ledger {
+            return Ok(schedule.total);
+        }
+        let elapsed = ledger.saturating_sub(schedule.start_ledger) as i128;
+        let duration = schedule.end_ledger.saturating_sub(schedule.start_ledger) as i128;
+        schedule
+            .total
+            .checked_mul(elapsed)
+            .map(|value| value / duration)
+            .ok_or(VaultError::InvalidAmount)
+    }
+
+    // ========================================================================
+    // Holiday-aware recurring payments
+    // ========================================================================
+
+    pub fn set_holiday_calendar(
+        env: Env,
+        admin: Address,
+        holiday_ledgers: Vec<u64>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if holiday_ledgers.len() > 50 {
+            return Err(VaultError::BatchTooLarge);
+        }
+
+        let mut sorted = Vec::new(&env);
+        for ledger in holiday_ledgers.iter() {
+            let mut inserted = false;
+            for index in 0..sorted.len() {
+                let existing = sorted.get(index).unwrap();
+                if ledger == existing {
+                    inserted = true;
+                    break;
+                }
+                if ledger < existing {
+                    sorted.insert(index, ledger);
+                    inserted = true;
+                    break;
+                }
+            }
+            if !inserted {
+                sorted.push_back(ledger);
+            }
+        }
+        storage::set_holiday_calendar(
+            &env,
+            &HolidayCalendar {
+                holiday_ledgers: sorted,
+            },
+        );
+        env.events().publish(
+            (Symbol::new(&env, "holiday_calendar_set"),),
+            holiday_ledgers.len(),
+        );
+        Ok(())
+    }
+
+    pub fn get_holiday_calendar(env: Env) -> HolidayCalendar {
+        storage::get_holiday_calendar(&env)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn schedule_payment_with_calendar(
+        env: Env,
+        proposer: Address,
+        recipient: Address,
+        token_addr: Address,
+        amount: i128,
+        memo: Symbol,
+        interval: u64,
+        max_missed_payments: u32,
+        skip_holidays: bool,
+        holiday_behavior: HolidayBehavior,
+    ) -> Result<u64, VaultError> {
+        let id = Self::schedule_payment(
+            env.clone(),
+            proposer,
+            recipient,
+            token_addr,
+            amount,
+            memo,
+            interval,
+            max_missed_payments,
+        )?;
+        let mut payment = storage::get_recurring_payment(&env, id)?;
+        payment.skip_holidays = skip_holidays;
+        payment.holiday_behavior = holiday_behavior;
+        storage::set_recurring_payment(&env, &payment);
+        Ok(id)
+    }
+
+    fn adjust_recurring_ledger(
+        env: &Env,
+        scheduled: u64,
+        skip_holidays: bool,
+        behavior: &HolidayBehavior,
+    ) -> u64 {
+        if !skip_holidays {
+            return scheduled;
+        }
+        let calendar = storage::get_holiday_calendar(env);
+        let mut adjusted = scheduled;
+        let move_earlier = *behavior == HolidayBehavior::PayEarly;
+        let ledgers_per_day = storage::DAY_IN_LEDGERS as u64;
+        for _ in 0..64 {
+            if !Self::is_non_business_ledger(&calendar, adjusted) {
+                break;
+            }
+            let day = adjusted / ledgers_per_day;
+            let weekend = day % 7 == 5 || day % 7 == 6;
+            adjusted = if weekend && move_earlier {
+                day.saturating_mul(ledgers_per_day).saturating_sub(1)
+            } else if weekend {
+                day.saturating_add(1).saturating_mul(ledgers_per_day)
+            } else if move_earlier {
+                adjusted.saturating_sub(1)
+            } else {
+                adjusted.saturating_add(1)
+            };
+        }
+        adjusted
+    }
+
+    fn is_non_business_ledger(calendar: &HolidayCalendar, ledger: u64) -> bool {
+        let mut low = 0u32;
+        let mut high = calendar.holiday_ledgers.len();
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let value = calendar.holiday_ledgers.get(mid).unwrap();
+            if value == ledger {
+                return true;
+            }
+            if value < ledger {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let day = ledger / storage::DAY_IN_LEDGERS as u64;
+        day % 7 == 5 || day % 7 == 6
     }
 }

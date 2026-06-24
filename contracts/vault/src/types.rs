@@ -101,6 +101,11 @@ pub struct InitConfig {
 pub struct Config {
     /// List of authorized signers
     pub signers: Vec<Address>,
+    /// Per-signer unilateral spending authority.
+    pub signer_tiers: Map<Address, SignerTier>,
+    /// Amounts above this threshold require approval from every signer.
+    /// A value of zero disables the override.
+    pub full_quorum_threshold: i128,
     /// Required number of approvals (M in M-of-N)
     pub threshold: u32,
     /// Minimum number of votes (approvals + abstentions) required before threshold is checked.
@@ -297,6 +302,18 @@ pub struct Delegation {
     pub created_at: u64,
     pub expiry_ledger: u64,
     pub is_active: bool,
+    /// Number of delegation hops from this signer to the final delegate.
+    pub chain_depth: u8,
+}
+
+/// Per-signer authority for unilateral treasury transfers.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignerTier {
+    Junior(i128),
+    Senior(i128),
+    /// Principals deliberately have no unilateral spending authority.
+    Principal,
 }
 
 #[contracttype]
@@ -533,6 +550,21 @@ pub enum RecurringStatus {
     Stopped = 2,
 }
 
+/// How a recurring payment due on a non-business ledger is adjusted.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HolidayBehavior {
+    PayEarly,
+    PayLate,
+}
+
+/// Sorted list of administratively maintained holiday ledgers.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HolidayCalendar {
+    pub holiday_ledgers: Vec<u64>,
+}
+
 /// Recurring payment schedule
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -555,6 +587,25 @@ pub struct RecurringPayment {
     pub max_missed_payments: u32,
     /// Ledger at which the payment was paused (0 = not paused)
     pub paused_at_ledger: u64,
+    /// Whether holiday/weekend adjustment is enabled.
+    pub skip_holidays: bool,
+    /// Direction used when the scheduled ledger is not a business ledger.
+    pub holiday_behavior: HolidayBehavior,
+}
+
+/// On-chain token vesting schedule.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VestingSchedule {
+    pub id: u64,
+    pub beneficiary: Address,
+    pub token: Address,
+    pub total: i128,
+    pub cliff_ledger: u32,
+    pub start_ledger: u32,
+    pub end_ledger: u32,
+    pub claimed: i128,
+    pub cancelled: bool,
 }
 
 // ============================================================================
@@ -1753,8 +1804,6 @@ pub struct ExecutionSnapshot {
     pub was_in_priority_queue: bool,
 }
 
-
-
 /// Details of a transfer
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -1766,5 +1815,3 @@ pub struct TransferDetails {
     /// Amount to transfer
     pub amount: i128,
 }
-
-
