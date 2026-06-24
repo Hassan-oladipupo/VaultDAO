@@ -69,6 +69,10 @@ const MAX_TAGS: u32 = 10;
 /// Maximum number of attachments per proposal
 const MAX_ATTACHMENTS: u32 = 10;
 
+/// Minimum admin rotation delay: 1440 ledgers ≈ 24 hours at 5 s/ledger.
+/// Enforced at both vault initialization and `set_admin_rotation_delay`.
+const MIN_ADMIN_ROTATION_DELAY: u64 = 1_440;
+
 /// Minimum length for an attachment CID (CIDv0 = 46 chars, CIDv1 base32 = 59+ chars)
 const MIN_ATTACHMENT_LEN: u32 = 46;
 
@@ -98,6 +102,8 @@ fn calculate_expiration_ledger(config: &Config, priority: &Priority, current_led
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_admin_rotation;
 #[cfg(test)]
 mod test_audit;
 #[cfg(test)]
@@ -210,6 +216,10 @@ impl VaultDAO {
             return Err(VaultError::QuorumTooHigh);
         }
         if config.spending_limit <= 0 || config.daily_limit <= 0 || config.weekly_limit <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        // Enforce minimum admin rotation delay (≥ 24 h worth of ledgers)
+        if config.admin_rotation_delay < MIN_ADMIN_ROTATION_DELAY {
             return Err(VaultError::InvalidAmount);
         }
 
