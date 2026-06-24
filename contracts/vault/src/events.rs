@@ -673,6 +673,20 @@ pub fn emit_retries_exhausted(env: &Env, proposal_id: u64, total_attempts: u32) 
     );
 }
 
+pub fn emit_dead_letter_added(env: &Env, record_id: u64, proposal_id: u64, retry_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "dead_letter_added"), record_id),
+        (proposal_id, retry_count),
+    );
+}
+
+pub fn emit_dead_letter_processed(env: &Env, record_id: u64, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "dead_letter_proc"), record_id),
+        admin.clone(),
+    );
+}
+
 // ============================================================================
 // Subscription Events (feature/subscription-system)
 // ============================================================================
@@ -735,6 +749,20 @@ pub fn emit_subscription_upgraded(
 pub fn emit_subscription_expired(env: &Env, subscription_id: u64) {
     env.events()
         .publish((Symbol::new(env, "subscription_expired"),), subscription_id);
+}
+
+pub fn emit_subscription_paused(env: &Env, subscription_id: u64, paused_by: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "subscription_paused"), subscription_id),
+        paused_by.clone(),
+    );
+}
+
+pub fn emit_subscription_resumed(env: &Env, subscription_id: u64, resumed_by: &Address, pause_duration: u64) {
+    env.events().publish(
+        (Symbol::new(env, "subscription_resumed"), subscription_id),
+        (resumed_by.clone(), pause_duration),
+    );
 }
 
 // ============================================================================

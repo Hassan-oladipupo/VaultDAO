@@ -1169,6 +1169,8 @@ pub struct RetryConfig {
     pub max_retries: u32,
     /// Initial backoff period in ledgers before first retry (~5 sec/ledger)
     pub initial_backoff_ledgers: u64,
+    /// Maximum backoff delay in ledgers (cap for exponential growth)
+    pub max_retry_delay: u64,
 }
 
 /// Tracks retry state for a specific proposal execution
@@ -1181,6 +1183,18 @@ pub struct RetryState {
     pub next_retry_ledger: u64,
     /// Ledger of the last retry attempt
     pub last_retry_ledger: u64,
+}
+
+/// Record for proposals that exhausted all retry attempts
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DeadLetterRecord {
+    pub id: u64,
+    pub proposal_id: u64,
+    pub retry_count: u32,
+    pub last_error: u32,
+    pub added_at: u64,
+    pub processed: bool,
 }
 
 // ============================================================================
@@ -1207,6 +1221,7 @@ pub enum SubscriptionStatus {
     Cancelled = 1,
     Expired = 2,
     Suspended = 3,
+    Paused = 4,
 }
 
 /// Subscription record
@@ -1228,6 +1243,8 @@ pub struct Subscription {
     pub auto_renew: bool,
     /// Number of ledgers after next_renewal_ledger during which late renewal is still accepted
     pub grace_period_ledgers: u64,
+    /// Ledger at which the subscription was paused (0 = not paused)
+    pub paused_at_ledger: u64,
 }
 
 /// Payment record for subscription tracking

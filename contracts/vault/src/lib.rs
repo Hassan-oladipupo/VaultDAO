@@ -1693,18 +1693,62 @@ impl VaultDAO {
             return Err(VaultError::RetryError);
         }
 
-        // Check max retries — if exhausted, expire the proposal
+        // Check max retries — if exhausted, expire and move to dead letter queue
         if retry_state.retry_count >= config.retry_config.max_retries {
             let mut expired = proposal;
             expired.status = ProposalStatus::Expired;
             storage::set_proposal(&env, &expired);
             events::emit_retries_exhausted(&env, proposal_id, retry_state.retry_count);
+
+            let dl_count = storage::get_dead_letter_count(&env);
+            if dl_count < 50 {
+                let dl_id = storage::increment_dead_letter_count(&env);
+                let dl_record = DeadLetterRecord {
+                    id: dl_id,
+                    proposal_id,
+                    retry_count: retry_state.retry_count,
+                    last_error: VaultError::RetryError as u32,
+                    added_at: current_ledger,
+                    processed: false,
+                };
+                storage::set_dead_letter(&env, &dl_record);
+                events::emit_dead_letter_added(&env, dl_id, proposal_id, retry_state.retry_count);
+            }
+
             return Err(VaultError::RetryError);
         }
 
         // Delegate to execute_proposal which handles the full execution path
         // including retry scheduling on failure
         Self::execute_proposal(env, executor, proposal_id)
+    }
+
+    pub fn process_dead_letter(
+        env: Env,
+        admin: Address,
+        record_id: u64,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let mut record = storage::get_dead_letter(&env, record_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+
+        if record.processed {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+
+        record.processed = true;
+        storage::set_dead_letter(&env, &record);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_dead_letter_processed(&env, record_id, &admin);
+
+        Ok(())
     }
 
     /// Execute a batch transaction atomically: either all proposals succeed or
@@ -10975,6 +11019,7 @@ impl VaultDAO {
             last_payment_ledger: current_ledger,
             auto_renew,
             grace_period_ledgers,
+            paused_at_ledger: 0,
         };
 
         storage::set_subscription(&env, &sub);
@@ -11012,6 +11057,9 @@ impl VaultDAO {
         }
         if sub.status == SubscriptionStatus::Expired {
             return Err(VaultError::SubscriptionAlreadyExpired);
+        }
+        if sub.status == SubscriptionStatus::Paused {
+            return Err(VaultError::SubscriptionPaused);
         }
         if sub.status != SubscriptionStatus::Active {
             return Err(VaultError::SubscriptionNotActive);
@@ -11221,6 +11269,76 @@ impl VaultDAO {
         storage::extend_instance_ttl(&env);
 
         events::emit_subscription_renewed(&env, subscription_id, payment_number, amount);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Subscription Pause/Resume (#1073)
+    // ========================================================================
+
+    pub fn pause_subscription(
+        env: Env,
+        caller: Address,
+        subscription_id: u64,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut sub = storage::get_subscription(&env, subscription_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if caller != sub.subscriber && !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if sub.status == SubscriptionStatus::Paused {
+            return Err(VaultError::SubscriptionPaused);
+        }
+        if sub.status != SubscriptionStatus::Active {
+            return Err(VaultError::SubscriptionNotActive);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        sub.status = SubscriptionStatus::Paused;
+        sub.paused_at_ledger = current_ledger;
+
+        storage::set_subscription(&env, &sub);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_subscription_paused(&env, subscription_id, &caller);
+
+        Ok(())
+    }
+
+    pub fn resume_subscription(
+        env: Env,
+        caller: Address,
+        subscription_id: u64,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut sub = storage::get_subscription(&env, subscription_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if caller != sub.subscriber && !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if sub.status != SubscriptionStatus::Paused {
+            return Err(VaultError::SubscriptionNotActive);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let pause_duration = current_ledger.saturating_sub(sub.paused_at_ledger);
+
+        sub.next_renewal_ledger = sub.next_renewal_ledger.saturating_add(pause_duration);
+        sub.status = SubscriptionStatus::Active;
+        sub.paused_at_ledger = 0;
+
+        storage::set_subscription(&env, &sub);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_subscription_resumed(&env, subscription_id, &caller, pause_duration);
 
         Ok(())
     }

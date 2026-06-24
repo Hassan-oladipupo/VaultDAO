@@ -30,7 +30,7 @@ use crate::types::{
     HolidayCalendar, RoleAssignment, SignerTier, StakeRecord, StakingConfig, Subscription,
     SwapProposal, SwapResult, VestingSchedule,
     TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy, BridgeConfig,
-    CrossChainProposal,
+    CrossChainProposal, DeadLetterRecord,
 };
 
 /// Core storage key definitions (kept minimal to avoid size limits)
@@ -2025,6 +2025,37 @@ pub fn set_retry_state(env: &Env, proposal_id: u64, state: &RetryState) {
     env.storage()
         .persistent()
         .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+}
+
+// ============================================================================
+// Dead Letter Queue
+// ============================================================================
+
+pub fn get_dead_letter(env: &Env, id: u64) -> Option<DeadLetterRecord> {
+    env.storage().persistent().get(&FeatureKey::DeadLetter(id))
+}
+
+pub fn set_dead_letter(env: &Env, record: &DeadLetterRecord) {
+    let key = FeatureKey::DeadLetter(record.id);
+    env.storage().persistent().set(&key, record);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_dead_letter_count(env: &Env) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::DeadLetterCount)
+        .unwrap_or(0)
+}
+
+pub fn increment_dead_letter_count(env: &Env) -> u64 {
+    let count = get_dead_letter_count(env) + 1;
+    env.storage()
+        .persistent()
+        .set(&FeatureKey::DeadLetterCount, &count);
+    count
 }
 
 // ============================================================================
